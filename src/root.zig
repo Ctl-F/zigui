@@ -11,6 +11,8 @@ pub const length = @import("core/length.zig");
 pub const flex = @import("core/flex.zig");
 pub const dirty = @import("core/dirty.zig");
 pub const tree = @import("core/tree.zig");
+pub const style = @import("core/style.zig");
+pub const layout = @import("core/layout.zig");
 pub const shadow = @import("core/shadow.zig");
 pub const draw_list = @import("core/draw_list.zig");
 
@@ -22,6 +24,8 @@ pub const Color = geometry.Color;
 pub const Length = length.Length;
 pub const DirtyFlags = dirty.DirtyFlags;
 pub const Tree = tree.Tree;
+pub const Style = style.Style;
+pub const Layout = layout.Layout;
 pub const DrawList = draw_list.DrawList;
 
 test {

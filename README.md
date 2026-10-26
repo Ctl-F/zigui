@@ -6,8 +6,8 @@ https://claude.ai/artifact/XGC2eMeVS2WEMebrHEk6iT
 
 ## Status
 
-Foundation layer only. Builds and passes all 57 tests on Zig 0.17.0
-(`zig build test`). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
+Foundation layer only. Builds and passes all tests on Zig 0.17.0
+(`zig build test`; 81 tests). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
 now exposing `field_names` / `field_types` instead of `fields` (`shadow.zig`).
 
 The shadow-checker tests intentionally trigger `ui_check` warnings, so the
@@ -25,7 +25,9 @@ src/core/
   length.zig         Length tagged union; resolve then clamp (min wins)
   flex.zig           flex main-axis solver (grow/shrink, freeze-and-redistribute)
   dirty.zig          DirtyFlags category bitset (one byte)
-  tree.zig           node tree on the pool: hierarchy ops, dirty propagation
+  tree.zig           node tree on the pool: hierarchy ops, dirty propagation, layout seeding
+  style.zig          Style: size/min/max, grow/shrink, direction, gap, padding, margin, align
+  layout.zig         flex layout pass: measure (bottom-up) then place (top-down)
   shadow.zig         comptime shadow-copy checker (void when checks are off)
   draw_list.zig      fixed-size command records, fixed capacity, no allocation
 ```
@@ -39,6 +41,11 @@ src/core/
 - Layout seeding: each boundary that gains layout work is pushed on an
   intrusive stack (links in `Node`, so no allocation). A layout pass loops on
   `Tree.popLayoutRoot()`; entries whose dirty bits were already cleared are skipped.
+- Layout (`layout.zig`): border-box sizing; margins join the main-axis solve;
+  percent is of the parent content box and falls back to auto (counted in
+  `Layout.circular_percent`) under a `fit` parent. Children are descended into
+  only if their size changed or they are dirty. A relayout boundary must have
+  a content-independent size.
 - `ui_checks` defaults on for Debug and ReleaseSafe, off otherwise. With it
   off, the shadow type is `void` and `verify` compiles to nothing.
   `-Dui_strict=true` makes the checker panic instead of warning.
@@ -48,8 +55,9 @@ src/core/
 
 ## Known gaps and next steps
 
-1. **Flex layout pass**: the main-axis solver exists (`flex.zig`); still needed
-   are the cross axis, alignment, padding, and walking the tree to call it.
+1. **Layout follow-ups**: text measurement callback (leaves use
+   `Node.intrinsic` for now), stack/absolute, split/scroll containers, wrap,
+   grid, and a calc-style `Length`.
 2. **Widget state blocks** (`props` / `out` extern structs) and listeners.
 3. **Software renderer** that executes a `DrawList` into a pixel buffer.
 4. **SDL3 platform shim** and the SDL3 GPU backend.

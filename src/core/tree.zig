@@ -8,8 +8,8 @@ const std = @import("std");
 const Handle = @import("handle.zig").Handle;
 const Pool = @import("pool.zig").Pool;
 const DirtyFlags = @import("dirty.zig").DirtyFlags;
-const Length = @import("length.zig").Length;
 const Rect = @import("geometry.zig").Rect;
+const Size = @import("geometry.zig").Size;
 
 /// Accessibility role. Reserved on every node from v0.1; platform bridges come later.
 pub const Role = enum(u16) {
@@ -44,16 +44,7 @@ pub const NodeFlags = packed struct(u16) {
     _reserved: u11 = 0,
 };
 
-pub const Style = struct {
-    width: Length = Length.auto,
-    height: Length = Length.auto,
-    min_width: Length = Length.auto,
-    max_width: Length = Length.auto,
-    min_height: Length = Length.auto,
-    max_height: Length = Length.auto,
-    grow: f32 = 0,
-    shrink: f32 = 1,
-};
+pub const Style = @import("style.zig").Style;
 
 pub const Node = struct {
     parent: Handle = Handle.invalid,
@@ -70,6 +61,13 @@ pub const Node = struct {
     style: Style = .{},
     /// Layout result in the parent's coordinate space (logical pixels).
     rect: Rect = .{},
+    /// Content size of a leaf (for example measured text), set by its widget.
+    /// Ignored for nodes that have children.
+    intrinsic: Size = .{},
+    /// Natural border-box size computed by the layout pass (content plus padding).
+    measured: Size = .{},
+    /// Transient: set by the layout pass while it decides which children to descend into.
+    place_pending: bool = false,
     user_data: ?*anyopaque = null,
 
     /// Intrusive link for the tree's dirty-boundary stack (engine-internal).
