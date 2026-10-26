@@ -32,8 +32,22 @@ pub const FieldColors = struct {
     caret: Color = Color.rgb(0xdf, 0xe1, 0xe5),
 };
 
+pub const EditorColors = struct {
+    background: Color = Color.rgb(0x1e, 0x1f, 0x22),
+    gutter_background: Color = Color.rgb(0x1e, 0x1f, 0x22),
+    gutter_text: Color = Color.rgb(0x6b, 0x6f, 0x76),
+    gutter_text_active: Color = Color.rgb(0xc4, 0xc7, 0xcc),
+    text: Color = Color.rgb(0xd4, 0xd4, 0xd4),
+    current_line: Color = Color.rgb(0x26, 0x28, 0x2c),
+    selection: Color = Color.rgba(0x35, 0x74, 0xf0, 0x80),
+    selection_unfocused: Color = Color.rgba(0x6b, 0x6f, 0x76, 0x60),
+    caret: Color = Color.rgb(0xe8, 0xea, 0xed),
+    scrollbar: Color = Color.rgba(0xff, 0xff, 0xff, 0x28),
+};
+
 pub const Theme = struct {
     field: FieldColors = .{},
+    editor: EditorColors = .{},
     /// Indexed by `button.Variant`.
     button_colors: [4]ButtonColors = .{
         // normal

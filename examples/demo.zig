@@ -49,7 +49,7 @@ const App = struct {
     cards: Handle = Handle.invalid,
     card_count: usize = 0,
     sidebar_visible: bool = true,
-    selected: usize = 2,
+    selected: usize = 0,
     items: [9]*Button = undefined,
     item_ctx: [9]SidebarItem = undefined,
     clicks: u32 = 0,
@@ -57,6 +57,12 @@ const App = struct {
     filter: ?*zigui.TextField = null,
     buttons: [3]*Button = undefined,
     names: [9][]const u8 = undefined,
+    paths: [9][]const u8 = undefined,
+    editor: ?*zigui.CodeEditor = null,
+    io: std.Io = undefined,
+    gpa: std.mem.Allocator = undefined,
+    last_status: [160]u8 = undefined,
+    last_status_len: usize = 0,
     card_serial: usize = 0,
 
     fn addNode(self: *App, parent: Handle, style: zigui.Style, visual: zigui.tree.Visual) !Handle {
@@ -82,6 +88,19 @@ fn addCard(a: *App) !void {
     l.props.color = Color.white;
 }
 
+/// Load the file behind sidebar row `index` into the editor.
+fn openFile(a: *App, index: usize) void {
+    const ed = a.editor orelse return;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(a.io, a.paths[index], a.gpa, .limited(32 * 1024 * 1024)) catch |err| {
+        std.log.warn("could not open {s}: {s}", .{ a.paths[index], @errorName(err) });
+        return;
+    };
+    a.ui.loadCodeEditorText(ed, bytes, true) catch {
+        a.gpa.free(bytes);
+        return;
+    };
+}
+
 fn onSelectItem(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
     const ctx: *SidebarItem = @ptrCast(@alignCast(user.?));
     const a = ctx.app;
@@ -89,6 +108,7 @@ fn onSelectItem(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
     a.ui.setButtonVariant(a.items[a.selected], .flat);
     a.selected = ctx.index;
     a.ui.setButtonVariant(a.items[a.selected], .primary);
+    openFile(a, a.selected);
 }
 
 // ---- commands (shared by shortcuts and buttons) ----
@@ -153,6 +173,7 @@ fn moveSelection(a: *App, step: isize) void {
     a.ui.setButtonVariant(a.items[a.selected], .primary);
     a.ui.setFocus(a.items[a.selected].node);
     a.clicks += 1;
+    openFile(a, a.selected);
 }
 
 fn cmdNextFile(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
@@ -230,6 +251,7 @@ fn onFilterSubmit(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
         a.ui.setButtonVariant(a.items[a.selected], .flat);
         a.selected = i;
         a.ui.setButtonVariant(b, .primary);
+        openFile(a, i);
         return;
     }
 }
@@ -282,7 +304,8 @@ fn buildUi(a: *App) !void {
         .padding = Edges.all(8),
         .gap = Length.px(4),
     }, .{ .background = rgb(0x2b2d30), .radius = 8 });
-    const names = [9][]const u8{ "root.zig", "layout.zig", "paint.zig", "event.zig", "input.zig", "ui.zig", "button.zig", "theme.zig", "software.zig" };
+    const names = [9][]const u8{ "editor.zig", "piece_table.zig", "document.zig", "code_editor.zig", "layout.zig", "ui.zig", "shortcuts.zig", "demo.zig", "README.md" };
+    const paths = [9][]const u8{ "src/editor/editor.zig", "src/editor/piece_table.zig", "src/editor/document.zig", "src/widgets/code_editor.zig", "src/core/layout.zig", "src/core/ui.zig", "src/core/shortcuts.zig", "examples/demo.zig", "README.md" };
     for (0..a.items.len) |i| {
         const indent: f32 = @floatFromInt((i % 3) * 10);
         const b = try ui.createButton(a.sidebar, .{
@@ -293,6 +316,7 @@ fn buildUi(a: *App) !void {
         });
         try ui.setButtonText(b, names[i]);
         a.names[i] = names[i];
+        a.paths[i] = paths[i];
         b.props.text_align = .start;
         ui.setButtonVariant(b, if (i == a.selected) .primary else .flat);
         a.items[i] = b;
@@ -304,33 +328,10 @@ fn buildUi(a: *App) !void {
     const content = try a.addNode(a.body, .{ .direction = .column, .grow = 1, .gap = Length.px(8) }, .{});
     a.cards = try a.addNode(content, .{ .direction = .row, .height = Length.px(120), .gap = Length.px(8), .shrink = 0 }, .{});
     for (0..4) |_| try addCard(a);
-    const editor = try a.addNode(content, .{ .grow = 1, .padding = Edges.all(12), .direction = .column, .gap = Length.px(6) }, .{
-        .background = rgb(0x26282c),
-        .border_color = rgb(0x3d3f45),
-        .border_width = 1,
-        .radius = 8,
-    });
-    tree.get(editor).?.flags.clip_children = true;
-    const code = [_]struct { text: []const u8, color: u24 }{
-        .{ .text = "// zigui: retained-mode UI for Zig", .color = 0x6a9955 },
-        .{ .text = "const std = @import(\"std\");", .color = 0xd4d4d4 },
-        .{ .text = "const zigui = @import(\"zigui\");", .color = 0xd4d4d4 },
-        .{ .text = "", .color = 0xd4d4d4 },
-        .{ .text = "pub fn main(init: std.process.Init) !void {", .color = 0x569cd6 },
-        .{ .text = "    var ui = try zigui.Ui.init(init.gpa);", .color = 0xd4d4d4 },
-        .{ .text = "    defer ui.deinit();", .color = 0xd4d4d4 },
-        .{ .text = "", .color = 0xd4d4d4 },
-        .{ .text = "    const btn = try ui.createButton(root, .{});", .color = 0xd4d4d4 },
-        .{ .text = "    try ui.setButtonText(btn, \"Hello, text!\");", .color = 0xce9178 },
-        .{ .text = "    btn.props.on_click = onClick;", .color = 0xd4d4d4 },
-        .{ .text = "}", .color = 0x569cd6 },
-    };
-    for (code) |line| {
-        const l = try ui.createLabel(editor, .{ .height = Length.px(18), .shrink = 0 }, line.text);
-        l.props.font = .mono;
-        l.props.size = 13;
-        l.props.color = rgb(line.color);
-    }
+    const ed = try ui.createCodeEditor(content, .{ .grow = 1 });
+    ed.props.size = 13;
+    a.editor = ed;
+    openFile(a, a.selected);
 
     // Status bar.
     const status_bar = try a.addNode(tree.root, .{ .height = Length.px(24), .shrink = 0, .padding = Edges.xy(10, 0) }, .{ .background = rgb(0x3574f0) });
@@ -441,7 +442,7 @@ pub fn main(init: std.process.Init) !void {
         std.log.warn("no UI font found (set ZIGUI_FONT=/path/to/font.ttf); text will not be drawn", .{});
     }
     ui.clipboard = .{ .get = clipGet, .set = clipSet };
-    var state: App = .{ .ui = &ui };
+    var state: App = .{ .ui = &ui, .io = io, .gpa = gpa };
     try buildUi(&state);
     try setupCommands(&state);
 
@@ -455,7 +456,6 @@ pub fn main(init: std.process.Init) !void {
     var fb = try zigui.software.Framebuffer.init(gpa, 1, 1);
     defer fb.deinit(gpa);
 
-    var last_clicks: u32 = std.math.maxInt(u32);
     var force = true; // first frame, resize, or expose: redraw even if the tree is clean
 
     const screenshot = init.environ_map.get("ZIGUI_SCREENSHOT");
@@ -466,18 +466,31 @@ pub fn main(init: std.process.Init) !void {
     var running = true;
     while (running) {
         _ = ui.tick(sdl.ticks());
-        if (state.clicks != last_clicks) {
-            last_clicks = state.clicks;
-            var buf: [64]u8 = undefined;
-            const title = std.mem.printSentinel(&buf, "zigui demo - {d} clicks, {d} cards", .{ state.clicks, state.card_count }, 0) catch "zigui demo";
-            window.setTitle(title);
-            if (state.status) |st| {
-                var sbuf: [96]u8 = undefined;
-                const msg = std.fmt.bufPrint(&sbuf, "{d} clicks  |  {d} cards  |  selected: sidebar row {d}", .{ state.clicks, state.card_count, state.selected + 1 }) catch "";
+        // Settle widget state from last iteration's input, then refresh the
+        // status text from it (so it never lags a keystroke behind).
+        ui.update();
+        if (state.status) |st| {
+            const ed = state.editor.?;
+            var sbuf: [160]u8 = undefined;
+            const msg = std.fmt.bufPrint(&sbuf, "{s}   Ln {d}, Col {d}{s}   |   {d} lines   |   {d} cursor(s)   |   {d} cards   |   {d} clicks", .{
+                state.names[state.selected],
+                ed.out.caret_line + 1,
+                ed.out.caret_column + 1,
+                if (ed.out.modified) "   (modified)" else "",
+                ed.out.line_count,
+                ed.out.selection_count,
+                state.card_count,
+                state.clicks,
+            }) catch "";
+            if (!std.mem.eql(u8, msg, state.last_status[0..state.last_status_len])) {
+                @memcpy(state.last_status[0..msg.len], msg);
+                state.last_status_len = msg.len;
                 try ui.setLabelText(st, msg);
+                var tbuf: [96]u8 = undefined;
+                const title = std.mem.printSentinel(&tbuf, "zigui demo - {s}{s}", .{ state.names[state.selected], if (ed.out.modified) " *" else "" }, 0) catch "zigui demo";
+                window.setTitle(title);
             }
         }
-
         ui.update();
         if (force or ui.isDirty()) {
             const px = window.pixelSize();

@@ -7,7 +7,7 @@ https://claude.ai/artifact/XGC2eMeVS2WEMebrHEk6iT
 ## Status
 
 Foundation layer only. Builds and passes all tests on Zig 0.17.0
-(`zig build test`; 218 tests). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
+(`zig build test`; 276 tests). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
 now exposing `field_names` / `field_types` instead of `fields` (`shadow.zig`).
 
 The shadow-checker tests intentionally trigger `ui_check` warnings, so the
@@ -40,6 +40,8 @@ src/core/
 src/widgets/
   label.zig          Label state block (text, font, size, color, align)
   text_field.zig     TextField state block: single-line editable text
+  code_editor.zig    CodeEditor: multi-line editor widget (virtualized painting, gutter)
+  (core/clipboard.zig  Clipboard interface supplied by the platform)
   common.zig         shared widget types (Text)
   button.zig         Button state block (props/out/node), listener, default painter
   theme.zig          Theme: colors, metrics, swappable painters
@@ -50,6 +52,11 @@ src/widgets/
 src/render/
   software.zig       software rasterizer: DrawList to RGBA8 (SDF-based AA)
   png.zig            tiny PNG encoder for screenshots
+src/editor/
+  piece_table.zig    piece table: treap with cached byte/newline counts (line index)
+  document.zig       Document: one edit path (Op/Command), change records, lines, columns
+  selection.zig      SelectionSet: sorted, merged (anchor, head) ranges; one cursor = list of one
+  editor.zig         Editor: motion, edits, transactions, undo/redo, multi-cursor
 src/text/
   font.zig           font backend interface (swappable) + synthetic TestFont
   gap_buffer.zig    byte gap buffer (storage for single-line fields)
@@ -83,6 +90,11 @@ chord), Ctrl+B toggles the sidebar, Ctrl+F focuses the filter, Up/Down move
 through files while focus is in the sidebar (panel scope), Esc clears the filter
 while it has focus (widget scope). The header buttons run the same commands and
 show their shortcuts.
+
+The sidebar lists real project files: click one (or use Up/Down while focus is in
+the sidebar) to open it in the editor, which is a full `CodeEditor`: typing,
+Ctrl+Z / Ctrl+Y, multi-cursor (Alt+click, Ctrl+Alt+Up/Down), selection by
+mouse/keyboard, clipboard, scrolling. The demo never writes files.
 
 The demo has working buttons (header "+ Card" / "- Card" / "Toggle sidebar" and
 selectable sidebar rows), real text in a UI font and a monospace font, and a
@@ -164,6 +176,27 @@ override with `ZIGUI_FONT=/path/ui.ttf` and `ZIGUI_MONO_FONT=/path/mono.ttf`.
   Auto-repeat re-runs only commands marked repeatable. Buttons can be linked to
   a command (`setButtonCommand`): they run it on click and mirror its enabled
   state.
+- Editor core: text lives in a piece table (original file borrowed and never
+  modified, plus an append-only add buffer). Pieces sit in a treap whose nodes
+  cache subtree byte and newline counts, and newlines inside a piece are found by
+  binary search over a per-buffer newline index, so finding line N or the line of
+  an offset is O(log pieces) and never scans text. Typing at one spot grows one
+  piece. Every change goes through `Document.apply` as an `Op` (insert or delete
+  of exact bytes), so it is reversible by construction; history stores `Command`s
+  that own their text, independent of the buffers. Each applied command also
+  appends a `Change` (offset, lengths, line range) for subscribers.
+  Selections are a sorted, merged list (a cursor is a list of one). Edits are
+  replace-ranges, one per selection, applied back to front inside one undo step.
+  Steps group consecutive typing / backspace / delete-forward until a pause, a
+  cursor move, a change of kind, or a save; each records selections before and
+  after. Cursor movement is not undoable. A saved-state marker tracks `modified`
+  (and notices when redo history that held the saved state is discarded).
+  Columns count code points; "\r\n" is one character and one line terminator.
+- Code editor widget: only visible lines are built and drawn (tabs expanded,
+  shaped through the text system), so cost does not grow with document size. Caret
+  stops come from the same shaping loop as the glyphs. The widget has a paint hook
+  on the node (`Node.paint_hook`) for custom content. Scroll follows the primary
+  caret after edits and moves; the wheel scrolls independently.
 - Layout (`layout.zig`): border-box sizing; margins join the main-axis solve;
   percent is of the parent content box and falls back to auto (counted in
   `Layout.circular_percent`) under a `fit` parent. Children are descended into
@@ -202,7 +235,13 @@ override with `ZIGUI_FONT=/path/ui.ttf` and `ZIGUI_MONO_FONT=/path/mono.ttf`.
    contrast tuning, GPU atlas upload (pages already track a dirty flag), the
    monospace draw-list record from the design doc (positions are still emitted
    per glyph). Text selection, caret, IME, and the text field/editor widgets.
-6. Piece-table editor core with reversible command log.
+6. Editor follow-ups: syntax highlighting (subscribe to `Document.changes`;
+   per-line state with incremental re-lex), find/replace, soft wrap, code folding,
+   bracket matching, add-next-occurrence, move/duplicate lines, rectangular
+   selection, scrollbar dragging, file I/O (memory-mapping the original instead of
+   reading it; the newline index scan could move off-thread), add-buffer
+   compaction, bounded undo history, grapheme-cluster cursor movement, bidirectional
+   text, IME preedit, multi-document tabs, accessibility text-range interface.
 7. The accessibility `label` on nodes is still unowned (widget text is owned).
 
 Tests live next to the code (`test` blocks) and run through `src/root.zig`.

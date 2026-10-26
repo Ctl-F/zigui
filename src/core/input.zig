@@ -45,6 +45,11 @@ pub const Input = struct {
     focus_seen: Handle = Handle.invalid,
     /// True if the most recent input was from the keyboard.
     keyboard: bool = false,
+    /// Modifier bits as of the last key event; stamped on pointer events.
+    mods: u32 = 0,
+    /// Last known pointer position (window coordinates), for wheel events.
+    pointer_x: f32 = 0,
+    pointer_y: f32 = 0,
 
     /// True if `a` is `n` or one of its ancestors.
     fn selfOrAncestor(tree: *Tree, a: Handle, n: Handle) bool {
@@ -90,10 +95,13 @@ pub const Input = struct {
     }
 
     pub fn pointerMove(self: *Input, tree: *Tree, x: f32, y: f32) void {
+        self.pointer_x = x;
+        self.pointer_y = y;
         const hit = tree.hitTest(x, y);
         self.setHover(tree, hit, x, y);
         const target = if (tree.isValid(self.pressed)) self.pressed else (hit orelse return);
-        _ = send(tree, .pointer_move, target, x, y);
+        var ev: Event = .{ .kind = .pointer_move, .target = target, .x = x, .y = y, .mods = self.mods };
+        dispatch.dispatch(tree, &ev);
     }
 
     pub fn pointerButton(self: *Input, tree: *Tree, x: f32, y: f32, button: u32, down: bool) void {
@@ -102,6 +110,8 @@ pub const Input = struct {
 
     /// Like `pointerButton`, with the platform's consecutive-press count.
     pub fn pointerButtonEx(self: *Input, tree: *Tree, x: f32, y: f32, button: u32, down: bool, clicks: u32) void {
+        self.pointer_x = x;
+        self.pointer_y = y;
         const hit = tree.hitTest(x, y);
         self.setHover(tree, hit, x, y);
 
@@ -113,7 +123,7 @@ pub const Input = struct {
                     self.pressed = h;
                     self.pressed_button = button;
                 }
-                var ev: Event = .{ .kind = .pointer_down, .target = h, .x = x, .y = y, .button = button, .clicks = clicks };
+                var ev: Event = .{ .kind = .pointer_down, .target = h, .x = x, .y = y, .button = button, .clicks = clicks, .mods = self.mods };
                 dispatch.dispatch(tree, &ev);
                 handled = ev.handled;
             }
@@ -123,7 +133,7 @@ pub const Input = struct {
 
         const captured = tree.isValid(self.pressed);
         const target = if (captured) self.pressed else (hit orelse return);
-        var up: Event = .{ .kind = .pointer_up, .target = target, .x = x, .y = y, .button = button };
+        var up: Event = .{ .kind = .pointer_up, .target = target, .x = x, .y = y, .button = button, .mods = self.mods };
         dispatch.dispatch(tree, &up);
 
         if (captured and button == self.pressed_button) {
@@ -182,6 +192,7 @@ pub const Input = struct {
     /// it. Returns true if a node, the hook, or Tab navigation used the key.
     pub fn keyEx(self: *Input, tree: *Tree, k: keys.Key, mods: u32, down: bool, repeat: bool, scancode: u32, keycode: u32, hook: ?KeyHook) bool {
         self.syncFocus(tree);
+        self.mods = mods;
         if (down) self.keyboard = true;
         const target = if (tree.isValid(tree.focused)) tree.focused else tree.root;
         var ev: Event = .{
@@ -218,9 +229,8 @@ pub const Input = struct {
     }
 
     pub fn wheel(self: *Input, tree: *Tree, x: f32, y: f32, dx: f32, dy: f32) void {
-        _ = self;
         const hit = tree.hitTest(x, y) orelse return;
-        var ev: Event = .{ .kind = .wheel, .target = hit, .x = x, .y = y, .dx = dx, .dy = dy };
+        var ev: Event = .{ .kind = .wheel, .target = hit, .x = x, .y = y, .dx = dx, .dy = dy, .mods = self.mods };
         dispatch.dispatch(tree, &ev);
     }
 };

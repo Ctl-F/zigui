@@ -87,6 +87,7 @@ pub const Node = struct {
     listeners: ?*ListenerList = null,
     /// Shaped text drawn inside this node's content box; owned by the node.
     text: ?*TextBlock = null,
+    paint_hook: ?PaintHook = null,
 
     /// Intrusive link for the tree's dirty-boundary stack (engine-internal).
     layout_queue_next: Handle = Handle.invalid,
@@ -95,6 +96,14 @@ pub const Node = struct {
 };
 
 pub const ListenerList = std.ArrayListUnmanaged(event.Listener);
+
+/// Custom painting for widgets that draw their own content (the code editor):
+/// called by the paint pass after the node's background, inside its clip,
+/// with the node's rect in window coordinates. It must keep push/pop balanced.
+pub const PaintHook = struct {
+    ctx: *anyopaque,
+    run: *const fn (ctx: *anyopaque, abs: Rect, list: *@import("draw_list.zig").DrawList) @import("draw_list.zig").Error!void,
+};
 
 pub const TreeError = error{
     InvalidHandle,

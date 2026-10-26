@@ -39,10 +39,10 @@ fn paintNode(tree: *Tree, h: Handle, ox: f32, oy: f32, list: *DrawList) Error!vo
         try list.strokeRoundedRect(abs, v.border_width, v.radius, Paint.solid(v.border_color));
     }
 
-    if (node.text) |block| try paintText(block, node.style.padding, abs, list);
-
     const clip = node.flags.clip_children;
     if (clip) try list.pushClip(abs);
+    if (node.text) |block| try paintText(block, node.style.padding, abs, list);
+    if (node.paint_hook) |hook| try hook.run(hook.ctx, abs, list);
     var it = tree.children(h);
     while (it.next()) |c| try paintNode(tree, c, abs.x, abs.y, list);
     if (clip) _ = try list.popClip();

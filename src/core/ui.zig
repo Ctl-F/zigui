@@ -32,6 +32,8 @@ const TextSystem = @import("../text/system.zig").TextSystem;
 const text_block = @import("../text/block.zig");
 const Color = geometry.Color;
 const text_field = @import("../widgets/text_field.zig");
+const code_editor = @import("../widgets/code_editor.zig");
+const EditorCore = @import("../editor/editor.zig").Editor;
 const style_mod = @import("style.zig");
 const LineEditor = @import("../text/line_editor.zig").LineEditor;
 const Stop = @import("../text/system.zig").Stop;
@@ -53,17 +55,12 @@ const CommandLink = struct {
 const Button = button.Button;
 const Label = label.Label;
 const TextField = text_field.TextField;
+const CodeEditor = code_editor.CodeEditor;
 
 /// How long the caret stays on or off, in milliseconds.
 const blink_ms: u64 = 530;
 
-/// Clipboard access supplied by the platform layer.
-pub const Clipboard = struct {
-    ctx: ?*anyopaque = null,
-    /// Returns the clipboard text allocated with `gpa`, or null if empty/unavailable.
-    get: *const fn (ctx: ?*anyopaque, gpa: std.mem.Allocator) ?[]u8,
-    set: *const fn (ctx: ?*anyopaque, text: []const u8) void,
-};
+pub const Clipboard = @import("clipboard.zig").Clipboard;
 
 const FieldSlot = struct {
     block: TextField,
@@ -102,6 +99,7 @@ pub const Ui = struct {
     buttons: Pool(ButtonSlot, 64),
     labels: Pool(LabelSlot, 64),
     fields: Pool(FieldSlot, 64),
+    editors: Pool(code_editor.Slot, 16),
     clipboard: ?Clipboard = null,
     /// Last time passed to `tick`, in milliseconds.
     now_ms: u64 = 0,
@@ -119,6 +117,7 @@ pub const Ui = struct {
             .buttons = Pool(ButtonSlot, 64).init(gpa),
             .labels = Pool(LabelSlot, 64).init(gpa),
             .fields = Pool(FieldSlot, 64).init(gpa),
+            .editors = Pool(code_editor.Slot, 16).init(gpa),
             .commands = commands_mod.Commands.init(gpa),
             .shortcuts = shortcuts_mod.Shortcuts.init(gpa),
         };
@@ -139,6 +138,9 @@ pub const Ui = struct {
         var fit = self.fields.iterator();
         while (fit.next()) |e| self.freeField(e.ptr);
         self.fields.deinit();
+        var eit = self.editors.iterator();
+        while (eit.next()) |e| e.ptr.deinit();
+        self.editors.deinit();
         self.text.deinit();
         self.layout.deinit();
         self.tree.deinit();
@@ -514,6 +516,8 @@ pub const Ui = struct {
                 changed = true;
             }
         }
+        var eit = self.editors.iterator();
+        while (eit.next()) |e| changed = e.ptr.tick(now_ms) or changed;
         return changed;
     }
 
@@ -529,6 +533,12 @@ pub const Ui = struct {
             const left = if (elapsed >= blink_ms) 1 else blink_ms - elapsed;
             if (best == null or left < best.?) best = left;
         }
+        var eit = self.editors.iterator();
+        while (eit.next()) |e| {
+            if (e.ptr.msUntilBlink(self.now_ms)) |left| {
+                if (best == null or left < best.?) best = left;
+            }
+        }
         return if (best) |b| @intCast(b) else null;
     }
 
@@ -537,6 +547,10 @@ pub const Ui = struct {
     /// null means text input is not wanted.
     pub fn textInputRect(self: *Ui) ?geometry.Rect {
         const h = self.focused() orelse return null;
+        var eit = self.editors.iterator();
+        while (eit.next()) |e| {
+            if (Handle.eql(e.ptr.block.node, h) and e.ptr.block.props.enabled) return e.ptr.caretRect();
+        }
         var it = self.fields.iterator();
         while (it.next()) |e| {
             const slot = e.ptr;
@@ -557,6 +571,97 @@ pub const Ui = struct {
             if (n.cursor != .default) return n.cursor;
         }
         return .default;
+    }
+
+    // ---- code editor -------------------------------------------------------------
+
+    const editor_kinds = [_]event_types.EventKind{
+        .focus_in, .focus_out, .pointer_enter, .pointer_leave,
+        .pointer_down, .pointer_move, .pointer_up, .wheel, .key_down, .text_input,
+    };
+
+    /// Create a multi-line code editor. It fills the style's size; the `Ui` must
+    /// not be moved afterwards (the widget keeps pointers into it).
+    pub fn createCodeEditor(self: *Ui, parent: Handle, style: Style) !*CodeEditor {
+        const node_h = try self.tree.create(.{
+            .role = .text_field,
+            .cursor = .text,
+            .flags = .{ .focusable = true, .clip_children = true, .accepts_text = true },
+            .style = style,
+        });
+        errdefer _ = self.tree.destroySubtree(node_h);
+        try self.tree.appendChild(parent, node_h);
+
+        var blk: CodeEditor = .{ .node = node_h };
+        const slot_h = try self.editors.create(.{
+            .gpa = self.gpa,
+            .env = .{
+                .tree = &self.tree,
+                .text = &self.text,
+                .theme = &self.theme,
+                .clipboard = &self.clipboard,
+                .now_ms = &self.now_ms,
+            },
+            .block = blk,
+            .checker = shadow.Checker(CodeEditor.Props).init(&blk.props),
+            .editor = EditorCore.init(self.gpa),
+        });
+        const slot = self.editors.get(slot_h).?;
+        errdefer {
+            slot.deinit();
+            _ = self.editors.destroy(slot_h);
+        }
+        self.tree.get(node_h).?.paint_hook = .{ .ctx = slot, .run = code_editor.Slot.paintHook };
+        for (editor_kinds) |kind| {
+            try self.tree.addListener(node_h, .{ .kind = kind, .callback = code_editor.Slot.handleEvent, .user_data = slot });
+        }
+        return &slot.block;
+    }
+
+    fn editorSlot(ed: *CodeEditor) *code_editor.Slot {
+        return @fieldParentPtr("block", ed);
+    }
+
+    /// The editor core (document, selections, history) behind a code editor.
+    /// Edits made through it directly should be followed by `touchCodeEditor`.
+    pub fn codeEditorCore(self: *Ui, ed: *CodeEditor) *EditorCore {
+        _ = self;
+        return &editorSlot(ed).editor;
+    }
+
+    /// Ask the widget to repaint (and keep the caret in view) after changing
+    /// its core directly.
+    pub fn touchCodeEditor(self: *Ui, ed: *CodeEditor) void {
+        _ = self;
+        const slot = editorSlot(ed);
+        slot.repaint = true;
+        slot.want_visible = true;
+    }
+
+    /// Replace the content with `bytes` as the opened file. If `owned`, the
+    /// editor frees it (with the Ui's allocator); otherwise it must outlive the
+    /// editor. History is cleared and the text counts as saved.
+    pub fn loadCodeEditorText(self: *Ui, ed: *CodeEditor, bytes: []const u8, owned: bool) !void {
+        const slot = editorSlot(ed);
+        const fresh = try EditorCore.initWithText(self.gpa, bytes, owned);
+        slot.editor.deinit();
+        slot.editor = fresh;
+        slot.scroll_x = 0;
+        slot.scroll_y = 0;
+        slot.last_version = 0;
+        slot.repaint = true;
+    }
+
+    pub fn markCodeEditorSaved(self: *Ui, ed: *CodeEditor) void {
+        _ = self;
+        editorSlot(ed).editor.markSaved();
+    }
+
+    /// The whole text, allocated with `gpa`.
+    pub fn codeEditorText(self: *Ui, ed: *CodeEditor, gpa: std.mem.Allocator) ![]u8 {
+        _ = self;
+        const core = &editorSlot(ed).editor;
+        return core.doc.textAlloc(gpa, 0, core.doc.len());
     }
 
     // ---- fonts ------------------------------------------------------------
@@ -671,6 +776,11 @@ pub const Ui = struct {
 
     pub fn wheel(self: *Ui, x: f32, y: f32, dx: f32, dy: f32) void {
         self.input.wheel(&self.tree, x, y, dx, dy);
+    }
+
+    /// Wheel scroll at the last known pointer position (positive `dy` = up).
+    pub fn wheelAtPointer(self: *Ui, dx: f32, dy: f32) void {
+        self.input.wheel(&self.tree, self.input.pointer_x, self.input.pointer_y, dx, dy);
     }
 
     /// Route a key press/release (`mods` are `keys.mod_*` bits). Order: the
@@ -802,6 +912,7 @@ pub const Ui = struct {
         self.sweep(&self.buttons);
         self.sweep(&self.labels);
         self.sweep(&self.fields);
+        self.sweep(&self.editors);
 
         if (self.shortcuts.count() > 0) self.shortcuts.prune(&self.tree, &self.commands);
 
@@ -837,6 +948,12 @@ pub const Ui = struct {
 
         var fit2 = self.fields.iterator();
         while (fit2.next()) |e| self.updateField(e.ptr);
+
+        var eit2 = self.editors.iterator();
+        while (eit2.next()) |e| {
+            self.verifyProps(e.ptr.block.node, &e.ptr.checker, &e.ptr.block.props, "code_editor");
+            e.ptr.update();
+        }
 
         var lit = self.labels.iterator();
         while (lit.next()) |e| {
@@ -877,6 +994,8 @@ pub const Ui = struct {
     fn releaseSlot(self: *Ui, slot: anytype) void {
         if (@TypeOf(slot) == *FieldSlot) {
             self.freeField(slot);
+        } else if (@TypeOf(slot) == *code_editor.Slot) {
+            slot.deinit();
         } else {
             self.freeText(&slot.block.props.text);
             if (@TypeOf(slot) == *ButtonSlot) self.freeLink(slot);
@@ -919,6 +1038,8 @@ pub const Ui = struct {
             e.ptr.block.out.changed = false;
             e.ptr.block.out.submitted = false;
         }
+        var eit = self.editors.iterator();
+        while (eit.next()) |e| e.ptr.block.out.changed = false;
         self.tree.clearDirty(self.tree.root);
     }
 };
@@ -1967,4 +2088,341 @@ test "repeatable commands re-run on auto-repeat; others do not" {
     _ = ui.keyHandled(.s, keys.mod_ctrl, true, false);
     _ = ui.keyHandled(.s, keys.mod_ctrl, true, true);
     try std.testing.expectEqualStrings("dds", CmdLog.str());
+}
+
+// ---- code editor widget tests --------------------------------------------------------
+// Geometry in these tests: the mono test font at 20px has 12px cells and a 22px
+// line height; the gutter is 3 digits wide: 3 * 12 + 16 = 52px; no padding.
+
+const gutter_px: f32 = 52;
+const cell_px: f32 = 12;
+const line_px: f32 = 22;
+
+fn editorBox(t: *TextHarness) !*CodeEditor {
+    const ui = &t.h.ui;
+    ui.tree.get(ui.tree.root).?.style = .{ .align_items = .start };
+    ui.clipboard = .{ .get = FakeClip.get, .set = FakeClip.set };
+    FakeClip.len = 0;
+    FieldCounts.changes = 0;
+    const ed = try ui.createCodeEditor(ui.tree.root, .{ .width = Length.px(300), .height = Length.px(100) });
+    ed.props.on_change = FieldCounts.onChange;
+    try t.h.frame();
+    ui.setFocus(ed.node);
+    try t.h.frame();
+    return ed;
+}
+
+fn edText(ui: *Ui, ed: *CodeEditor) ![]u8 {
+    return ui.codeEditorText(ed, testing_alloc);
+}
+
+const testing_alloc = std.testing.allocator;
+
+fn expectEdText(ui: *Ui, ed: *CodeEditor, expected: []const u8) !void {
+    const s = try edText(ui, ed);
+    defer testing_alloc.free(s);
+    try std.testing.expectEqualStrings(expected, s);
+}
+
+fn manyLines(n: usize) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(testing_alloc);
+    for (0..n) |i| {
+        var buf: [24]u8 = undefined;
+        try out.appendSlice(testing_alloc, try std.fmt.bufPrint(&buf, "line {d}\n", .{i + 1}));
+    }
+    return out.toOwnedSlice(testing_alloc);
+}
+
+test "typing, Enter, Backspace, and undo/redo through events update text and out" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+
+    try type_(t, "hi");
+    try press(t, .enter, 0);
+    try type_(t, "x");
+    try expectEdText(ui, ed, "hi\nx");
+    try std.testing.expectEqual(@as(u32, 2), ed.out.line_count);
+    try std.testing.expectEqual(@as(u32, 1), ed.out.caret_line);
+    try std.testing.expectEqual(@as(u32, 1), ed.out.caret_column);
+    try std.testing.expect(ed.out.modified);
+    try std.testing.expectEqual(@as(u32, 3), FieldCounts.changes);
+
+    try press(t, .backspace, 0);
+    try press(t, .backspace, 0);
+    try expectEdText(ui, ed, "hi");
+    try press(t, .z, keys.mod_ctrl); // undo the backspaces
+    try expectEdText(ui, ed, "hi\nx");
+    try press(t, .z, keys.mod_ctrl | keys.mod_shift); // redo
+    try expectEdText(ui, ed, "hi");
+    try press(t, .y, keys.mod_ctrl); // nothing left to redo
+    try expectEdText(ui, ed, "hi");
+    ui.markCodeEditorSaved(ed);
+    try t.h.frame();
+    try std.testing.expect(!ed.out.modified);
+}
+
+test "clicking places the caret, dragging selects, double and triple click select a word and a line" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    try ui.loadCodeEditorText(ed, "alpha beta\ngamma\ndelta", false);
+    try t.h.frame();
+    const core = ui.codeEditorCore(ed);
+
+    // Line 1 ("gamma"), column 2.
+    const x = gutter_px + 2 * cell_px + 1;
+    const y = line_px + 5;
+    ui.pointerMove(x, y);
+    ui.pointerButtonEx(x, y, 1, true, 1);
+    ui.pointerButtonEx(x, y, 1, false, 1);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(usize, 11 + 2), core.sel.primary().head);
+    try std.testing.expect(ed.out.focused);
+
+    // Drag from line 0 col 1 to line 2 col 3.
+    const x0 = gutter_px + 1 * cell_px;
+    const x1 = gutter_px + 3 * cell_px;
+    ui.pointerMove(x0, 5);
+    ui.pointerButtonEx(x0, 5, 1, true, 1);
+    ui.pointerMove(x1, 2 * line_px + 5);
+    ui.pointerButtonEx(x1, 2 * line_px + 5, 1, false, 1);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(usize, 1), core.sel.primary().start());
+    try std.testing.expectEqual(@as(usize, 17 + 3), core.sel.primary().end());
+
+    // Double click selects the word; triple click the line.
+    ui.pointerButtonEx(gutter_px + 7 * cell_px, 5, 1, true, 2);
+    ui.pointerButtonEx(gutter_px + 7 * cell_px, 5, 1, false, 2);
+    try std.testing.expectEqualStrings("beta", try core.doc.range(core.sel.primary().start(), core.sel.primary().end()));
+    ui.pointerButtonEx(gutter_px + 7 * cell_px, 5, 1, true, 3);
+    ui.pointerButtonEx(gutter_px + 7 * cell_px, 5, 1, false, 3);
+    try std.testing.expectEqualStrings("alpha beta\n", try core.doc.range(core.sel.primary().start(), core.sel.primary().end()));
+}
+
+test "alt-click adds a cursor and typing goes to every cursor" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    try ui.loadCodeEditorText(ed, "one\ntwo", false);
+    try t.h.frame();
+
+    ui.pointerMove(gutter_px, 5);
+    ui.pointerButtonEx(gutter_px, 5, 1, true, 1);
+    ui.pointerButtonEx(gutter_px, 5, 1, false, 1);
+    ui.key(.unknown, keys.mod_alt, true, false); // Alt is held
+    ui.pointerMove(gutter_px, line_px + 5);
+    ui.pointerButtonEx(gutter_px, line_px + 5, 1, true, 1);
+    ui.pointerButtonEx(gutter_px, line_px + 5, 1, false, 1);
+    ui.key(.unknown, 0, false, false);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(u32, 2), ed.out.selection_count);
+    try type_(t, ">");
+    try expectEdText(ui, ed, ">one\n>two");
+
+    try press(t, .escape, 0); // drop the extra cursor
+    try std.testing.expectEqual(@as(u32, 1), ed.out.selection_count);
+    try std.testing.expect(!ui.keyHandled(.escape, 0, true, false)); // nothing left to cancel: the key passes through
+
+    try press(t, .up, keys.mod_ctrl | keys.mod_alt); // no line above the first: no-op
+    try press(t, .down, keys.mod_ctrl | keys.mod_alt);
+    try std.testing.expectEqual(@as(u32, 2), ed.out.selection_count);
+}
+
+test "the caret scrolls into view, page keys move by a screenful, and the wheel scrolls" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    const text = try manyLines(100);
+    try ui.loadCodeEditorText(ed, text, true);
+    try t.h.frame();
+    const slot = Ui.editorSlot(ed);
+    try std.testing.expectEqual(@as(f32, 0), slot.scroll_y);
+
+    try press(t, .end, keys.mod_ctrl); // end of the document
+    try std.testing.expectEqual(@as(u32, 100), ed.out.caret_line);
+    const max_scroll = 101 * line_px - 100;
+    try std.testing.expectApproxEqAbs(max_scroll, slot.scroll_y, 0.01);
+
+    try press(t, .home, keys.mod_ctrl);
+    try std.testing.expectEqual(@as(f32, 0), slot.scroll_y);
+    try press(t, .page_down, 0); // view is 100px = 4 lines: moves 3
+    try std.testing.expectEqual(@as(u32, 3), ed.out.caret_line);
+
+    ui.pointerMove(100, 50);
+    ui.wheelAtPointer(0, -1); // one notch down = 3 lines
+    try t.h.frame();
+    try std.testing.expectApproxEqAbs(3 * line_px, slot.scroll_y, 0.01);
+    ui.wheelAtPointer(0, 100); // far past the top: clamped
+    try t.h.frame();
+    try std.testing.expectEqual(@as(f32, 0), slot.scroll_y);
+}
+
+test "only the lines in view are painted, with balanced clips" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    t.h.list = DrawList.init(&t.h.cmds, &t.h.glyph_store);
+    const ed = try editorBox(t);
+    const text = try manyLines(20000);
+    try ui.loadCodeEditorText(ed, text, true);
+    try t.h.frame();
+
+    var runs: usize = 0;
+    for (t.h.list.items()) |c| runs += @intFromBool(c.kind == .glyph_run);
+    // ~7 rows visible, each with a text run and a gutter number.
+    try std.testing.expect(runs > 0 and runs <= 2 * 8);
+    try std.testing.expect(t.h.list.isBalanced());
+}
+
+test "selections, the current line, and carets are drawn; the caret blinks" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    try ui.loadCodeEditorText(ed, "abcdef\nsecond", false);
+    try t.h.frame();
+    const colors = ui.theme.editor;
+
+    const Counts = struct {
+        fn of(list: *const DrawList, color: geometry.Color) usize {
+            var n: usize = 0;
+            for (list.items()) |c| {
+                if (c.kind == .fill_rect and std.meta.eql(c.paint.color, color)) n += 1;
+            }
+            return n;
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 1), Counts.of(&t.h.list, colors.caret));
+    try std.testing.expectEqual(@as(usize, 1), Counts.of(&t.h.list, colors.current_line));
+
+    _ = ui.tick(2000); // blink off
+    try t.h.frame();
+    try std.testing.expectEqual(@as(usize, 0), Counts.of(&t.h.list, colors.caret));
+
+    try press(t, .right, keys.mod_shift);
+    try press(t, .right, keys.mod_shift);
+    try press(t, .down, keys.mod_shift);
+    // Two rows of selection: first row from column 2 to the end plus the line break.
+    try std.testing.expectEqual(@as(usize, 2), Counts.of(&t.h.list, colors.selection));
+    try std.testing.expectEqual(@as(usize, 0), Counts.of(&t.h.list, colors.current_line)); // hidden while selecting
+
+    ui.setFocus(null);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(usize, 2), Counts.of(&t.h.list, colors.selection_unfocused));
+}
+
+test "tabs expand for display, so caret positions follow the visual columns" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    try ui.loadCodeEditorText(ed, "\tx\n  \ty", false);
+    try t.h.frame();
+    try press(t, .end, 0); // end of line 0: after a tab (4 cells) and "x"
+    const r = ui.textInputRect().?;
+    try std.testing.expectApproxEqAbs(gutter_px + 5 * cell_px, r.x, 0.01);
+    try press(t, .down, 0);
+    try press(t, .end, 0); // "  \ty": two spaces, a tab to column 4, then "y"
+    try std.testing.expectApproxEqAbs(gutter_px + 5 * cell_px, ui.textInputRect().?.x, 0.01);
+    // Clicking in the tab's span lands on the nearest edge of the tab character.
+    ui.pointerMove(gutter_px + 1 * cell_px, 5);
+    ui.pointerButtonEx(gutter_px + 1 * cell_px, 5, 1, true, 1);
+    ui.pointerButtonEx(gutter_px + 1 * cell_px, 5, 1, false, 1);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(u32, 0), ed.out.caret_column); // before the tab
+}
+
+test "read-only editors navigate and copy but do not edit; disabled ones are inert" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    try ui.loadCodeEditorText(ed, "keep this", false);
+    ed.props.read_only = true;
+    try t.h.frame();
+
+    try type_(t, "x");
+    try press(t, .backspace, 0);
+    try std.testing.expect(!ui.keyHandled(.enter, 0, true, false)); // not claimed: passes on
+    try press(t, .a, keys.mod_ctrl);
+    try press(t, .c, keys.mod_ctrl);
+    try press(t, .x, keys.mod_ctrl);
+    try expectEdText(ui, ed, "keep this");
+    try std.testing.expectEqualStrings("keep this", FakeClip.contents());
+    try std.testing.expectEqual(@as(u32, 0), FieldCounts.changes);
+
+    ed.props.read_only = false;
+    ed.props.enabled = false;
+    try t.h.frame();
+    try type_(t, "x");
+    try expectEdText(ui, ed, "keep this");
+    try std.testing.expect(ui.focused() == null);
+}
+
+test "cut, paste, and tab handling through the clipboard and keys" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    try ui.loadCodeEditorText(ed, "one two", false);
+    try t.h.frame();
+    try press(t, .a, keys.mod_ctrl);
+    try press(t, .x, keys.mod_ctrl);
+    try expectEdText(ui, ed, "");
+    try std.testing.expectEqualStrings("one two", FakeClip.contents());
+    try press(t, .v, keys.mod_ctrl);
+    try press(t, .v, keys.mod_ctrl);
+    try expectEdText(ui, ed, "one twoone two");
+    try press(t, .tab, 0);
+    try std.testing.expectEqual(@as(u32, 16), ed.out.caret_column); // padded to the next multiple of 4
+    try press(t, .tab, keys.mod_shift); // outdent has nothing to remove at a non-indented line start... caret stays
+    try std.testing.expect(ui.focused() != null); // Tab was consumed, focus did not move
+}
+
+test "removing an editor frees its document, history, and scratch" {
+    const t = try TextHarness.init();
+    defer t.deinit(); // leak-checked
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    const text = try manyLines(500);
+    try ui.loadCodeEditorText(ed, text, true);
+    try type_(t, "typed text");
+    try press(t, .enter, 0);
+    try press(t, .z, keys.mod_ctrl);
+    _ = ui.tree.destroySubtree(ed.node);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(u32, 0), ui.editors.count());
+    try std.testing.expect(ui.focused() == null);
+}
+
+test "a larger document keeps its caret stops, line numbers, and mouse mapping in sync after edits" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    const text = try manyLines(50);
+    try ui.loadCodeEditorText(ed, text, true);
+    try t.h.frame();
+    const core = ui.codeEditorCore(ed);
+
+    // Insert lines above, then click on what is now line 7 (0-based 6).
+    try press(t, .home, keys.mod_ctrl);
+    try press(t, .enter, 0);
+    try press(t, .enter, 0);
+    try type_(t, "new");
+    const ypos = 3 * line_px + 5; // viewport row 3 -> line 3 (scroll is 0 at the top)
+    ui.pointerMove(gutter_px, ypos);
+    ui.pointerButtonEx(gutter_px, ypos, 1, true, 1);
+    ui.pointerButtonEx(gutter_px, ypos, 1, false, 1);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(usize, 3), core.doc.lineOfOffset(core.sel.primary().head));
+    // "\n\nnew" went in before "line 1", so row 3 shows "line 2".
+    try std.testing.expectEqualStrings("line 2", try core.doc.lineText(3));
+    try std.testing.expectEqualStrings("newline 1", try core.doc.lineText(2));
 }
