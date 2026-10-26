@@ -72,7 +72,8 @@ pub const Glyph = extern struct {
 ///
 /// Field use by kind:
 ///   fill_rect:         rect, paint
-///   stroke_rect:       rect, paint, params[0] = stroke width
+///   stroke_rect:       rect, paint, params[0] = stroke width (drawn inside the rect),
+///                      params[1] = uniform corner radius
 ///   fill_rounded_rect: rect, paint, params = corner radii (tl, tr, br, bl)
 ///   line:              rect.x/y = start, rect.w/h = end point, params[0] = width
 ///   push_clip:         rect
@@ -146,7 +147,11 @@ pub const DrawList = struct {
     }
 
     pub fn strokeRect(self: *DrawList, rect: Rect, width: f32, paint: Paint) Error!void {
-        try self.push(.{ .kind = .stroke_rect, .rect = rect, .paint = paint, .params = .{ width, 0, 0, 0 } });
+        try self.strokeRoundedRect(rect, width, 0, paint);
+    }
+
+    pub fn strokeRoundedRect(self: *DrawList, rect: Rect, width: f32, radius: f32, paint: Paint) Error!void {
+        try self.push(.{ .kind = .stroke_rect, .rect = rect, .paint = paint, .params = .{ width, radius, 0, 0 } });
     }
 
     /// `radii` is top-left, top-right, bottom-right, bottom-left.

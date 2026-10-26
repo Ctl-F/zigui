@@ -13,6 +13,9 @@ pub const dirty = @import("core/dirty.zig");
 pub const tree = @import("core/tree.zig");
 pub const style = @import("core/style.zig");
 pub const layout = @import("core/layout.zig");
+pub const paint = @import("core/paint.zig");
+pub const software = @import("render/software.zig");
+pub const png = @import("render/png.zig");
 pub const shadow = @import("core/shadow.zig");
 pub const draw_list = @import("core/draw_list.zig");
 

@@ -2,6 +2,7 @@
 //! it through setters that mark the node layout-dirty.
 
 const Length = @import("length.zig").Length;
+const Color = @import("geometry.zig").Color;
 
 pub const Direction = enum { row, column };
 
@@ -47,4 +48,14 @@ pub const Style = struct {
     justify: Align = .start,
     /// Overrides the parent's `align_items` for this node.
     align_self: ?Align = null,
+};
+
+/// Stopgap built-in look until painters and themes exist: a filled, optionally
+/// rounded, optionally bordered box. App-visible, so extern.
+pub const Visual = extern struct {
+    background: Color = Color.transparent,
+    border_color: Color = Color.black,
+    border_width: f32 = 0,
+    /// Uniform corner radius in logical pixels.
+    radius: f32 = 0,
 };

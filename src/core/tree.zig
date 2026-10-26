@@ -41,10 +41,13 @@ pub const NodeFlags = packed struct(u16) {
     /// Subtree geometry is cached; repaints do not invalidate neighbors.
     repaint_boundary: bool = false,
     hidden: bool = false,
-    _reserved: u11 = 0,
+    /// Children are clipped to this node's rect when painting.
+    clip_children: bool = false,
+    _reserved: u10 = 0,
 };
 
 pub const Style = @import("style.zig").Style;
+pub const Visual = @import("style.zig").Visual;
 
 pub const Node = struct {
     parent: Handle = Handle.invalid,
@@ -59,6 +62,7 @@ pub const Node = struct {
     /// Accessibility label. Not owned: must outlive the node or be interned.
     label: []const u8 = "",
     style: Style = .{},
+    visual: Visual = .{},
     /// Layout result in the parent's coordinate space (logical pixels).
     rect: Rect = .{},
     /// Content size of a leaf (for example measured text), set by its widget.

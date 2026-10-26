@@ -1,0 +1,92 @@
+//! Paint pass: walks the laid-out tree and emits draw commands.
+//!
+//! Stopgap until painters and themes exist: every node draws its `Visual`
+//! (background, then border), and nodes flagged `clip_children` clip their
+//! subtree. Children paint after their parent, in sibling order. This is a full
+//! repaint; damage-rect culling comes later.
+
+const std = @import("std");
+const Handle = @import("handle.zig").Handle;
+const Tree = @import("tree.zig").Tree;
+const DrawList = @import("draw_list.zig").DrawList;
+const Paint = @import("draw_list.zig").Paint;
+const Rect = @import("geometry.zig").Rect;
+
+pub const Error = @import("draw_list.zig").Error;
+
+/// Rebuild `list` from `tree`. Resets the list first.
+pub fn build(tree: *Tree, list: *DrawList) Error!void {
+    list.reset();
+    try paintNode(tree, tree.root, 0, 0, list);
+}
+
+fn paintNode(tree: *Tree, h: Handle, ox: f32, oy: f32, list: *DrawList) Error!void {
+    const node = tree.get(h) orelse return;
+    if (node.flags.hidden) return;
+
+    const abs: Rect = .{ .x = ox + node.rect.x, .y = oy + node.rect.y, .w = node.rect.w, .h = node.rect.h };
+    const v = node.visual;
+    if (v.background.a != 0) {
+        const paint = Paint.solid(v.background);
+        if (v.radius > 0) {
+            try list.fillRoundedRect(abs, .{ v.radius, v.radius, v.radius, v.radius }, paint);
+        } else {
+            try list.fillRect(abs, paint);
+        }
+    }
+    if (v.border_width > 0 and v.border_color.a != 0) {
+        try list.strokeRoundedRect(abs, v.border_width, v.radius, Paint.solid(v.border_color));
+    }
+
+    const clip = node.flags.clip_children;
+    if (clip) try list.pushClip(abs);
+    var it = tree.children(h);
+    while (it.next()) |c| try paintNode(tree, c, abs.x, abs.y, list);
+    if (clip) _ = try list.popClip();
+}
+
+test "paints backgrounds in tree order with absolute coordinates" {
+    const Color = @import("geometry.zig").Color;
+    const Layout = @import("layout.zig").Layout;
+    const Length = @import("length.zig").Length;
+
+    var tree = try Tree.init(std.testing.allocator);
+    defer tree.deinit();
+    var layout = Layout.init(std.testing.allocator);
+    defer layout.deinit();
+
+    tree.get(tree.root).?.visual.background = Color.white;
+    const panel = try tree.create(.{ .style = .{ .width = Length.px(100), .height = Length.px(50), .padding = .all(10) } });
+    try tree.appendChild(tree.root, panel);
+    tree.get(panel).?.visual.background = Color.rgb(1, 2, 3);
+    const inner = try tree.create(.{ .style = .{ .grow = 1 } });
+    try tree.appendChild(panel, inner);
+    tree.get(inner).?.visual = .{ .background = Color.rgb(9, 9, 9), .radius = 4 };
+
+    try layout.run(&tree, .{ .w = 300, .h = 200 });
+
+    var cmds: [16]@import("draw_list.zig").Command = undefined;
+    var list = DrawList.init(&cmds, &.{});
+    try build(&tree, &list);
+    const items = list.items();
+    try std.testing.expectEqual(@as(usize, 3), items.len);
+    try std.testing.expectEqual(@as(f32, 300), items[0].rect.w);
+    try std.testing.expectEqual(@as(f32, 100), items[1].rect.w);
+    try std.testing.expectEqual(@as(f32, 10), items[2].rect.x); // panel x + padding
+    try std.testing.expectEqual(@as(f32, 80), items[2].rect.w);
+    try std.testing.expectEqual(@as(f32, 4), items[2].params[0]);
+}
+
+test "clip_children brackets the subtree" {
+    var tree = try Tree.init(std.testing.allocator);
+    defer tree.deinit();
+    tree.get(tree.root).?.flags.clip_children = true;
+    const c = try tree.create(.{ .visual = .{ .background = .{ .r = 1, .g = 1, .b = 1, .a = 255 } } });
+    try tree.appendChild(tree.root, c);
+
+    var cmds: [16]@import("draw_list.zig").Command = undefined;
+    var list = DrawList.init(&cmds, &.{});
+    try build(&tree, &list);
+    try std.testing.expect(list.isBalanced());
+    try std.testing.expectEqual(@as(usize, 3), list.items().len); // push, fill, pop
+}

@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Shadow-copy dirty checker: on in Debug and ReleaseSafe by default, off in
+    // Shadow-copy dirty checker: on in Debug and ReleaseSafe, off in
     // ReleaseFast/ReleaseSmall. Override with -Dui_checks=true|false.
     const ui_checks = b.option(
         bool,
@@ -35,4 +35,42 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+
+    // SDL3 platform shim. Kept out of the core module so core and its tests
+    // never need SDL. Requires the SDL3 development files on the system.
+    const sdl_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/platform/sdl_c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sdl_c.linkSystemLibrary("sdl3", .{});
+    const sdl_c_mod = sdl_c.createModule();
+    sdl_c_mod.linkSystemLibrary("sdl3", .{});
+
+    const sdl_mod = b.addModule("zigui_sdl", .{
+        .root_source_file = b.path("src/platform/sdl.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    sdl_mod.addImport("sdl_c", sdl_c_mod);
+
+    const demo = b.addExecutable(.{
+        .name = "demo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/demo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zigui", .module = mod },
+                .{ .name = "zigui_sdl", .module = sdl_mod },
+            },
+        }),
+    });
+    b.installArtifact(demo);
+
+    const run_demo = b.addRunArtifact(demo);
+    const demo_step = b.step("demo", "Build and run the demo window (needs SDL3)");
+    demo_step.dependOn(&run_demo.step);
 }
