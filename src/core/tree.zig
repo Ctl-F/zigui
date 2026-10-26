@@ -10,6 +10,7 @@ const Pool = @import("pool.zig").Pool;
 const DirtyFlags = @import("dirty.zig").DirtyFlags;
 const Rect = @import("geometry.zig").Rect;
 const Size = @import("geometry.zig").Size;
+const event = @import("event.zig");
 
 /// Accessibility role. Reserved on every node from v0.1; platform bridges come later.
 pub const Role = enum(u16) {
@@ -73,12 +74,16 @@ pub const Node = struct {
     /// Transient: set by the layout pass while it decides which children to descend into.
     place_pending: bool = false,
     user_data: ?*anyopaque = null,
+    /// Lazily allocated listener table; null for nodes without listeners.
+    listeners: ?*ListenerList = null,
 
     /// Intrusive link for the tree's dirty-boundary stack (engine-internal).
     layout_queue_next: Handle = Handle.invalid,
     /// True while this node is on the dirty-boundary stack.
     layout_queued: bool = false,
 };
+
+pub const ListenerList = std.ArrayListUnmanaged(event.Listener);
 
 pub const TreeError = error{
     InvalidHandle,
@@ -88,8 +93,13 @@ pub const TreeError = error{
 };
 
 pub const Tree = struct {
+    allocator: std.mem.Allocator,
     pool: Pool(Node, 256),
     root: Handle,
+    /// Nonzero while an event is being dispatched. Destroys requested then are
+    /// queued in `deferred` and run when the outermost dispatch ends.
+    dispatch_depth: u32 = 0,
+    deferred: std.ArrayListUnmanaged(Handle) = .empty,
     /// Top of the stack of relayout boundaries that need a layout pass. It is
     /// intrusive (links live in `Node`), so marking dirty never allocates or fails.
     layout_queue_head: Handle = Handle.invalid,
@@ -103,10 +113,13 @@ pub const Tree = struct {
             .role = .generic,
             .flags = .{ .relayout_boundary = true, .repaint_boundary = true },
         });
-        return .{ .pool = pool, .root = root };
+        return .{ .allocator = allocator, .pool = pool, .root = root };
     }
 
     pub fn deinit(self: *Tree) void {
+        var it = self.pool.iterator();
+        while (it.next()) |entry| self.freeListeners(entry.ptr);
+        self.deferred.deinit(self.allocator);
         self.pool.deinit();
         self.* = undefined;
     }
@@ -239,8 +252,17 @@ pub const Tree = struct {
 
     /// Destroy `h` and all its descendants. Returns the number of nodes destroyed.
     /// Iterative, so deep trees cannot overflow the stack.
+    /// During event dispatch the destroy is deferred (returns 0) and runs when
+    /// the outermost dispatch ends, so handlers never pull nodes out from under it.
     pub fn destroySubtree(self: *Tree, h: Handle) u32 {
         if (!self.isValid(h)) return 0;
+        if (self.dispatch_depth > 0) {
+            self.deferred.append(self.allocator, h) catch {
+                // Cannot queue: hide the subtree so it at least disappears.
+                if (self.get(h)) |n| n.flags.hidden = true;
+            };
+            return 0;
+        }
         self.detach(h);
 
         var destroyed: u32 = 0;
@@ -264,12 +286,98 @@ pub const Tree = struct {
                 if (self.get(next_h)) |nx| nx.prev = Handle.invalid;
             }
             if (node.layout_queued) self.unqueueBoundary(cur);
+            self.freeListeners(node);
             _ = self.pool.destroy(cur);
             destroyed += 1;
             if (is_top) break;
             cur = if (next_h.isNull()) parent_h else next_h;
         }
         return destroyed;
+    }
+
+    pub fn beginDispatch(self: *Tree) void {
+        self.dispatch_depth += 1;
+    }
+
+    pub fn endDispatch(self: *Tree) void {
+        std.debug.assert(self.dispatch_depth > 0);
+        self.dispatch_depth -= 1;
+        if (self.dispatch_depth > 0) return;
+        while (self.deferred.pop()) |h| _ = self.destroySubtree(h);
+    }
+
+    fn freeListeners(self: *Tree, node: *Node) void {
+        if (node.listeners) |list| {
+            list.deinit(self.allocator);
+            self.allocator.destroy(list);
+            node.listeners = null;
+        }
+    }
+
+    /// Attach a listener. A pointer-kind listener makes the node interactive
+    /// (it takes part in hit-testing).
+    pub fn addListener(self: *Tree, h: Handle, listener: event.Listener) TreeError!void {
+        const node = self.get(h) orelse return error.InvalidHandle;
+        if (node.listeners == null) {
+            const list = try self.allocator.create(ListenerList);
+            list.* = .empty;
+            node.listeners = list;
+        }
+        try node.listeners.?.append(self.allocator, listener);
+        if (listener.kind.isPointer()) node.flags.interactive = true;
+    }
+
+    /// Remove every listener matching `kind`, `callback`, and `user_data`.
+    /// Removing the last pointer listener clears the interactive bit.
+    pub fn removeListener(self: *Tree, h: Handle, kind: event.EventKind, callback: event.Handler, user_data: ?*anyopaque) void {
+        const node = self.get(h) orelse return;
+        const list = node.listeners orelse return;
+        var i: usize = 0;
+        while (i < list.items.len) {
+            const l = list.items[i];
+            if (l.kind == kind and l.callback == callback and l.user_data == user_data) {
+                _ = list.orderedRemove(i);
+            } else i += 1;
+        }
+        var any_pointer = false;
+        for (list.items) |l| any_pointer = any_pointer or l.kind.isPointer();
+        node.flags.interactive = any_pointer;
+        if (list.items.len == 0) self.freeListeners(node);
+    }
+
+    /// Position and size of `h` in window coordinates.
+    pub fn absoluteRect(self: *Tree, h: Handle) ?Rect {
+        const node = self.get(h) orelse return null;
+        var r = node.rect;
+        var cur = node.parent;
+        while (self.get(cur)) |p| : (cur = p.parent) {
+            r.x += p.rect.x;
+            r.y += p.rect.y;
+        }
+        return r;
+    }
+
+    /// Topmost interactive node under the window-space point, or null.
+    /// Later siblings paint on top, so they are tested first. A node with
+    /// `clip_children` only hits inside its own rect.
+    pub fn hitTest(self: *Tree, x: f32, y: f32) ?Handle {
+        return self.hitNode(self.root, x, y);
+    }
+
+    fn hitNode(self: *Tree, h: Handle, px: f32, py: f32) ?Handle {
+        const node = self.get(h) orelse return null;
+        if (node.flags.hidden) return null;
+        const lx = px - node.rect.x;
+        const ly = py - node.rect.y;
+        const inside = lx >= 0 and ly >= 0 and lx < node.rect.w and ly < node.rect.h;
+        if (node.flags.clip_children and !inside) return null;
+
+        var c = node.last_child;
+        while (self.get(c)) |cn| : (c = cn.prev) {
+            if (self.hitNode(c, lx, ly)) |hit| return hit;
+        }
+        if (inside and node.flags.interactive) return h;
+        return null;
     }
 
     /// Next node in pre-order within the subtree rooted at `root`, or null at the end.
