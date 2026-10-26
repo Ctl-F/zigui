@@ -71,6 +71,11 @@ pub const Node = struct {
     /// Layout result in the parent's coordinate space (logical pixels).
     rect: Rect = .{},
     user_data: ?*anyopaque = null,
+
+    /// Intrusive link for the tree's dirty-boundary stack (engine-internal).
+    layout_queue_next: Handle = Handle.invalid,
+    /// True while this node is on the dirty-boundary stack.
+    layout_queued: bool = false,
 };
 
 pub const TreeError = error{
@@ -83,6 +88,9 @@ pub const TreeError = error{
 pub const Tree = struct {
     pool: Pool(Node, 256),
     root: Handle,
+    /// Top of the stack of relayout boundaries that need a layout pass. It is
+    /// intrusive (links live in `Node`), so marking dirty never allocates or fails.
+    layout_queue_head: Handle = Handle.invalid,
 
     /// Create a tree with a root node. The root's size comes from its window,
     /// so it is both a relayout and a repaint boundary.
@@ -253,6 +261,7 @@ pub const Tree = struct {
                 }
                 if (self.get(next_h)) |nx| nx.prev = Handle.invalid;
             }
+            if (node.layout_queued) self.unqueueBoundary(cur);
             _ = self.pool.destroy(cur);
             destroyed += 1;
             if (is_top) break;
@@ -282,8 +291,12 @@ pub const Tree = struct {
         const node = self.get(h) orelse return;
         node.dirty = node.dirty.merge(flags);
 
-        if (flags.needsLayout() and !node.flags.relayout_boundary) {
-            self.propagate(node.parent, .layout);
+        if (flags.needsLayout()) {
+            if (node.flags.relayout_boundary) {
+                self.queueBoundary(h, node);
+            } else {
+                self.propagate(node.parent, .layout);
+            }
         }
         if (flags.needsPaint()) {
             self.propagate(node.parent, .paint);
@@ -300,7 +313,10 @@ pub const Tree = struct {
                 .layout => {
                     if (n.dirty.child_layout) return; // ancestors already marked
                     n.dirty.child_layout = true;
-                    if (n.flags.relayout_boundary) return;
+                    if (n.flags.relayout_boundary) {
+                        self.queueBoundary(cur, n);
+                        return;
+                    }
                 },
                 .paint => {
                     if (n.dirty.child_paint) return;
@@ -309,6 +325,47 @@ pub const Tree = struct {
             }
             cur = n.parent;
         }
+    }
+
+    fn queueBoundary(self: *Tree, h: Handle, node: *Node) void {
+        if (node.layout_queued) return;
+        node.layout_queued = true;
+        node.layout_queue_next = self.layout_queue_head;
+        self.layout_queue_head = h;
+    }
+
+    /// Remove `h` from the dirty-boundary stack (used when it is destroyed).
+    fn unqueueBoundary(self: *Tree, h: Handle) void {
+        const node = self.get(h) orelse return;
+        if (Handle.eql(self.layout_queue_head, h)) {
+            self.layout_queue_head = node.layout_queue_next;
+        } else {
+            var cur = self.layout_queue_head;
+            while (self.get(cur)) |c| : (cur = c.layout_queue_next) {
+                if (Handle.eql(c.layout_queue_next, h)) {
+                    c.layout_queue_next = node.layout_queue_next;
+                    break;
+                }
+            }
+        }
+        node.layout_queued = false;
+        node.layout_queue_next = Handle.invalid;
+    }
+
+    /// Seed for the layout pass: pop the next relayout boundary that still
+    /// needs layout, or null when none remain. Layout starts at the returned
+    /// node (its own rect is taken as given) and covers its dirty descendants.
+    /// A boundary whose dirty bits were cleared since it was queued is skipped,
+    /// so a pass that clears bits as it goes never lays out a subtree twice.
+    pub fn popLayoutRoot(self: *Tree) ?Handle {
+        while (self.get(self.layout_queue_head)) |node| {
+            const h = self.layout_queue_head;
+            self.layout_queue_head = node.layout_queue_next;
+            node.layout_queue_next = Handle.invalid;
+            node.layout_queued = false;
+            if (node.dirty.needsLayout() or node.dirty.child_layout) return h;
+        }
+        return null;
     }
 
     /// Clear dirty flags for the whole subtree (call after a frame is built).
@@ -503,4 +560,89 @@ test "clearDirty resets the whole subtree" {
     try std.testing.expect(tree.get(a).?.dirty.isClean());
     try std.testing.expect(tree.get(b).?.dirty.isClean());
     try std.testing.expect(tree.get(tree.root).?.dirty.isClean());
+}
+
+test "layout seeding queues the nearest boundary, not the root" {
+    var tree = try Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const panel = try makeChild(&tree, tree.root);
+    const inner = try makeChild(&tree, panel);
+    const leaf = try makeChild(&tree, inner);
+    tree.get(inner).?.flags.relayout_boundary = true;
+
+    // Drain the initial dirtiness from building the tree.
+    while (tree.popLayoutRoot()) |_| {}
+    tree.clearDirty(tree.root);
+
+    tree.markDirty(leaf, DirtyFlags.layout_only);
+    try std.testing.expect(Handle.eql(tree.popLayoutRoot().?, inner));
+    try std.testing.expect(tree.popLayoutRoot() == null);
+}
+
+test "a dirty boundary queues itself, once" {
+    var tree = try Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    while (tree.popLayoutRoot()) |_| {}
+    tree.clearDirty(tree.root);
+
+    tree.markDirty(tree.root, DirtyFlags.layout_only);
+    tree.markDirty(tree.root, DirtyFlags.layout_only);
+    try std.testing.expect(Handle.eql(tree.popLayoutRoot().?, tree.root));
+    try std.testing.expect(tree.popLayoutRoot() == null);
+}
+
+test "building a tree seeds layout at the root" {
+    var tree = try Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    _ = try makeChild(&tree, tree.root);
+    try std.testing.expect(Handle.eql(tree.popLayoutRoot().?, tree.root));
+    try std.testing.expect(tree.popLayoutRoot() == null);
+}
+
+test "paint-only changes seed no layout" {
+    var tree = try Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const a = try makeChild(&tree, tree.root);
+    while (tree.popLayoutRoot()) |_| {}
+    tree.clearDirty(tree.root);
+
+    tree.markDirty(a, DirtyFlags.paint_only);
+    try std.testing.expect(tree.popLayoutRoot() == null);
+}
+
+test "boundaries cleaned since queueing are skipped and re-queue works" {
+    var tree = try Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const a = try makeChild(&tree, tree.root);
+    tree.clearDirty(tree.root); // layout pass "ran" without draining the queue
+    try std.testing.expect(tree.popLayoutRoot() == null);
+
+    tree.markDirty(a, DirtyFlags.layout_only);
+    try std.testing.expect(Handle.eql(tree.popLayoutRoot().?, tree.root));
+}
+
+test "destroying a queued boundary unlinks it from the queue" {
+    var tree = try Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const b1 = try makeChild(&tree, tree.root);
+    const b2 = try makeChild(&tree, tree.root);
+    const l1 = try makeChild(&tree, b1);
+    const l2 = try makeChild(&tree, b2);
+    tree.get(b1).?.flags.relayout_boundary = true;
+    tree.get(b2).?.flags.relayout_boundary = true;
+    while (tree.popLayoutRoot()) |_| {}
+    tree.clearDirty(tree.root);
+
+    tree.markDirty(l1, DirtyFlags.layout_only);
+    tree.markDirty(l2, DirtyFlags.layout_only);
+    _ = tree.destroySubtree(b2); // top of the stack; also dirties the root's children
+    try std.testing.expect(Handle.eql(tree.popLayoutRoot().?, tree.root));
+    try std.testing.expect(Handle.eql(tree.popLayoutRoot().?, b1));
+    try std.testing.expect(tree.popLayoutRoot() == null);
 }

@@ -36,6 +36,9 @@ src/core/
 - Pool chunks never move, so `*T` stays valid until that object is destroyed.
 - Layout dirtiness stops at `relayout_boundary` nodes; paint markers stop at
   the first ancestor already marked.
+- Layout seeding: each boundary that gains layout work is pushed on an
+  intrusive stack (links in `Node`, so no allocation). A layout pass loops on
+  `Tree.popLayoutRoot()`; entries whose dirty bits were already cleared are skipped.
 - `ui_checks` defaults on for Debug and ReleaseSafe, off otherwise. With it
   off, the shadow type is `void` and `verify` compiles to nothing.
   `-Dui_strict=true` makes the checker panic instead of warning.
@@ -45,16 +48,13 @@ src/core/
 
 ## Known gaps and next steps
 
-1. **Layout pass seeding.** Dirty markers stop at relayout boundaries, so a
-   layout pass cannot start from the root alone. Tree needs a list of dirty
-   boundaries (or a scan) to seed layout. Not written yet.
-2. **Flex layout pass**: the main-axis solver exists (`flex.zig`); still needed
+1. **Flex layout pass**: the main-axis solver exists (`flex.zig`); still needed
    are the cross axis, alignment, padding, and walking the tree to call it.
-3. **Widget state blocks** (`props` / `out` extern structs) and listeners.
-4. **Software renderer** that executes a `DrawList` into a pixel buffer.
-5. **SDL3 platform shim** and the SDL3 GPU backend.
-6. Text system: glyph atlas, shaping cache, monospace fast path.
-7. Piece-table editor core with reversible command log.
-8. Strings: the node `label` is not owned; ownership policy is undecided.
+2. **Widget state blocks** (`props` / `out` extern structs) and listeners.
+3. **Software renderer** that executes a `DrawList` into a pixel buffer.
+4. **SDL3 platform shim** and the SDL3 GPU backend.
+5. Text system: glyph atlas, shaping cache, monospace fast path.
+6. Piece-table editor core with reversible command log.
+7. Strings: the node `label` is not owned; ownership policy is undecided.
 
 Tests live next to the code (`test` blocks) and run through `src/root.zig`.
