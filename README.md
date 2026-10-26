@@ -7,7 +7,7 @@ https://claude.ai/artifact/XGC2eMeVS2WEMebrHEk6iT
 ## Status
 
 Foundation layer only. Builds and passes all tests on Zig 0.17.0
-(`zig build test`; 140 tests). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
+(`zig build test`; 182 tests). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
 now exposing `field_names` / `field_types` instead of `fields` (`shadow.zig`).
 
 The shadow-checker tests intentionally trigger `ui_check` warnings, so the
@@ -29,12 +29,15 @@ src/core/
   style.zig          Style: size/min/max, grow/shrink, direction, gap, padding, margin, align
   layout.zig         flex layout pass: measure (bottom-up) then place (top-down)
   paint.zig          paint pass: laid-out tree to draw list (stopgap `Visual` look)
+  keys.zig           Key enum and modifier bits (platform-independent)
   event.zig          Event, EventKind, Listener (extern): capture/target/bubble
   dispatch.zig       immediate dispatch; destroys deferred until it finishes
-  input.zig          pointer state machine: hover enter/leave, press capture, click
+  input.zig          pointer state machine (hover, capture, click) and keyboard
+                     focus, key/text routing, Tab navigation
   ui.zig             Ui: tree + layout + input + widgets + theme, frame protocol
 src/widgets/
   label.zig          Label state block (text, font, size, color, align)
+  text_field.zig     TextField state block: single-line editable text
   common.zig         shared widget types (Text)
   button.zig         Button state block (props/out/node), listener, default painter
   theme.zig          Theme: colors, metrics, swappable painters
@@ -47,6 +50,8 @@ src/render/
   png.zig            tiny PNG encoder for screenshots
 src/text/
   font.zig           font backend interface (swappable) + synthetic TestFont
+  gap_buffer.zig    byte gap buffer (storage for single-line fields)
+  line_editor.zig   single-line editing model: caret, selection, words, UTF-8
   atlas.zig          glyph atlas: shelf-packed 1024px pages, LRU page eviction
   system.zig         TextSystem: font registry, shaping, monospace fast path
   block.zig          TextBlock: a shaped line owned by a node
@@ -64,7 +69,13 @@ Needs SDL3 development files (found via pkg-config as `sdl3`).
 zig build demo                       # opens a window; Esc closes it
 SDL_VIDEODRIVER=dummy ZIGUI_SCREENSHOT=out.png ./zig-out/bin/demo   # headless PNG
 SDL_VIDEODRIVER=dummy ZIGUI_SCRIPT="move 60 20;click 60 20" ZIGUI_SCREENSHOT=out.png ./zig-out/bin/demo
+# script verbs: move X Y | click X Y | press X Y | type TEXT | key [ctrl+][shift+]NAME
+SDL_VIDEODRIVER=dummy ZIGUI_SCRIPT="click 700 22;type lay" ZIGUI_SCREENSHOT=out.png ./zig-out/bin/demo
 ```
+
+Keys for the demo: Tab / Shift+Tab move focus, Enter or Space activate a focused
+button, the header's filter field narrows the sidebar as you type (Enter selects
+the first match), Esc leaves a focused field or quits.
 
 The demo has working buttons (header "+ Card" / "- Card" / "Toggle sidebar" and
 selectable sidebar rows), real text in a UI font and a monospace font, and a
@@ -107,6 +118,27 @@ override with `ZIGUI_FONT=/path/ui.ttf` and `ZIGUI_MONO_FONT=/path/mono.ttf`.
   reshapes when the text, font, or size changed, including raw prop writes.
   Layout learns a text node's size from `Node.intrinsic` (single line, no
   wrapping yet, so no width-constrained measure callback).
+- Focus: one focused node per tree (`Tree.focused`). A press that nothing
+  handles focuses the nearest focusable ancestor-or-self (or clears focus);
+  Tab/Shift+Tab walk focusable nodes in tree order, wrapping; hidden or disabled
+  nodes are skipped. Destroying or hiding the focused node moves focus to the
+  nearest focusable ancestor. `focus_in`/`focus_out` fire however focus changed.
+  `Input.keyboard` records the last input modality so painters draw focus rings
+  after keyboard use only.
+- Keys vs text: key events carry a `keys.Key` plus modifier bits; committed text
+  arrives separately as `text_input` (typing, paste, IME) and goes only to the
+  focused node. Keys go to the focused node (or the root if none) and an
+  unhandled Tab moves focus; handlers claim keys with `markHandled`.
+- Text fields: content in a gap buffer, edited through `LineEditor` (UTF-8 safe,
+  word movement, selection). Caret stops come from the same shaping loop as the
+  glyphs, so caret, selection, and click hit-testing always match what is drawn.
+  Selection and caret are paint `Decor`ations on the node's text block; the
+  field scrolls horizontally to keep the caret visible. Edits fire `on_change`;
+  `setTextFieldText` does not. Caret blink runs from `Ui.tick(now_ms)`, and
+  `Ui.nextWakeMs()` is the event-wait timeout. `Ui.textInputRect()` is where the
+  caret is (window coordinates) for the platform to enable text input and place
+  the IME popup; `Ui.cursor()` picks the I-beam over fields. Clipboard access
+  comes from the platform through `Ui.clipboard`.
 - Layout (`layout.zig`): border-box sizing; margins join the main-axis solve;
   percent is of the parent content box and falls back to auto (counted in
   `Layout.circular_percent`) under a `fit` parent. Children are descended into
@@ -130,8 +162,11 @@ override with `ZIGUI_FONT=/path/ui.ttf` and `ZIGUI_MONO_FONT=/path/mono.ttf`.
 3. Renderer gaps: glyph runs (needs the text system), image paints, damage-rect
    tracking in the paint pass, the SDL3 GPU backend. The software renderer
    evaluates paints in float per pixel; optimize when it shows up in profiles.
-4. Input and platform: keyboard focus and tab order, key routing and shortcuts,
-   cursors, clipboard, IME, multi-window, canvas pointer modes (lock, coalescing).
+4. Input and platform: a shortcut/command registry (scoped, multi-key chords,
+   remappable) and raw-key mode for canvases, focus scopes (modal traps, per-panel
+   memory), tab indices and arrow-key groups, IME composition display (preedit),
+   multi-window, canvas pointer modes (lock, coalescing), accessibility tree.
+   Text fields: undo/redo, max length, password mode, multi-line, rich text.
 5. Text follow-ups: wrapping and a width-constrained measure callback, multi-line,
    a HarfBuzz/FreeType backend (ligatures, bidi, GPOS kerning, variable fonts),
    color glyphs/emoji, font fallback chains, bundled default font, text gamma/

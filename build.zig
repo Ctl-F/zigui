@@ -54,6 +54,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     sdl_mod.addImport("sdl_c", sdl_c_mod);
+    sdl_mod.addImport("zigui", mod);
 
     // stb_truetype font backend. Separate module so core never needs C.
     const stb_c = b.addTranslateC(.{

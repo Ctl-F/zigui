@@ -51,7 +51,8 @@ fn paintNode(tree: *Tree, h: Handle, ox: f32, oy: f32, list: *DrawList) Error!vo
 /// Draw a node's text block in its content box: vertically centered, aligned
 /// horizontally per the block. Text wider than the box is clipped to it.
 fn paintText(block: *const @import("../text/block.zig").TextBlock, padding: @import("style.zig").Edges, abs: Rect, list: *DrawList) Error!void {
-    if (block.glyphs.len == 0) return;
+    const decor = block.decor;
+    if (block.glyphs.len == 0 and !decor.sel_on and !decor.caret_on) return;
     const pad = layout_mod.resolveEdges(padding, null);
     const content: Rect = .{
         .x = abs.x + pad.l,
@@ -67,12 +68,23 @@ fn paintText(block: *const @import("../text/block.zig").TextBlock, padding: @imp
     };
     const gap = block.line_height - block.ascent - block.descent;
     const baseline = content.y + (content.h - block.line_height) / 2 + gap / 2 + block.ascent;
-    const bounds: Rect = .{ .x = content.x + dx, .y = baseline - block.ascent, .w = block.width, .h = block.line_height };
+    const origin_x = content.x + dx - decor.scroll_x;
+    const line_top = content.y + (content.h - block.line_height) / 2;
+    const bounds: Rect = .{ .x = origin_x, .y = baseline - block.ascent, .w = block.width, .h = block.line_height };
 
-    const overflow = block.width > content.w;
-    if (overflow) try list.pushClip(content);
-    try list.glyphRunAt(bounds, block.glyphs, .{ .x = content.x + dx, .y = baseline }, block.color, block.font, block.size, block.subpixel);
-    if (overflow) _ = try list.popClip();
+    const clip = block.width > content.w or decor.active();
+    if (clip) try list.pushClip(content);
+    if (decor.sel_on and decor.sel_x1 > decor.sel_x0) {
+        try list.fillRect(.{ .x = origin_x + decor.sel_x0, .y = line_top, .w = decor.sel_x1 - decor.sel_x0, .h = block.line_height }, Paint.solid(decor.sel_color));
+    }
+    if (block.glyphs.len > 0) {
+        try list.glyphRunAt(bounds, block.glyphs, .{ .x = origin_x, .y = baseline }, block.color, block.font, block.size, block.subpixel);
+    }
+    if (decor.caret_on) {
+        // Whole logical pixels keep the caret crisp at 1x.
+        try list.fillRect(.{ .x = @round(origin_x + decor.caret_x), .y = line_top, .w = 1, .h = block.line_height }, Paint.solid(decor.caret_color));
+    }
+    if (clip) _ = try list.popClip();
 }
 
 test "paints backgrounds in tree order with absolute coordinates" {

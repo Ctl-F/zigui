@@ -5,10 +5,13 @@
 //!
 //!   Header buttons: "+ Card" adds a card, "- Card" removes one, "Sidebar"
 //!   toggles the sidebar. Sidebar rows are flat buttons; click one to select it.
+//!   The filter field narrows the sidebar as you type (Enter selects the first
+//!   match). Tab / Shift+Tab move focus; Enter or Space activate a focused button.
 //!   Text uses system fonts (stb_truetype); override with ZIGUI_FONT / ZIGUI_MONO_FONT.
 //!
 //! Env (for headless checks, with SDL_VIDEODRIVER=dummy):
-//!   ZIGUI_SCRIPT="move 100 20;click 60 20"   feed pointer input after the first frame
+//!   ZIGUI_SCRIPT="move 100 20;click 60 20"   feed input after the first frame:
+//!       move X Y | click X Y | press X Y | type TEXT | key [ctrl+][shift+]NAME
 //!   ZIGUI_SCREENSHOT=out.png                 write a PNG of the final frame and exit
 
 const std = @import("std");
@@ -45,6 +48,8 @@ const App = struct {
     item_ctx: [9]SidebarItem = undefined,
     clicks: u32 = 0,
     status: ?*zigui.Label = null,
+    filter: ?*zigui.TextField = null,
+    names: [9][]const u8 = undefined,
     card_serial: usize = 0,
 
     fn addNode(self: *App, parent: Handle, style: zigui.Style, visual: zigui.tree.Visual) !Handle {
@@ -102,6 +107,33 @@ fn onSelectItem(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
     a.ui.setButtonVariant(a.items[a.selected], .primary);
 }
 
+fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
+    return std.ascii.findIgnoreCase(hay, needle) != null;
+}
+
+fn applyFilter(a: *App) void {
+    const f = a.filter orelse return;
+    const needle = a.ui.textFieldText(f);
+    for (a.items, a.names) |b, name| a.ui.setHidden(b.node, !containsIgnoreCase(name, needle));
+}
+
+fn onFilterChanged(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
+    applyFilter(app(user));
+}
+
+/// Enter in the filter selects the first row that is still visible.
+fn onFilterSubmit(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
+    const a = app(user);
+    a.clicks += 1;
+    for (a.items, 0..) |b, i| {
+        if (a.ui.tree.get(b.node).?.flags.hidden) continue;
+        a.ui.setButtonVariant(a.items[a.selected], .flat);
+        a.selected = i;
+        a.ui.setButtonVariant(b, .primary);
+        return;
+    }
+}
+
 fn buildUi(a: *App) !void {
     const ui = a.ui;
     const tree = &ui.tree;
@@ -129,6 +161,13 @@ fn buildUi(a: *App) !void {
         b.props.on_click_user = a;
     }
     _ = try a.addNode(header, .{ .grow = 1 }, .{});
+    const filter = try ui.createTextField(header, .{ .width = Length.px(220), .padding = Edges.xy(8, 0), .shrink = 0 });
+    try ui.setTextFieldPlaceholder(filter, "Filter files...");
+    filter.props.on_change = onFilterChanged;
+    filter.props.on_change_user = a;
+    filter.props.on_submit = onFilterSubmit;
+    filter.props.on_submit_user = a;
+    a.filter = filter;
     const disabled = try ui.createButton(header, .{ .padding = Edges.xy(14, 0), .shrink = 0 });
     try ui.setButtonText(disabled, "Disabled");
     ui.setButtonEnabled(disabled, false);
@@ -149,7 +188,7 @@ fn buildUi(a: *App) !void {
         .padding = Edges.all(8),
         .gap = Length.px(4),
     }, .{ .background = rgb(0x2b2d30), .radius = 8 });
-    const names = [_][]const u8{ "root.zig", "layout.zig", "paint.zig", "event.zig", "input.zig", "ui.zig", "button.zig", "theme.zig", "software.zig" };
+    const names = [9][]const u8{ "root.zig", "layout.zig", "paint.zig", "event.zig", "input.zig", "ui.zig", "button.zig", "theme.zig", "software.zig" };
     for (0..a.items.len) |i| {
         const indent: f32 = @floatFromInt((i % 3) * 10);
         const b = try ui.createButton(a.sidebar, .{
@@ -159,6 +198,7 @@ fn buildUi(a: *App) !void {
             .margin = .{ .left = Length.px(indent) },
         });
         try ui.setButtonText(b, names[i]);
+        a.names[i] = names[i];
         b.props.text_align = .start;
         ui.setButtonVariant(b, if (i == a.selected) .primary else .flat);
         a.items[i] = b;
@@ -207,27 +247,82 @@ fn buildUi(a: *App) !void {
 }
 
 const Script = struct {
-    /// Apply "move X Y;click X Y;..." to the UI.
+    fn keyByName(name: []const u8) zigui.keys.Key {
+        const named = [_]struct { n: []const u8, k: zigui.keys.Key }{
+            .{ .n = "tab", .k = .tab },       .{ .n = "enter", .k = .enter },
+            .{ .n = "escape", .k = .escape }, .{ .n = "backspace", .k = .backspace },
+            .{ .n = "delete", .k = .delete }, .{ .n = "left", .k = .left },
+            .{ .n = "right", .k = .right },   .{ .n = "home", .k = .home },
+            .{ .n = "end", .k = .end },       .{ .n = "space", .k = .space },
+        };
+        for (named) |e| if (std.mem.eql(u8, e.n, name)) return e.k;
+        if (name.len == 1 and name[0] >= 'a' and name[0] <= 'z') {
+            return @enumFromInt(@intFromEnum(zigui.keys.Key.a) + (name[0] - 'a'));
+        }
+        return .unknown;
+    }
+
+    /// Apply ";"-separated commands to the UI.
     fn run(ui: *Ui, text: []const u8) void {
         var cmds = std.mem.tokenizeScalar(u8, text, ';');
         while (cmds.next()) |cmd| {
-            var parts = std.mem.tokenizeScalar(u8, cmd, ' ');
-            const verb = parts.next() orelse continue;
-            const x = std.fmt.parseFloat(f32, parts.next() orelse continue) catch continue;
-            const y = std.fmt.parseFloat(f32, parts.next() orelse continue) catch continue;
-            if (std.mem.eql(u8, verb, "move")) {
-                ui.pointerMove(x, y);
-            } else if (std.mem.eql(u8, verb, "click")) {
-                ui.pointerMove(x, y);
-                ui.pointerButton(x, y, 1, true);
-                ui.pointerButton(x, y, 1, false);
-            } else if (std.mem.eql(u8, verb, "press")) {
-                ui.pointerMove(x, y);
-                ui.pointerButton(x, y, 1, true);
+            const sp = std.mem.indexOfScalar(u8, cmd, ' ') orelse continue;
+            const verb = cmd[0..sp];
+            const rest = cmd[sp + 1 ..];
+            if (std.mem.eql(u8, verb, "type")) {
+                ui.textInput(rest);
+            } else if (std.mem.eql(u8, verb, "key")) {
+                var mods: u32 = 0;
+                var parts = std.mem.splitScalar(u8, rest, '+');
+                var last: []const u8 = "";
+                while (parts.next()) |p| {
+                    if (std.mem.eql(u8, p, "ctrl")) {
+                        mods |= zigui.keys.mod_ctrl;
+                    } else if (std.mem.eql(u8, p, "shift")) {
+                        mods |= zigui.keys.mod_shift;
+                    } else if (std.mem.eql(u8, p, "alt")) {
+                        mods |= zigui.keys.mod_alt;
+                    } else {
+                        last = p;
+                    }
+                }
+                const k = keyByName(last);
+                ui.key(k, mods, true, false);
+                ui.key(k, mods, false, false);
+            } else {
+                var nums = std.mem.tokenizeScalar(u8, rest, ' ');
+                const x = std.fmt.parseFloat(f32, nums.next() orelse continue) catch continue;
+                const y = std.fmt.parseFloat(f32, nums.next() orelse continue) catch continue;
+                if (std.mem.eql(u8, verb, "move")) {
+                    ui.pointerMove(x, y);
+                } else if (std.mem.eql(u8, verb, "click")) {
+                    ui.pointerMove(x, y);
+                    ui.pointerButtonEx(x, y, 1, true, 1);
+                    ui.pointerButtonEx(x, y, 1, false, 1);
+                } else if (std.mem.eql(u8, verb, "press")) {
+                    ui.pointerMove(x, y);
+                    ui.pointerButtonEx(x, y, 1, true, 1);
+                }
             }
         }
     }
 };
+
+fn clipGet(_: ?*anyopaque, gpa: std.mem.Allocator) ?[]u8 {
+    return sdl.clipboardGet(gpa);
+}
+
+fn clipSet(_: ?*anyopaque, text: []const u8) void {
+    sdl.clipboardSet(text);
+}
+
+fn sdlCursor(c: zigui.tree.Cursor) sdl.Cursor {
+    return switch (c) {
+        .default => .default,
+        .text => .text,
+        .pointer => .pointer,
+    };
+}
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -262,6 +357,7 @@ pub fn main(init: std.process.Init) !void {
     } else {
         std.log.warn("no UI font found (set ZIGUI_FONT=/path/to/font.ttf); text will not be drawn", .{});
     }
+    ui.clipboard = .{ .get = clipGet, .set = clipSet };
     var state: App = .{ .ui = &ui };
     try buildUi(&state);
 
@@ -282,8 +378,10 @@ pub fn main(init: std.process.Init) !void {
     var script: ?[]const u8 = init.environ_map.get("ZIGUI_SCRIPT");
     var frames_drawn: u32 = 0;
 
+    var text_input_on = false;
     var running = true;
     while (running) {
+        _ = ui.tick(sdl.ticks());
         if (state.clicks != last_clicks) {
             last_clicks = state.clicks;
             var buf: [64]u8 = undefined;
@@ -339,16 +437,35 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
 
-        var ev = sdl.waitEvent(-1);
+        // Platform sync: IME/text input follows the focused text field, and the
+        // mouse cursor follows what is under the pointer.
+        if (ui.textInputRect()) |r| {
+            if (!text_input_on) sdl.startTextInput(&window);
+            text_input_on = true;
+            sdl.setTextInputArea(&window, r.x, r.y, r.w, r.h);
+        } else if (text_input_on) {
+            sdl.stopTextInput(&window);
+            text_input_on = false;
+        }
+        sdl.setCursor(sdlCursor(ui.cursor()));
+
+        // Sleep until input, or until the caret next needs to blink.
+        const timeout: i32 = if (ui.nextWakeMs()) |ms| @intCast(ms) else -1;
+        var ev = sdl.waitEvent(timeout);
         while (ev) |e| : (ev = sdl.pollEvent()) {
             switch (e.data) {
                 .quit, .close_requested => running = false,
                 .resized, .expose => force = true,
                 .mouse_move => |m| ui.pointerMove(m.x, m.y),
-                .mouse_button => |m| ui.pointerButton(m.x, m.y, @intFromEnum(m.button), m.down),
+                .mouse_button => |m| ui.pointerButtonEx(m.x, m.y, @intFromEnum(m.button), m.down, m.clicks),
                 .mouse_wheel => |m| ui.wheel(0, 0, m.x, m.y),
-                .key => |k| if (k.down and k.keycode == 27) { // escape
-                    running = false;
+                .text_input => |t| ui.textInput(t.bytes[0..t.len]),
+                .key => |k| {
+                    ui.key(k.key, k.mods, k.down, k.repeat);
+                    // Escape leaves a focused field; otherwise it quits.
+                    if (k.down and k.key == .escape) {
+                        if (ui.focused() != null) ui.setFocus(null) else running = false;
+                    }
                 },
             }
         }

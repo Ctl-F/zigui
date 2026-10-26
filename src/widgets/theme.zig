@@ -20,7 +20,20 @@ pub const ButtonColors = struct {
 /// Turns a button's state into a `Visual`. Replace to restyle all buttons.
 pub const ButtonPainter = *const fn (b: *const button.Button, theme: *const Theme) Visual;
 
+pub const FieldColors = struct {
+    background: Color = Color.rgb(0x1e, 0x1f, 0x22),
+    background_disabled: Color = Color.rgb(0x28, 0x2a, 0x2d),
+    border: Color = Color.rgb(0x4a, 0x4d, 0x52),
+    border_focus: Color = Color.rgb(0x35, 0x74, 0xf0),
+    text: Color = Color.rgb(0xdf, 0xe1, 0xe5),
+    text_disabled: Color = Color.rgb(0x7a, 0x7d, 0x83),
+    placeholder: Color = Color.rgb(0x7a, 0x7d, 0x83),
+    selection: Color = Color.rgba(0x35, 0x74, 0xf0, 0x90),
+    caret: Color = Color.rgb(0xdf, 0xe1, 0xe5),
+};
+
 pub const Theme = struct {
+    field: FieldColors = .{},
     /// Indexed by `button.Variant`.
     button_colors: [4]ButtonColors = .{
         // normal

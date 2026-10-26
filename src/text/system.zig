@@ -51,6 +51,8 @@ const FontEntry = struct {
     cell_per_em: f32,
 };
 
+pub const Stop = struct { byte: u32, x: f32 };
+
 pub const ShapeResult = struct {
     width: f32,
     glyph_count: usize,
@@ -109,13 +111,41 @@ pub const TextSystem = struct {
         out: ?*std.ArrayListUnmanaged(Glyph),
         gpa: std.mem.Allocator,
     ) !ShapeResult {
+        return self.shapeImpl(f, size, text, out, null, gpa);
+    }
+
+    /// Caret stops: one per code point boundary (including 0 and the end), as the
+    /// byte offset into `text` and the x where a caret there is drawn. They come
+    /// from the same loop as `shape`, so they always agree with the drawn glyphs.
+    pub fn boundaries(
+        self: *const TextSystem,
+        f: FontId,
+        size: f32,
+        text: []const u8,
+        stops: *std.ArrayListUnmanaged(Stop),
+        gpa: std.mem.Allocator,
+    ) !f32 {
+        const r = try self.shapeImpl(f, size, text, null, stops, gpa);
+        return r.width;
+    }
+
+    fn shapeImpl(
+        self: *const TextSystem,
+        f: FontId,
+        size: f32,
+        text: []const u8,
+        out: ?*std.ArrayListUnmanaged(Glyph),
+        stops: ?*std.ArrayListUnmanaged(Stop),
+        gpa: std.mem.Allocator,
+    ) !ShapeResult {
         const fe = &self.fonts.items[f];
         const start_len = if (out) |o| o.items.len else 0;
         var x: f32 = 0;
 
         if (fe.monospace and isAscii(text)) {
             const cell = fe.cell_per_em * size;
-            for (text) |c| {
+            for (text, 0..) |c, i| {
+                if (stops) |st| try st.append(gpa, .{ .byte = @intCast(i), .x = x });
                 if (c < 0x20 or c == 0x7f) continue;
                 if (c != ' ') if (out) |o| {
                     try o.append(gpa, .{ .id = fe.ascii[c], .x = x, .y = 0 });
@@ -125,11 +155,17 @@ pub const TextSystem = struct {
         } else {
             var prev: u32 = 0;
             var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-            while (it.nextCodepoint()) |cp| {
-                if (cp < 0x20 or cp == 0x7f or (cp >= 0x80 and cp < 0xa0)) continue;
+            while (true) {
+                const start = it.i;
+                const cp = it.nextCodepoint() orelse break;
+                if (cp < 0x20 or cp == 0x7f or (cp >= 0x80 and cp < 0xa0)) {
+                    if (stops) |st| try st.append(gpa, .{ .byte = @intCast(start), .x = x });
+                    continue;
+                }
                 var g = if (cp < 128) fe.ascii[cp] else fe.backend.glyphIndex(cp);
                 if (g == 0) g = fe.ascii['?']; // fallback for missing glyphs
                 if (prev != 0 and g != 0) x += fe.backend.kerning(prev, g, size);
+                if (stops) |st| try st.append(gpa, .{ .byte = @intCast(start), .x = x });
                 if (cp != ' ' and cp != 0xa0) if (out) |o| {
                     try o.append(gpa, .{ .id = g, .x = x, .y = 0 });
                 };
@@ -137,6 +173,7 @@ pub const TextSystem = struct {
                 prev = g;
             }
         }
+        if (stops) |st| try st.append(gpa, .{ .byte = @intCast(text.len), .x = x });
         const count = if (out) |o| o.items.len - start_len else 0;
         return .{ .width = x, .glyph_count = count };
     }
@@ -282,4 +319,67 @@ test "provider hands out atlas bitmaps and prewarm fills the atlas" {
     try testing.expect(img.w > 0);
     try testing.expectEqual(@as(u8, 255), img.pixels[@as(usize, img.y) * img.stride + img.x]);
     try testing.expect(ts.provider().lookup(99, 'A', 14, 0) == null); // unknown font
+}
+
+test "boundaries give one caret stop per code point plus the end" {
+    var tf: font.TestFont = .{};
+    var ts = TextSystem.init(testing.allocator);
+    defer ts.deinit();
+    const f = try ts.addFont(tf.backend());
+
+    var stops: std.ArrayListUnmanaged(Stop) = .empty;
+    defer stops.deinit(testing.allocator);
+    const w = try ts.boundaries(f, 20, "Mi\u{e9}x", &stops, testing.allocator);
+    // é is 2 bytes and missing from the test font: it falls back to '?' (0.55em).
+    try testing.expectEqual(@as(usize, 5), stops.items.len);
+    try testing.expectEqual(@as(u32, 0), stops.items[0].byte);
+    try testing.expectEqual(@as(u32, 1), stops.items[1].byte);
+    try testing.expectEqual(@as(u32, 2), stops.items[2].byte);
+    try testing.expectEqual(@as(u32, 4), stops.items[3].byte);
+    try testing.expectEqual(@as(u32, 5), stops.items[4].byte);
+    try testing.expectApproxEqAbs(@as(f32, 0), stops.items[0].x, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 18), stops.items[1].x, 0.01);
+    try testing.expectApproxEqAbs(w, stops.items[4].x, 0.01);
+    try testing.expectEqual(w, ts.measure(f, 20, "Mi\u{e9}x"));
+}
+
+test "caret stops agree with glyph positions, including kerning and spaces" {
+    var tf: font.TestFont = .{};
+    var ts = TextSystem.init(testing.allocator);
+    defer ts.deinit();
+    const f = try ts.addFont(tf.backend());
+    var stops: std.ArrayListUnmanaged(Stop) = .empty;
+    defer stops.deinit(testing.allocator);
+    var glyphs: std.ArrayListUnmanaged(Glyph) = .empty;
+    defer glyphs.deinit(testing.allocator);
+    const text = "AV x";
+    _ = try ts.boundaries(f, 10, text, &stops, testing.allocator);
+    _ = try ts.shape(f, 10, text, &glyphs, testing.allocator);
+    // Glyphs: A, V, x (no glyph for the space). Their stops are bytes 0, 1, 3.
+    try testing.expectApproxEqAbs(glyphs.items[0].x, stops.items[0].x, 0.01);
+    try testing.expectApproxEqAbs(glyphs.items[1].x, stops.items[1].x, 0.01);
+    try testing.expectApproxEqAbs(glyphs.items[2].x, stops.items[3].x, 0.01);
+}
+
+test "monospace boundaries are uniform cells" {
+    var tf: font.TestFont = .{ .monospace = true };
+    var ts = TextSystem.init(testing.allocator);
+    defer ts.deinit();
+    const f = try ts.addFont(tf.backend());
+    var stops: std.ArrayListUnmanaged(Stop) = .empty;
+    defer stops.deinit(testing.allocator);
+    _ = try ts.boundaries(f, 10, "abc", &stops, testing.allocator);
+    try testing.expectEqual(@as(usize, 4), stops.items.len);
+    for (stops.items, 0..) |st, i| try testing.expectApproxEqAbs(@as(f32, @floatFromInt(i)) * 6, st.x, 0.01);
+}
+
+test "empty text has the single stop 0" {
+    var tf: font.TestFont = .{};
+    var ts = TextSystem.init(testing.allocator);
+    defer ts.deinit();
+    const f = try ts.addFont(tf.backend());
+    var stops: std.ArrayListUnmanaged(Stop) = .empty;
+    defer stops.deinit(testing.allocator);
+    _ = try ts.boundaries(f, 10, "", &stops, testing.allocator);
+    try testing.expectEqual(@as(usize, 1), stops.items.len);
 }

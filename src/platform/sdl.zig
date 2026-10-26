@@ -7,6 +7,8 @@
 
 const std = @import("std");
 const c = @import("sdl_c");
+const zigui = @import("zigui");
+const Key = zigui.keys.Key;
 
 pub const Error = error{
     InitFailed,
@@ -33,9 +35,12 @@ pub const Event = struct {
         /// The window needs repainting.
         expose,
         mouse_move: struct { x: f32, y: f32 },
-        mouse_button: struct { x: f32, y: f32, button: MouseButton, down: bool },
+        mouse_button: struct { x: f32, y: f32, button: MouseButton, down: bool, clicks: u32 },
         mouse_wheel: struct { x: f32, y: f32 },
-        key: struct { scancode: u32, keycode: u32, down: bool, repeat: bool },
+        key: struct { key: Key, mods: u32, scancode: u32, keycode: u32, down: bool, repeat: bool },
+        /// Committed text. Copied out of SDL's buffer, truncated to 63 bytes
+        /// at a code point boundary.
+        text_input: struct { bytes: [64]u8, len: u8 },
     };
 };
 
@@ -123,6 +128,44 @@ pub const Window = struct {
     }
 };
 
+fn sc(comptime v: anytype) u32 {
+    return @intCast(v);
+}
+
+fn mapKey(scancode: u32) Key {
+    const a = sc(c.SDL_SCANCODE_A);
+    if (scancode >= a and scancode <= a + 25) return @enumFromInt(@intFromEnum(Key.a) + (scancode - a));
+    const f1 = sc(c.SDL_SCANCODE_F1);
+    if (scancode >= f1 and scancode <= f1 + 11) return @enumFromInt(@intFromEnum(Key.f1) + (scancode - f1));
+    return switch (scancode) {
+        sc(c.SDL_SCANCODE_RETURN), sc(c.SDL_SCANCODE_KP_ENTER) => .enter,
+        sc(c.SDL_SCANCODE_ESCAPE) => .escape,
+        sc(c.SDL_SCANCODE_BACKSPACE) => .backspace,
+        sc(c.SDL_SCANCODE_TAB) => .tab,
+        sc(c.SDL_SCANCODE_SPACE) => .space,
+        sc(c.SDL_SCANCODE_DELETE) => .delete,
+        sc(c.SDL_SCANCODE_INSERT) => .insert,
+        sc(c.SDL_SCANCODE_LEFT) => .left,
+        sc(c.SDL_SCANCODE_RIGHT) => .right,
+        sc(c.SDL_SCANCODE_UP) => .up,
+        sc(c.SDL_SCANCODE_DOWN) => .down,
+        sc(c.SDL_SCANCODE_HOME) => .home,
+        sc(c.SDL_SCANCODE_END) => .end,
+        sc(c.SDL_SCANCODE_PAGEUP) => .page_up,
+        sc(c.SDL_SCANCODE_PAGEDOWN) => .page_down,
+        else => .unknown,
+    };
+}
+
+fn mapMods(mod: u32) u32 {
+    var out: u32 = 0;
+    if (mod & sc(c.SDL_KMOD_SHIFT) != 0) out |= zigui.keys.mod_shift;
+    if (mod & sc(c.SDL_KMOD_CTRL) != 0) out |= zigui.keys.mod_ctrl;
+    if (mod & sc(c.SDL_KMOD_ALT) != 0) out |= zigui.keys.mod_alt;
+    if (mod & sc(c.SDL_KMOD_GUI) != 0) out |= zigui.keys.mod_gui;
+    return out;
+}
+
 fn translate(ev: *const c.SDL_Event) ?Event {
     switch (ev.type) {
         c.SDL_EVENT_QUIT => return .{ .data = .quit },
@@ -143,6 +186,7 @@ fn translate(ev: *const c.SDL_Event) ?Event {
                 .y = ev.button.y,
                 .button = @enumFromInt(ev.button.button),
                 .down = ev.type == c.SDL_EVENT_MOUSE_BUTTON_DOWN,
+                .clicks = ev.button.clicks,
             } },
         },
         c.SDL_EVENT_MOUSE_WHEEL => return .{
@@ -152,13 +196,85 @@ fn translate(ev: *const c.SDL_Event) ?Event {
         c.SDL_EVENT_KEY_DOWN, c.SDL_EVENT_KEY_UP => return .{
             .window = ev.key.windowID,
             .data = .{ .key = .{
+                .key = mapKey(@intCast(ev.key.scancode)),
+                .mods = mapMods(@intCast(ev.key.mod)),
                 .scancode = @intCast(ev.key.scancode),
                 .keycode = @intCast(ev.key.key),
                 .down = ev.type == c.SDL_EVENT_KEY_DOWN,
                 .repeat = ev.key.repeat,
             } },
         },
+        c.SDL_EVENT_TEXT_INPUT => {
+            const src = std.mem.span(ev.text.text);
+            var n = @min(src.len, 63);
+            // Do not cut a multi-byte character in half.
+            while (n > 0 and n < src.len and (src[n] & 0xC0) == 0x80) n -= 1;
+            var out: Event.Data = .{ .text_input = .{ .bytes = undefined, .len = @intCast(n) } };
+            @memcpy(out.text_input.bytes[0..n], src[0..n]);
+            return .{ .window = ev.text.windowID, .data = out };
+        },
         else => return null,
+    }
+}
+
+// ---- text input, clipboard, cursor, time -----------------------------------
+
+/// Enable text input events (and the on-screen keyboard / IME where present).
+pub fn startTextInput(window: *const Window) void {
+    _ = c.SDL_StartTextInput(window.handle);
+}
+
+pub fn stopTextInput(window: *const Window) void {
+    _ = c.SDL_StopTextInput(window.handle);
+}
+
+/// Tell the IME where the caret is (window coordinates, logical pixels).
+pub fn setTextInputArea(window: *const Window, x: f32, y: f32, w: f32, h: f32) void {
+    const rect: c.SDL_Rect = .{ .x = @intFromFloat(x), .y = @intFromFloat(y), .w = @intFromFloat(@max(w, 1)), .h = @intFromFloat(@max(h, 1)) };
+    _ = c.SDL_SetTextInputArea(window.handle, &rect, 0);
+}
+
+/// Clipboard text copied into memory from `gpa`, or null if empty.
+pub fn clipboardGet(gpa: std.mem.Allocator) ?[]u8 {
+    const raw = c.SDL_GetClipboardText() orelse return null;
+    defer c.SDL_free(raw);
+    const s = std.mem.span(raw);
+    if (s.len == 0) return null;
+    return gpa.dupe(u8, s) catch null;
+}
+
+pub fn clipboardSet(text: []const u8) void {
+    var buf: [4096]u8 = undefined;
+    const n = @min(text.len, buf.len - 1);
+    @memcpy(buf[0..n], text[0..n]);
+    buf[n] = 0;
+    _ = c.SDL_SetClipboardText(&buf);
+}
+
+/// Milliseconds since SDL started.
+pub fn ticks() u64 {
+    return c.SDL_GetTicks();
+}
+
+pub const Cursor = enum { default, text, pointer };
+
+var cursors: [3]?*c.SDL_Cursor = .{ null, null, null };
+var current_cursor: ?Cursor = null;
+
+pub fn setCursor(kind: Cursor) void {
+    if (current_cursor == kind) return;
+    const idx = @intFromEnum(kind);
+    if (cursors[idx] == null) {
+        const sys: c_uint = switch (kind) {
+            .default => c.SDL_SYSTEM_CURSOR_DEFAULT,
+            .text => c.SDL_SYSTEM_CURSOR_TEXT,
+            .pointer => c.SDL_SYSTEM_CURSOR_POINTER,
+        };
+        cursors[idx] = c.SDL_CreateSystemCursor(sys);
+    }
+    if (cursors[idx]) |cur| {
+        _ = c.SDL_SetCursor(cur);
+        current_cursor = kind;
     }
 }
 

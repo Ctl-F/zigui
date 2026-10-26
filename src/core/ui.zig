@@ -31,9 +31,43 @@ const font = @import("../text/font.zig");
 const TextSystem = @import("../text/system.zig").TextSystem;
 const text_block = @import("../text/block.zig");
 const Color = geometry.Color;
+const text_field = @import("../widgets/text_field.zig");
+const style_mod = @import("style.zig");
+const LineEditor = @import("../text/line_editor.zig").LineEditor;
+const Stop = @import("../text/system.zig").Stop;
+const layout_mod = @import("layout.zig");
+const event_types = @import("event.zig");
 
 const Button = button.Button;
 const Label = label.Label;
+const TextField = text_field.TextField;
+
+/// How long the caret stays on or off, in milliseconds.
+const blink_ms: u64 = 530;
+
+/// Clipboard access supplied by the platform layer.
+pub const Clipboard = struct {
+    ctx: ?*anyopaque = null,
+    /// Returns the clipboard text allocated with `gpa`, or null if empty/unavailable.
+    get: *const fn (ctx: ?*anyopaque, gpa: std.mem.Allocator) ?[]u8,
+    set: *const fn (ctx: ?*anyopaque, text: []const u8) void,
+};
+
+const FieldSlot = struct {
+    block: TextField,
+    checker: shadow.Checker(TextField.Props),
+    editor: LineEditor,
+    stops: std.ArrayListUnmanaged(Stop) = .empty,
+    ui: *Ui,
+    /// Content changed: reshape and recompute caret stops.
+    text_dirty: bool = true,
+    stops_font: u32 = std.math.maxInt(u32),
+    stops_size: f32 = 0,
+    scroll_x: f32 = 0,
+    blink_on: bool = true,
+    blink_at: u64 = 0,
+    dragging: bool = false,
+};
 
 const ButtonSlot = struct {
     block: Button,
@@ -54,6 +88,10 @@ pub const Ui = struct {
     theme: Theme = .{},
     buttons: Pool(ButtonSlot, 64),
     labels: Pool(LabelSlot, 64),
+    fields: Pool(FieldSlot, 64),
+    clipboard: ?Clipboard = null,
+    /// Last time passed to `tick`, in milliseconds.
+    now_ms: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator) !Ui {
         var tree = try Tree.init(gpa);
@@ -65,6 +103,7 @@ pub const Ui = struct {
             .layout = Layout.init(gpa),
             .buttons = Pool(ButtonSlot, 64).init(gpa),
             .labels = Pool(LabelSlot, 64).init(gpa),
+            .fields = Pool(FieldSlot, 64).init(gpa),
         };
     }
 
@@ -75,6 +114,9 @@ pub const Ui = struct {
         var lit = self.labels.iterator();
         while (lit.next()) |e| self.freeText(&e.ptr.block.props.text);
         self.labels.deinit();
+        var fit = self.fields.iterator();
+        while (fit.next()) |e| self.freeField(e.ptr);
+        self.fields.deinit();
         self.text.deinit();
         self.layout.deinit();
         self.tree.deinit();
@@ -139,6 +181,362 @@ pub const Ui = struct {
         self.tree.markDirty(l.node, DirtyFlags.layout_and_paint);
     }
 
+    // ---- text fields ------------------------------------------------------
+
+    /// Create a single-line text field. The `Ui` must not be moved afterwards
+    /// (the field's handlers keep a pointer to it).
+    pub fn createTextField(self: *Ui, parent: Handle, style: Style) !*TextField {
+        const node_h = try self.tree.create(.{
+            .role = .text_field,
+            .cursor = .text,
+            .flags = .{ .focusable = true, .clip_children = true },
+            .style = style,
+        });
+        errdefer _ = self.tree.destroySubtree(node_h);
+        try self.tree.appendChild(parent, node_h);
+
+        var blk: TextField = .{ .node = node_h };
+        const slot_h = try self.fields.create(.{
+            .block = blk,
+            .checker = shadow.Checker(TextField.Props).init(&blk.props),
+            .editor = LineEditor.init(self.gpa),
+            .ui = self,
+        });
+        const slot = self.fields.get(slot_h).?;
+        errdefer {
+            self.freeField(slot);
+            _ = self.fields.destroy(slot_h);
+        }
+        for (field_kinds) |kind| {
+            try self.tree.addListener(node_h, .{ .kind = kind, .callback = fieldEvent, .user_data = slot });
+        }
+        return &slot.block;
+    }
+
+    fn slotOf(tf: *TextField) *FieldSlot {
+        return @fieldParentPtr("block", tf);
+    }
+
+    fn freeField(self: *Ui, slot: *FieldSlot) void {
+        self.freeText(&slot.block.props.placeholder);
+        slot.stops.deinit(self.gpa);
+        slot.editor.deinit();
+    }
+
+    /// The field's current text. Valid until the next edit or `setTextFieldText`.
+    pub fn textFieldText(self: *Ui, tf: *TextField) []const u8 {
+        _ = self;
+        return slotOf(tf).editor.text();
+    }
+
+    /// Replace the content (caret to the end). This is not a user edit: it does
+    /// not set `out.changed` or call `on_change`.
+    pub fn setTextFieldText(self: *Ui, tf: *TextField, text: []const u8) !void {
+        const slot = slotOf(tf);
+        try slot.editor.setText(text);
+        self.touchField(slot);
+    }
+
+    pub fn setTextFieldPlaceholder(self: *Ui, tf: *TextField, text: []const u8) !void {
+        try self.replaceText(&tf.props.placeholder, text);
+        self.tree.markDirty(tf.node, DirtyFlags.layout_and_paint);
+    }
+
+    fn touchField(self: *Ui, slot: *FieldSlot) void {
+        slot.text_dirty = true;
+        slot.blink_on = true;
+        slot.blink_at = self.now_ms;
+        self.tree.markDirty(slot.block.node, DirtyFlags.layout_and_paint);
+    }
+
+    /// Caret movement or selection change: repaint, keep the caret visible.
+    fn touchCaret(self: *Ui, slot: *FieldSlot) void {
+        slot.blink_on = true;
+        slot.blink_at = self.now_ms;
+        self.tree.markDirty(slot.block.node, DirtyFlags.paint_only);
+    }
+
+    const field_kinds = [_]event_types.EventKind{
+        .focus_in, .focus_out, .pointer_enter, .pointer_leave,
+        .pointer_down, .pointer_move, .pointer_up, .key_down, .text_input,
+    };
+
+    /// Byte offset of the caret stop nearest to `x` (relative to the text origin).
+    fn byteAtX(stops: []const Stop, x: f32) usize {
+        var best: usize = 0;
+        var best_d: f32 = std.math.inf(f32);
+        for (stops) |st| {
+            const d = @abs(st.x - x);
+            if (d < best_d) {
+                best_d = d;
+                best = st.byte;
+            }
+        }
+        return best;
+    }
+
+    fn fieldEvent(ev: *event_types.Event, user: ?*anyopaque) callconv(.c) void {
+        const slot: *FieldSlot = @ptrCast(@alignCast(user.?));
+        const self = slot.ui;
+        const props = &slot.block.props;
+        const out = &slot.block.out;
+        const ed = &slot.editor;
+
+        switch (ev.kind) {
+            .focus_in => {
+                out.focused = true;
+                self.touchCaret(slot);
+            },
+            .focus_out => {
+                out.focused = false;
+                slot.dragging = false;
+                self.touchCaret(slot);
+            },
+            .pointer_enter => out.hovered = true,
+            .pointer_leave => out.hovered = false,
+            .pointer_down => if (props.enabled and ev.button == 1) {
+                // Not marked handled: the default action focuses the field.
+                const node = self.tree.get(slot.block.node).?;
+                const pad = layout_mod.resolveEdges(node.style.padding, null);
+                const byte = byteAtX(slot.stops.items, ev.local_x - pad.l + slot.scroll_x);
+                if (ev.clicks >= 3) {
+                    ed.selectAll();
+                } else if (ev.clicks == 2) {
+                    ed.selectWordAt(byte);
+                } else {
+                    ed.setCaret(byte, ev.hasMod(keys.mod_shift));
+                }
+                slot.dragging = true;
+                self.touchCaret(slot);
+            },
+            .pointer_move => if (slot.dragging) {
+                const node = self.tree.get(slot.block.node).?;
+                const pad = layout_mod.resolveEdges(node.style.padding, null);
+                ed.setCaret(byteAtX(slot.stops.items, ev.local_x - pad.l + slot.scroll_x), true);
+                self.touchCaret(slot);
+            },
+            .pointer_up => slot.dragging = false,
+            .text_input => if (props.enabled and !props.read_only) {
+                const changed = ed.insert(ev.textSlice()) catch false;
+                if (changed) self.afterEdit(slot, ev);
+            },
+            .key_down => self.fieldKey(slot, ev),
+            else => {},
+        }
+    }
+
+    fn fieldKey(self: *Ui, slot: *FieldSlot, ev: *event_types.Event) void {
+        const props = &slot.block.props;
+        if (!props.enabled) return;
+        const ed = &slot.editor;
+        const shift = ev.hasMod(keys.mod_shift);
+        const cmd = ev.hasMod(keys.mod_ctrl | keys.mod_gui);
+        const word = ev.hasMod(keys.mod_ctrl | keys.mod_alt);
+        const writable = !props.read_only;
+        var edited = false;
+
+        switch (ev.key) {
+            .left => ed.moveLeft(shift, word),
+            .right => ed.moveRight(shift, word),
+            .home => ed.home(shift),
+            .end => ed.end(shift),
+            .backspace => if (writable) {
+                edited = ed.deleteBackward(word);
+            },
+            .delete => if (writable) {
+                edited = ed.deleteForward(word);
+            },
+            .a => if (cmd) ed.selectAll() else return,
+            .c => if (cmd) self.copySelection(slot) else return,
+            .x => if (cmd) {
+                self.copySelection(slot);
+                if (writable) edited = ed.deleteSelection();
+            } else return,
+            .v => if (cmd) {
+                if (writable) edited = self.pasteInto(slot);
+            } else return,
+            .enter => {
+                slot.block.out.submitted = true;
+                slot.block.out.submit_count +%= 1;
+                if (props.on_submit) |cb| cb(ev, props.on_submit_user);
+            },
+            else => return,
+        }
+        ev.markHandled();
+        if (edited) self.afterEdit(slot, ev) else self.touchCaret(slot);
+    }
+
+    fn afterEdit(self: *Ui, slot: *FieldSlot, ev: *event_types.Event) void {
+        self.touchField(slot);
+        slot.block.out.changed = true;
+        slot.block.out.change_count +%= 1;
+        if (slot.block.props.on_change) |cb| cb(ev, slot.block.props.on_change_user);
+    }
+
+    fn copySelection(self: *Ui, slot: *FieldSlot) void {
+        const cb = self.clipboard orelse return;
+        if (!slot.editor.hasSelection()) return;
+        cb.set(cb.ctx, slot.editor.selectedText());
+    }
+
+    /// Paste the clipboard (newlines and tabs become spaces). True if text changed.
+    fn pasteInto(self: *Ui, slot: *FieldSlot) bool {
+        const cb = self.clipboard orelse return false;
+        const bytes = cb.get(cb.ctx, self.gpa) orelse return false;
+        defer self.gpa.free(bytes);
+        for (bytes) |*b| {
+            if (b.* == '\n' or b.* == '\r' or b.* == '\t') b.* = ' ';
+        }
+        return slot.editor.insert(bytes) catch false;
+    }
+
+    /// Per-frame sync for one field: reshape if needed, scroll the caret into
+    /// view, and publish selection and caret as paint decorations.
+    fn updateField(self: *Ui, slot: *FieldSlot) void {
+        const blk = &slot.block;
+        const node = self.tree.get(blk.node).?;
+        self.verifyProps(blk.node, &slot.checker, &blk.props, "text_field");
+        node.flags.focusable = blk.props.enabled;
+
+        const colors = self.theme.field;
+        const f = switch (blk.props.font) {
+            .ui => self.theme.ui_font,
+            .mono => self.theme.mono_font,
+        };
+        const size = if (blk.props.size > 0) blk.props.size else self.theme.font_size;
+        if (f >= self.text.fonts.items.len) return;
+
+        const content = slot.editor.text();
+        if (slot.text_dirty or slot.stops_font != f or slot.stops_size != size) {
+            slot.stops.clearRetainingCapacity();
+            _ = self.text.boundaries(f, size, content, &slot.stops, self.gpa) catch {};
+            slot.stops_font = f;
+            slot.stops_size = size;
+        }
+        const empty = content.len == 0;
+        const shown: Text = if (empty)
+            blk.props.placeholder
+        else
+            .{ .ptr = content.ptr, .len = content.len };
+        const color = if (!blk.props.enabled) colors.text_disabled else if (empty) colors.placeholder else colors.text;
+        self.syncTextEx(blk.node, shown, f, size, color, .start, .{ .force = slot.text_dirty, .keep_empty = true });
+        slot.text_dirty = false;
+
+        // Look.
+        const is_focused = blk.out.focused and blk.props.enabled;
+        const look: style_mod.Visual = .{
+            .background = if (blk.props.enabled) colors.background else colors.background_disabled,
+            .border_color = if (is_focused) colors.border_focus else colors.border,
+            .border_width = 1,
+            .radius = self.theme.corner_radius,
+        };
+        if (!std.mem.eql(u8, std.mem.asBytes(&look), std.mem.asBytes(&node.visual))) {
+            node.visual = look;
+            self.tree.markDirty(blk.node, DirtyFlags.paint_only);
+        }
+
+        // Out block.
+        const sel = slot.editor.selection();
+        blk.out.caret = @intCast(slot.editor.caret);
+        blk.out.sel_start = @intCast(sel.start);
+        blk.out.sel_end = @intCast(sel.end);
+
+        // Decorations and horizontal scroll.
+        const text_node = node.text orelse return;
+        const pad = layout_mod.resolveEdges(node.style.padding, null);
+        const view_w = @max(node.rect.w - pad.l - pad.r, 0);
+        const caret_x = stopX(slot.stops.items, slot.editor.caret);
+        const total = if (slot.stops.items.len > 0) slot.stops.items[slot.stops.items.len - 1].x else 0;
+        if (view_w > 0) {
+            if (caret_x - slot.scroll_x > view_w - 1) slot.scroll_x = caret_x - view_w + 1;
+            if (caret_x - slot.scroll_x < 0) slot.scroll_x = caret_x;
+            slot.scroll_x = std.math.clamp(slot.scroll_x, 0, @max(total - view_w + 1, 0));
+        }
+        var decor: text_block.Decor = .{ .scroll_x = slot.scroll_x };
+        if (is_focused) {
+            if (slot.editor.hasSelection()) {
+                decor.sel_on = true;
+                decor.sel_x0 = stopX(slot.stops.items, sel.start);
+                decor.sel_x1 = stopX(slot.stops.items, sel.end);
+                decor.sel_color = colors.selection;
+            } else if (slot.blink_on and !blk.props.read_only) {
+                decor.caret_on = true;
+                decor.caret_x = caret_x;
+                decor.caret_color = colors.caret;
+            }
+        }
+        if (!std.mem.eql(u8, std.mem.asBytes(&decor), std.mem.asBytes(&text_node.decor))) {
+            text_node.decor = decor;
+            self.tree.markDirty(blk.node, DirtyFlags.paint_only);
+        }
+    }
+
+    /// x of the caret stop at byte offset `byte` (stops are sorted by byte).
+    fn stopX(stops: []const Stop, byte: usize) f32 {
+        for (stops) |st| if (st.byte >= byte) return st.x;
+        return if (stops.len > 0) stops[stops.len - 1].x else 0;
+    }
+
+    /// Advance time-based state (caret blink). Returns true if something that
+    /// affects painting changed; `update` then marks the field dirty.
+    pub fn tick(self: *Ui, now_ms: u64) bool {
+        self.now_ms = now_ms;
+        var changed = false;
+        var it = self.fields.iterator();
+        while (it.next()) |e| {
+            const slot = e.ptr;
+            if (!slot.block.out.focused or !slot.block.props.enabled) continue;
+            if (now_ms -% slot.blink_at >= blink_ms) {
+                slot.blink_on = !slot.blink_on;
+                slot.blink_at = now_ms;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /// Milliseconds until the next timed update (caret blink), or null if
+    /// nothing needs one. Use as the event-wait timeout.
+    pub fn nextWakeMs(self: *Ui) ?u32 {
+        var best: ?u64 = null;
+        var it = self.fields.iterator();
+        while (it.next()) |e| {
+            const slot = e.ptr;
+            if (!slot.block.out.focused or !slot.block.props.enabled) continue;
+            const elapsed = self.now_ms -% slot.blink_at;
+            const left = if (elapsed >= blink_ms) 1 else blink_ms - elapsed;
+            if (best == null or left < best.?) best = left;
+        }
+        return if (best) |b| @intCast(b) else null;
+    }
+
+    /// Where the text caret is, in window coordinates, if a text field has
+    /// focus. The platform uses this to enable text input and place IME popups;
+    /// null means text input is not wanted.
+    pub fn textInputRect(self: *Ui) ?geometry.Rect {
+        const h = self.focused() orelse return null;
+        var it = self.fields.iterator();
+        while (it.next()) |e| {
+            const slot = e.ptr;
+            if (!Handle.eql(slot.block.node, h) or !slot.block.props.enabled) continue;
+            const abs = self.tree.absoluteRect(h) orelse return null;
+            const node = self.tree.get(h).?;
+            const pad = layout_mod.resolveEdges(node.style.padding, null);
+            const x = abs.x + pad.l + stopX(slot.stops.items, slot.editor.caret) - slot.scroll_x;
+            return .{ .x = x, .y = abs.y, .w = 1, .h = abs.h };
+        }
+        return null;
+    }
+
+    /// The cursor shape for the node under the pointer.
+    pub fn cursor(self: *Ui) tree_mod.Cursor {
+        var cur = self.input.hover;
+        while (self.tree.get(cur)) |n| : (cur = n.parent) {
+            if (n.cursor != .default) return n.cursor;
+        }
+        return .default;
+    }
+
     // ---- fonts ------------------------------------------------------------
 
     /// Register a font backend. The first font added becomes both theme fonts.
@@ -154,12 +552,23 @@ pub const Ui = struct {
     /// Shape `text` for the node and set its intrinsic size, if it changed.
     /// Silently keeps the old text if allocation fails or no font exists.
     fn syncText(self: *Ui, h: Handle, text: Text, f: u32, size: f32, color: Color, al: text_block.Align) void {
+        self.syncTextEx(h, text, f, size, color, al, .{});
+    }
+
+    const SyncOpts = struct {
+        /// Reshape even if the source slice looks unchanged (it was edited in place).
+        force: bool = false,
+        /// Keep a (glyph-less) block for empty text, so decorations have metrics.
+        keep_empty: bool = false,
+    };
+
+    fn syncTextEx(self: *Ui, h: Handle, text: Text, f: u32, size: f32, color: Color, al: text_block.Align, opts: SyncOpts) void {
         if (f >= self.text.fonts.items.len) return;
         const node = self.tree.get(h) orelse return;
         const src = text.slice();
 
         if (node.text) |old| {
-            const same = old.src_ptr == @intFromPtr(src.ptr) and old.src_len == src.len and old.font == f and old.size == size;
+            const same = !opts.force and old.src_ptr == @intFromPtr(src.ptr) and old.src_len == src.len and old.font == f and old.size == size;
             if (same) {
                 if (!std.meta.eql(old.color, color) or old.align_x != al) {
                     old.color = color;
@@ -168,7 +577,7 @@ pub const Ui = struct {
                 }
                 return;
             }
-        } else if (src.len == 0) {
+        } else if (src.len == 0 and !opts.keep_empty) {
             return;
         }
 
@@ -268,6 +677,7 @@ pub const Ui = struct {
     pub fn update(self: *Ui) void {
         self.sweep(&self.buttons);
         self.sweep(&self.labels);
+        self.sweep(&self.fields);
 
         // Disabled buttons leave the tab order; losing focus fires events, so
         // settle focus before looks are resolved.
@@ -290,6 +700,9 @@ pub const Ui = struct {
             const c = self.theme.button_colors[@min(@intFromEnum(b.props.variant), self.theme.button_colors.len - 1)];
             self.syncText(b.node, b.props.text, self.theme.ui_font, self.theme.font_size, if (b.props.enabled) c.text else c.text_disabled, b.props.text_align);
         }
+
+        var fit2 = self.fields.iterator();
+        while (fit2.next()) |e| self.updateField(e.ptr);
 
         var lit = self.labels.iterator();
         while (lit.next()) |e| {
@@ -322,8 +735,16 @@ pub const Ui = struct {
                 }
             }
             const h = stale orelse return;
-            self.freeText(&pool.get(h).?.block.props.text);
+            self.releaseSlot(pool.get(h).?);
             _ = pool.destroy(h);
+        }
+    }
+
+    fn releaseSlot(self: *Ui, slot: anytype) void {
+        if (@TypeOf(slot) == *FieldSlot) {
+            self.freeField(slot);
+        } else {
+            self.freeText(&slot.block.props.text);
         }
     }
 
@@ -358,6 +779,11 @@ pub const Ui = struct {
     pub fn endFrame(self: *Ui) void {
         var it = self.buttons.iterator();
         while (it.next()) |e| e.ptr.block.out.clicked = false;
+        var fit = self.fields.iterator();
+        while (fit.next()) |e| {
+            e.ptr.block.out.changed = false;
+            e.ptr.block.out.submitted = false;
+        }
         self.tree.clearDirty(self.tree.root);
     }
 };
@@ -777,5 +1203,370 @@ test "removing the focused button falls back and never leaves a stale focus" {
     try std.testing.expect(a.out.focused);
     _ = ui.tree.destroySubtree(a.node);
     try t.frame();
+    try std.testing.expect(ui.focused() == null);
+}
+
+// ---- text field tests ----------------------------------------------------------
+
+const FakeClip = struct {
+    var data: [256]u8 = undefined;
+    var len: usize = 0;
+
+    fn get(_: ?*anyopaque, gpa: std.mem.Allocator) ?[]u8 {
+        if (len == 0) return null;
+        return gpa.dupe(u8, data[0..len]) catch null;
+    }
+
+    fn set(_: ?*anyopaque, bytes: []const u8) void {
+        @memcpy(data[0..bytes.len], bytes);
+        len = bytes.len;
+    }
+
+    fn put(bytes: []const u8) void {
+        set(null, bytes);
+    }
+
+    fn contents() []const u8 {
+        return data[0..len];
+    }
+};
+
+const FieldCounts = struct {
+    var changes: u32 = 0;
+    var submits: u32 = 0;
+    fn onChange(_: *event_mod.Event, _: ?*anyopaque) callconv(.c) void {
+        changes += 1;
+    }
+    fn onSubmit(_: *event_mod.Event, _: ?*anyopaque) callconv(.c) void {
+        submits += 1;
+    }
+};
+
+/// A 200x28 field with 6px side padding at the origin, focused and ready.
+fn focusedField(t: *TextHarness) !*TextField {
+    const ui = &t.h.ui;
+    ui.tree.get(ui.tree.root).?.style = .{ .align_items = .start };
+    ui.clipboard = .{ .get = FakeClip.get, .set = FakeClip.set };
+    FakeClip.len = 0;
+    FieldCounts.changes = 0;
+    FieldCounts.submits = 0;
+    const tf = try ui.createTextField(ui.tree.root, .{ .width = Length.px(200), .height = Length.px(28), .padding = Edges.xy(6, 0) });
+    tf.props.on_change = FieldCounts.onChange;
+    tf.props.on_submit = FieldCounts.onSubmit;
+    try t.h.frame();
+    ui.setFocus(tf.node);
+    try t.h.frame();
+    return tf;
+}
+
+fn type_(t: *TextHarness, text: []const u8) !void {
+    t.h.ui.textInput(text);
+    try t.h.frame();
+}
+
+fn press(t: *TextHarness, k: keys.Key, mods: u32) !void {
+    t.h.ui.key(k, mods, true, false);
+    try t.h.frame();
+}
+
+test "typing edits the field, sets flags, and calls on_change" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const tf = try focusedField(t);
+
+    try type_(t, "hello");
+    try std.testing.expectEqualStrings("hello", ui.textFieldText(tf));
+    try std.testing.expect(tf.out.focused);
+    try std.testing.expectEqual(@as(u32, 1), tf.out.change_count);
+    try std.testing.expectEqual(@as(u32, 1), FieldCounts.changes);
+    try std.testing.expectEqual(@as(u32, 5), tf.out.caret);
+    try std.testing.expect(!tf.out.changed); // frame-scoped: cleared by endFrame in frame()
+
+    try type_(t, " \u{e9}");
+    try std.testing.expectEqualStrings("hello \u{e9}", ui.textFieldText(tf));
+    try press(t, .backspace, 0); // removes the whole two-byte character
+    try std.testing.expectEqualStrings("hello ", ui.textFieldText(tf));
+    try std.testing.expectEqual(@as(u32, 3), tf.out.change_count);
+}
+
+test "navigation, selection, and replacement" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const tf = try focusedField(t);
+    try type_(t, "one two three");
+
+    try press(t, .home, 0);
+    try press(t, .right, keys.mod_ctrl); // word right: past "one "
+    try std.testing.expectEqual(@as(u32, 4), tf.out.caret);
+    try press(t, .right, keys.mod_ctrl | keys.mod_shift);
+    try std.testing.expectEqual(@as(u32, 4), tf.out.sel_start);
+    try std.testing.expectEqual(@as(u32, 8), tf.out.sel_end);
+    try type_(t, "2");
+    try std.testing.expectEqualStrings("one 2three", ui.textFieldText(tf));
+    try press(t, .end, 0);
+    try press(t, .backspace, keys.mod_ctrl); // "2three" is one word
+    try std.testing.expectEqualStrings("one ", ui.textFieldText(tf));
+    try press(t, .left, 0);
+    try press(t, .delete, 0);
+    try std.testing.expectEqualStrings("one", ui.textFieldText(tf));
+}
+
+test "clipboard: select all, copy, cut, paste (newlines become spaces)" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const tf = try focusedField(t);
+    try type_(t, "abc");
+
+    try press(t, .a, keys.mod_ctrl);
+    try std.testing.expectEqual(@as(u32, 0), tf.out.sel_start);
+    try std.testing.expectEqual(@as(u32, 3), tf.out.sel_end);
+    try press(t, .c, keys.mod_ctrl);
+    try std.testing.expectEqualStrings("abc", FakeClip.contents());
+    try std.testing.expectEqualStrings("abc", ui.textFieldText(tf));
+
+    try press(t, .x, keys.mod_ctrl);
+    try std.testing.expectEqualStrings("", ui.textFieldText(tf));
+    FakeClip.put("x\ny\r\nz");
+    try press(t, .v, keys.mod_ctrl);
+    try std.testing.expectEqualStrings("x y  z", ui.textFieldText(tf));
+
+    // A plain 'a' (no modifier) is not consumed: text arrives via text_input only.
+    ui.key(.a, 0, true, false);
+    try std.testing.expectEqualStrings("x y  z", ui.textFieldText(tf));
+}
+
+test "enter submits; submit flags are frame-scoped" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const tf = try focusedField(t);
+    t.h.ui.key(.enter, 0, true, false);
+    try std.testing.expect(tf.out.submitted);
+    try std.testing.expectEqual(@as(u32, 1), tf.out.submit_count);
+    try std.testing.expectEqual(@as(u32, 1), FieldCounts.submits);
+    try t.h.frame();
+    try std.testing.expect(!tf.out.submitted);
+}
+
+test "read-only fields copy but do not edit; disabled fields ignore everything" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const tf = try focusedField(t);
+    try type_(t, "keep");
+    tf.props.read_only = true;
+    try t.h.frame();
+
+    try type_(t, "x");
+    try press(t, .backspace, 0);
+    try press(t, .a, keys.mod_ctrl);
+    try press(t, .c, keys.mod_ctrl);
+    try press(t, .x, keys.mod_ctrl);
+    try std.testing.expectEqualStrings("keep", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("keep", FakeClip.contents());
+
+    tf.props.read_only = false;
+    tf.props.enabled = false;
+    try t.h.frame();
+    try type_(t, "x");
+    try std.testing.expectEqualStrings("keep", ui.textFieldText(tf));
+    try std.testing.expect(ui.focused() == null); // disabled fields leave the tab order and lose focus
+}
+
+test "text only reaches the focused field" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const a = try focusedField(t);
+    const b = try ui.createTextField(ui.tree.root, .{ .width = Length.px(100), .height = Length.px(28) });
+    try t.h.frame();
+    try type_(t, "to a");
+    try std.testing.expectEqualStrings("to a", ui.textFieldText(a));
+    try std.testing.expectEqualStrings("", ui.textFieldText(b));
+    try press(t, .tab, 0);
+    try type_(t, "to b");
+    try std.testing.expectEqualStrings("to b", ui.textFieldText(b));
+    try std.testing.expectEqualStrings("to a", ui.textFieldText(a));
+}
+
+test "setTextFieldText replaces content without counting as an edit" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const tf = try focusedField(t);
+    try ui.setTextFieldText(tf, "preset");
+    try t.h.frame();
+    try std.testing.expectEqualStrings("preset", ui.textFieldText(tf));
+    try std.testing.expectEqual(@as(u32, 0), tf.out.change_count);
+    try std.testing.expectEqual(@as(u32, 6), tf.out.caret);
+    try std.testing.expectEqual(@as(u32, 0), FieldCounts.changes);
+}
+
+// Test font at 20px: every printable letter is 0.55em = 11px; padding is 6px.
+// Caret stops for "abc def": 0, 11, 22, 33, 44 (space is 0.3em = 6, so 44 -> 50), ...
+
+test "clicking places the caret at the nearest stop; double and triple click select" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const tf = try focusedField(t);
+    try type_(t, "abc def");
+    ui.setFocus(null);
+    try t.h.frame();
+
+    // x = 6 (padding) + 23: nearest stop is after two letters (22).
+    ui.pointerMove(29, 14);
+    ui.pointerButtonEx(29, 14, 1, true, 1);
+    ui.pointerButtonEx(29, 14, 1, false, 1);
+    try t.h.frame();
+    try std.testing.expect(tf.out.focused); // the click also focused it
+    try std.testing.expectEqual(@as(u32, 2), tf.out.caret);
+
+    ui.pointerButtonEx(29, 14, 1, true, 2);
+    ui.pointerButtonEx(29, 14, 1, false, 2);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(u32, 0), tf.out.sel_start);
+    try std.testing.expectEqual(@as(u32, 3), tf.out.sel_end); // the word "abc"
+
+    ui.pointerButtonEx(29, 14, 1, true, 3);
+    ui.pointerButtonEx(29, 14, 1, false, 3);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(u32, 7), tf.out.sel_end); // everything
+}
+
+test "dragging selects, and shift-click extends" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const tf = try focusedField(t);
+    try type_(t, "abcdef");
+
+    ui.pointerMove(6, 14); // start of text
+    ui.pointerButtonEx(6, 14, 1, true, 1);
+    ui.pointerMove(6 + 33, 14); // after three letters
+    ui.pointerButtonEx(6 + 33, 14, 1, false, 1);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(u32, 0), tf.out.sel_start);
+    try std.testing.expectEqual(@as(u32, 3), tf.out.sel_end);
+
+    // Shift-click extends from the existing anchor (0) to the click.
+    t.h.ui.pointerMove(6 + 55, 14);
+    t.h.ui.input.pointerButtonEx(&t.h.ui.tree, 6 + 55, 14, 1, true, 1); // no shift state in pointer events here
+    t.h.ui.pointerButtonEx(6 + 55, 14, 1, false, 1);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(u32, 5), tf.out.caret);
+}
+
+test "the caret shows when focused, blinks on tick, and resets on typing" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const tf = try focusedField(t);
+    _ = try ui.setTextFieldText(tf, "ab");
+    try t.h.frame();
+    const decor = ui.tree.get(tf.node).?.text.?.decor; // a copy: typing replaces the block
+    try std.testing.expect(decor.caret_on);
+    try std.testing.expectApproxEqAbs(@as(f32, 22), decor.caret_x, 0.01);
+
+    try std.testing.expect(!ui.tick(100)); // too soon: nothing changes
+    try std.testing.expect(ui.tick(1000)); // past the blink interval: off
+    try t.h.frame();
+    try std.testing.expect(!ui.tree.get(tf.node).?.text.?.decor.caret_on);
+    try std.testing.expect(ui.nextWakeMs() != null);
+
+    try type_(t, "c"); // typing makes the caret visible again
+    try std.testing.expect(ui.tree.get(tf.node).?.text.?.decor.caret_on);
+    // Not focused: no caret, no timer, no text input wanted.
+    ui.setFocus(null);
+    try t.h.frame();
+    try std.testing.expect(!ui.tree.get(tf.node).?.text.?.decor.caret_on);
+    try std.testing.expect(ui.nextWakeMs() == null);
+    try std.testing.expect(ui.textInputRect() == null);
+}
+
+test "selection is drawn as a highlight and the caret as a thin rect" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const tf = try focusedField(t);
+    try type_(t, "abcd");
+
+    var carets: usize = 0;
+    for (t.h.list.items()) |c| {
+        if (c.kind == .fill_rect and c.rect.w == 1 and std.meta.eql(c.paint.color, ui.theme.field.caret)) carets += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), carets);
+
+    try press(t, .a, keys.mod_ctrl);
+    var highlight: ?draw_list.Command = null;
+    for (t.h.list.items()) |c| {
+        if (c.kind == .fill_rect and std.meta.eql(c.paint.color, ui.theme.field.selection)) highlight = c;
+    }
+    try std.testing.expect(highlight != null);
+    try std.testing.expectApproxEqAbs(@as(f32, 44), highlight.?.rect.w, 0.01); // four letters
+    try std.testing.expectApproxEqAbs(@as(f32, 6), highlight.?.rect.x, 0.01);
+    _ = tf;
+}
+
+test "long text scrolls to keep the caret visible, and Home scrolls back" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const tf = try focusedField(t);
+    // 24 letters at 11px plus narrow "i" and "l" at 5px each = 274px in a 188px view.
+    try type_(t, "abcdefghijklmnopqrstuvwxyz");
+    const decor = ui.tree.get(tf.node).?.text.?.decor;
+    try std.testing.expectApproxEqAbs(@as(f32, 274 - 188 + 1), decor.scroll_x, 0.01);
+    try std.testing.expect(decor.caret_x - decor.scroll_x <= 188);
+    try press(t, .home, 0);
+    try std.testing.expectEqual(@as(f32, 0), ui.tree.get(tf.node).?.text.?.decor.scroll_x);
+}
+
+test "an empty field shows its placeholder, dimmed, and hides it once there is text" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const tf = try focusedField(t);
+    try ui.setTextFieldPlaceholder(tf, "Search");
+    try t.h.frame();
+    const node = ui.tree.get(tf.node).?;
+    try std.testing.expectEqual(@as(usize, 6), node.text.?.glyphs.len);
+    try std.testing.expectEqual(ui.theme.field.placeholder, node.text.?.color);
+
+    try type_(t, "hi");
+    try std.testing.expectEqual(@as(usize, 2), ui.tree.get(tf.node).?.text.?.glyphs.len);
+    try std.testing.expectEqual(ui.theme.field.text, ui.tree.get(tf.node).?.text.?.color);
+}
+
+test "focused fields get a highlighted border; the I-beam cursor and IME rect are reported" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const tf = try focusedField(t);
+    try type_(t, "ab");
+    try std.testing.expectEqual(ui.theme.field.border_focus, ui.tree.get(tf.node).?.visual.border_color);
+
+    ui.pointerMove(50, 10);
+    try std.testing.expectEqual(tree_mod.Cursor.text, ui.cursor());
+    ui.pointerMove(350, 90);
+    try std.testing.expectEqual(tree_mod.Cursor.default, ui.cursor());
+
+    const r = ui.textInputRect().?;
+    try std.testing.expectApproxEqAbs(@as(f32, 6 + 22), r.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 28), r.h, 0.01);
+}
+
+test "removing a field frees its storage" {
+    const t = try TextHarness.init();
+    defer t.deinit(); // leak-checked
+    const ui = &t.h.ui;
+    const tf = try focusedField(t);
+    try ui.setTextFieldPlaceholder(tf, "placeholder");
+    try type_(t, "some content that is long enough to grow the gap buffer");
+    _ = ui.tree.destroySubtree(tf.node);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(u32, 0), ui.fields.count());
     try std.testing.expect(ui.focused() == null);
 }

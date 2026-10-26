@@ -34,6 +34,10 @@ pub const Role = enum(u16) {
     _,
 };
 
+/// Mouse cursor shape to show while the pointer is over a node (nearest
+/// ancestor that sets one wins).
+pub const Cursor = enum(u8) { default = 0, text, pointer };
+
 pub const NodeFlags = packed struct(u16) {
     focusable: bool = false,
     /// Takes part in hit-testing (set when a pointer listener is attached).
@@ -61,6 +65,7 @@ pub const Node = struct {
     dirty: DirtyFlags = .{},
     flags: NodeFlags = .{},
     role: Role = .none,
+    cursor: Cursor = .default,
     /// Accessibility label. Not owned: must outlive the node or be interned.
     label: []const u8 = "",
     style: Style = .{},
