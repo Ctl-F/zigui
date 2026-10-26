@@ -30,6 +30,13 @@ const Event = event.Event;
 
 pub const primary_button: u32 = 1;
 
+/// Lets a higher layer (the shortcut system) see key presses that no node
+/// handled, before the default actions such as Tab navigation run.
+pub const KeyHook = struct {
+    ctx: *anyopaque,
+    run: *const fn (ctx: *anyopaque, tree: *Tree, k: keys.Key, mods: u32, down: bool, repeat: bool) bool,
+};
+
 pub const Input = struct {
     hover: Handle = Handle.invalid,
     pressed: Handle = Handle.invalid,
@@ -168,6 +175,12 @@ pub const Input = struct {
 
     /// Route a key press or release. Unhandled Tab / Shift+Tab move focus.
     pub fn key(self: *Input, tree: *Tree, k: keys.Key, mods: u32, down: bool, repeat: bool, scancode: u32, keycode: u32) void {
+        _ = self.keyEx(tree, k, mods, down, repeat, scancode, keycode, null);
+    }
+
+    /// Like `key`, with an optional hook that gets the key if no node handled
+    /// it. Returns true if a node, the hook, or Tab navigation used the key.
+    pub fn keyEx(self: *Input, tree: *Tree, k: keys.Key, mods: u32, down: bool, repeat: bool, scancode: u32, keycode: u32, hook: ?KeyHook) bool {
         self.syncFocus(tree);
         if (down) self.keyboard = true;
         const target = if (tree.isValid(tree.focused)) tree.focused else tree.root;
@@ -181,10 +194,18 @@ pub const Input = struct {
             .keycode = keycode,
         };
         dispatch.dispatch(tree, &ev);
-        if (down and !ev.handled and k == .tab and mods & (keys.mod_ctrl | keys.mod_alt | keys.mod_gui) == 0) {
-            const forward = mods & keys.mod_shift == 0;
-            if (tree.nextFocusable(tree.focused, forward)) |n| self.setFocus(tree, n);
+        if (ev.handled) return true;
+        if (hook) |h| {
+            if (h.run(h.ctx, tree, k, mods, down, repeat)) return true;
         }
+        if (down and k == .tab and mods & (keys.mod_ctrl | keys.mod_alt | keys.mod_gui) == 0) {
+            const forward = mods & keys.mod_shift == 0;
+            if (tree.nextFocusable(tree.focused, forward)) |n| {
+                self.setFocus(tree, n);
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Deliver committed text to the focused node (dropped if nothing is focused).

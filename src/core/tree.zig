@@ -49,7 +49,10 @@ pub const NodeFlags = packed struct(u16) {
     hidden: bool = false,
     /// Children are clipped to this node's rect when painting.
     clip_children: bool = false,
-    _reserved: u10 = 0,
+    /// Typing goes into this node (text fields): unmodified printable-key
+    /// shortcuts do not fire while it has focus.
+    accepts_text: bool = false,
+    _reserved: u9 = 0,
 };
 
 pub const Style = @import("style.zig").Style;

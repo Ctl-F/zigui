@@ -7,6 +7,12 @@
 //!   toggles the sidebar. Sidebar rows are flat buttons; click one to select it.
 //!   The filter field narrows the sidebar as you type (Enter selects the first
 //!   match). Tab / Shift+Tab move focus; Enter or Space activate a focused button.
+//!
+//!   Commands and shortcuts (the header buttons show theirs):
+//!     Ctrl+N add card, Ctrl+D remove card, Ctrl+K Ctrl+X remove all cards,
+//!     Ctrl+B toggle sidebar, Ctrl+F focus the filter,
+//!     Up / Down move through the files while focus is in the sidebar (panel
+//!     scope), Esc clears the filter while it has focus (widget scope).
 //!   Text uses system fonts (stb_truetype); override with ZIGUI_FONT / ZIGUI_MONO_FONT.
 //!
 //! Env (for headless checks, with SDL_VIDEODRIVER=dummy):
@@ -49,6 +55,7 @@ const App = struct {
     clicks: u32 = 0,
     status: ?*zigui.Label = null,
     filter: ?*zigui.TextField = null,
+    buttons: [3]*Button = undefined,
     names: [9][]const u8 = undefined,
     card_serial: usize = 0,
 
@@ -75,29 +82,6 @@ fn addCard(a: *App) !void {
     l.props.color = Color.white;
 }
 
-fn onAddCard(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    const a = app(user);
-    a.clicks += 1;
-    if (a.card_count >= max_cards) return;
-    addCard(a) catch {};
-}
-
-fn onRemoveCard(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    const a = app(user);
-    a.clicks += 1;
-    if (a.card_count == 0) return;
-    const last = a.ui.tree.get(a.cards).?.last_child;
-    _ = a.ui.tree.destroySubtree(last); // deferred until this click finishes dispatching
-    a.card_count -= 1;
-}
-
-fn onToggleSidebar(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    const a = app(user);
-    a.clicks += 1;
-    a.sidebar_visible = !a.sidebar_visible;
-    a.ui.setHidden(a.sidebar, !a.sidebar_visible);
-}
-
 fn onSelectItem(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
     const ctx: *SidebarItem = @ptrCast(@alignCast(user.?));
     const a = ctx.app;
@@ -105,6 +89,122 @@ fn onSelectItem(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
     a.ui.setButtonVariant(a.items[a.selected], .flat);
     a.selected = ctx.index;
     a.ui.setButtonVariant(a.items[a.selected], .primary);
+}
+
+// ---- commands (shared by shortcuts and buttons) ----
+
+fn cmdAddCard(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
+    const a = app(user);
+    a.clicks += 1;
+    if (a.card_count < max_cards) addCard(a) catch {};
+}
+
+fn cmdRemoveCard(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
+    const a = app(user);
+    a.clicks += 1;
+    if (a.card_count == 0) return;
+    _ = a.ui.tree.destroySubtree(a.ui.tree.get(a.cards).?.last_child);
+    a.card_count -= 1;
+}
+
+fn cmdClearCards(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
+    const a = app(user);
+    a.clicks += 1;
+    while (a.card_count > 0) {
+        _ = a.ui.tree.destroySubtree(a.ui.tree.get(a.cards).?.last_child);
+        a.card_count -= 1;
+    }
+}
+
+fn cmdToggleSidebar(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
+    const a = app(user);
+    a.clicks += 1;
+    a.sidebar_visible = !a.sidebar_visible;
+    a.ui.setHidden(a.sidebar, !a.sidebar_visible);
+}
+
+fn cmdFocusFilter(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
+    const a = app(user);
+    if (a.filter) |f| a.ui.setFocus(f.node);
+}
+
+/// Esc in the filter: clear it, or leave it if it is already empty.
+fn cmdClearFilter(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
+    const a = app(user);
+    const f = a.filter orelse return;
+    if (a.ui.textFieldText(f).len == 0) {
+        a.ui.setFocus(null);
+        return;
+    }
+    a.ui.setTextFieldText(f, "") catch return;
+    applyFilter(a);
+}
+
+fn moveSelection(a: *App, step: isize) void {
+    var i: isize = @intCast(a.selected);
+    const n: isize = @intCast(a.items.len);
+    while (true) {
+        i += step;
+        if (i < 0 or i >= n) return;
+        if (!a.ui.tree.get(a.items[@intCast(i)].node).?.flags.hidden) break;
+    }
+    a.ui.setButtonVariant(a.items[a.selected], .flat);
+    a.selected = @intCast(i);
+    a.ui.setButtonVariant(a.items[a.selected], .primary);
+    a.ui.setFocus(a.items[a.selected].node);
+    a.clicks += 1;
+}
+
+fn cmdNextFile(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
+    moveSelection(app(user), 1);
+}
+
+fn cmdPrevFile(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
+    moveSelection(app(user), -1);
+}
+
+fn setupCommands(a: *App) !void {
+    const ui = a.ui;
+    _ = try ui.registerCommand("cards.add", "+ Card", cmdAddCard, a);
+    _ = try ui.registerCommand("cards.remove", "- Card", cmdRemoveCard, a);
+    _ = try ui.registerCommand("cards.clear", "Clear cards", cmdClearCards, a);
+    _ = try ui.registerCommand("view.sidebar", "Sidebar", cmdToggleSidebar, a);
+    _ = try ui.registerCommand("filter.focus", "Filter", cmdFocusFilter, a);
+    _ = try ui.registerCommand("filter.clear", "Clear filter", cmdClearFilter, a);
+    _ = try ui.registerCommand("file.next", "Next file", cmdNextFile, a);
+    _ = try ui.registerCommand("file.prev", "Previous file", cmdPrevFile, a);
+    _ = ui.setCommandRepeat("file.next", true);
+    _ = ui.setCommandRepeat("file.prev", true);
+
+    // App-wide bindings come from keymap text, like a user's keymap file.
+    const report = ui.loadKeymap(
+        \\ctrl+n = cards.add
+        \\ctrl+d = cards.remove
+        \\ctrl+k ctrl+x = cards.clear   # a two-key chord
+        \\ctrl+b = view.sidebar
+        \\ctrl+f = filter.focus
+        \\
+    );
+    if (report.errors > 0) std.log.warn("keymap: {d} bad line(s), first at line {d}", .{ report.errors, report.first_error_line });
+
+    // Scoped bindings need node handles, so they are made in code.
+    try ui.bindShortcut("down", "file.next", .panel, a.sidebar);
+    try ui.bindShortcut("up", "file.prev", .panel, a.sidebar);
+    try ui.bindShortcut("escape", "filter.clear", .widget, a.filter.?.node);
+
+    // Header buttons run the same commands, so they stay in sync with shortcuts.
+    const linked = [_][]const u8{ "cards.add", "cards.remove", "view.sidebar" };
+    for (a.buttons, linked) |b, name| {
+        try ui.setButtonCommand(b, name);
+        var buf: [48]u8 = undefined;
+        const title = ui.commands.get(ui.commands.find(name).?).?.title;
+        var label_buf: [96]u8 = undefined;
+        const text = if (ui.shortcutText(name, &buf)) |sc|
+            std.fmt.bufPrint(&label_buf, "{s}   {s}", .{ title, sc }) catch title
+        else
+            title;
+        try ui.setButtonText(b, text);
+    }
 }
 
 fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
@@ -148,17 +248,11 @@ fn buildUi(a: *App) !void {
         .gap = Length.px(8),
         .shrink = 0,
     }, .{ .background = rgb(0x2b2d30) });
-    const specs = [_]struct { text: []const u8, variant: zigui.button.Variant, cb: zigui.event.Handler }{
-        .{ .text = "+ Card", .variant = .primary, .cb = onAddCard },
-        .{ .text = "- Card", .variant = .normal, .cb = onRemoveCard },
-        .{ .text = "Toggle sidebar", .variant = .normal, .cb = onToggleSidebar },
-    };
-    for (specs) |spec| {
+    const variants = [_]zigui.button.Variant{ .primary, .normal, .normal };
+    for (&a.buttons, variants) |*slot, variant| {
         const b = try ui.createButton(header, .{ .padding = Edges.xy(14, 0), .shrink = 0 });
-        try ui.setButtonText(b, spec.text);
-        ui.setButtonVariant(b, spec.variant);
-        b.props.on_click = spec.cb;
-        b.props.on_click_user = a;
+        ui.setButtonVariant(b, variant);
+        slot.* = b;
     }
     _ = try a.addNode(header, .{ .grow = 1 }, .{});
     const filter = try ui.createTextField(header, .{ .width = Length.px(220), .padding = Edges.xy(8, 0), .shrink = 0 });
@@ -248,18 +342,7 @@ fn buildUi(a: *App) !void {
 
 const Script = struct {
     fn keyByName(name: []const u8) zigui.keys.Key {
-        const named = [_]struct { n: []const u8, k: zigui.keys.Key }{
-            .{ .n = "tab", .k = .tab },       .{ .n = "enter", .k = .enter },
-            .{ .n = "escape", .k = .escape }, .{ .n = "backspace", .k = .backspace },
-            .{ .n = "delete", .k = .delete }, .{ .n = "left", .k = .left },
-            .{ .n = "right", .k = .right },   .{ .n = "home", .k = .home },
-            .{ .n = "end", .k = .end },       .{ .n = "space", .k = .space },
-        };
-        for (named) |e| if (std.mem.eql(u8, e.n, name)) return e.k;
-        if (name.len == 1 and name[0] >= 'a' and name[0] <= 'z') {
-            return @enumFromInt(@intFromEnum(zigui.keys.Key.a) + (name[0] - 'a'));
-        }
-        return .unknown;
+        return zigui.keys.parseKey(name) orelse .unknown;
     }
 
     /// Apply ";"-separated commands to the UI.
@@ -360,6 +443,7 @@ pub fn main(init: std.process.Init) !void {
     ui.clipboard = .{ .get = clipGet, .set = clipSet };
     var state: App = .{ .ui = &ui };
     try buildUi(&state);
+    try setupCommands(&state);
 
     const commands = try gpa.alloc(zigui.draw_list.Command, 4096);
     defer gpa.free(commands);
@@ -452,6 +536,7 @@ pub fn main(init: std.process.Init) !void {
         // Sleep until input, or until the caret next needs to blink.
         const timeout: i32 = if (ui.nextWakeMs()) |ms| @intCast(ms) else -1;
         var ev = sdl.waitEvent(timeout);
+        _ = ui.tick(sdl.ticks()); // time as of this input, for chord timeouts and blinking
         while (ev) |e| : (ev = sdl.pollEvent()) {
             switch (e.data) {
                 .quit, .close_requested => running = false,
@@ -461,9 +546,9 @@ pub fn main(init: std.process.Init) !void {
                 .mouse_wheel => |m| ui.wheel(0, 0, m.x, m.y),
                 .text_input => |t| ui.textInput(t.bytes[0..t.len]),
                 .key => |k| {
-                    ui.key(k.key, k.mods, k.down, k.repeat);
-                    // Escape leaves a focused field; otherwise it quits.
-                    if (k.down and k.key == .escape) {
+                    const used = ui.keyHandled(k.key, k.mods, k.down, k.repeat);
+                    // Escape that nothing used: leave a focused widget, else quit.
+                    if (k.down and k.key == .escape and !used) {
                         if (ui.focused() != null) ui.setFocus(null) else running = false;
                     }
                 },

@@ -37,6 +37,18 @@ const LineEditor = @import("../text/line_editor.zig").LineEditor;
 const Stop = @import("../text/system.zig").Stop;
 const layout_mod = @import("layout.zig");
 const event_types = @import("event.zig");
+const commands_mod = @import("commands.zig");
+const shortcuts_mod = @import("shortcuts.zig");
+
+pub const Scope = shortcuts_mod.Scope;
+pub const BindError = shortcuts_mod.BindError;
+pub const LoadReport = shortcuts_mod.LoadReport;
+
+/// A button's link to a command: clicking the button runs the command.
+const CommandLink = struct {
+    ui: *Ui,
+    name: []u8,
+};
 
 const Button = button.Button;
 const Label = label.Label;
@@ -72,6 +84,7 @@ const FieldSlot = struct {
 const ButtonSlot = struct {
     block: Button,
     checker: shadow.Checker(Button.Props),
+    link: ?*CommandLink = null,
 };
 
 const LabelSlot = struct {
@@ -92,6 +105,8 @@ pub const Ui = struct {
     clipboard: ?Clipboard = null,
     /// Last time passed to `tick`, in milliseconds.
     now_ms: u64 = 0,
+    commands: commands_mod.Commands,
+    shortcuts: shortcuts_mod.Shortcuts,
 
     pub fn init(gpa: std.mem.Allocator) !Ui {
         var tree = try Tree.init(gpa);
@@ -104,13 +119,20 @@ pub const Ui = struct {
             .buttons = Pool(ButtonSlot, 64).init(gpa),
             .labels = Pool(LabelSlot, 64).init(gpa),
             .fields = Pool(FieldSlot, 64).init(gpa),
+            .commands = commands_mod.Commands.init(gpa),
+            .shortcuts = shortcuts_mod.Shortcuts.init(gpa),
         };
     }
 
     pub fn deinit(self: *Ui) void {
         var it = self.buttons.iterator();
-        while (it.next()) |e| self.freeText(&e.ptr.block.props.text);
+        while (it.next()) |e| {
+            self.freeText(&e.ptr.block.props.text);
+            self.freeLink(e.ptr);
+        }
         self.buttons.deinit();
+        self.shortcuts.deinit();
+        self.commands.deinit();
         var lit = self.labels.iterator();
         while (lit.next()) |e| self.freeText(&e.ptr.block.props.text);
         self.labels.deinit();
@@ -189,7 +211,7 @@ pub const Ui = struct {
         const node_h = try self.tree.create(.{
             .role = .text_field,
             .cursor = .text,
-            .flags = .{ .focusable = true, .clip_children = true },
+            .flags = .{ .focusable = true, .clip_children = true, .accepts_text = true },
             .style = style,
         });
         errdefer _ = self.tree.destroySubtree(node_h);
@@ -643,6 +665,7 @@ pub const Ui = struct {
     /// Like `pointerButton`, with the platform's consecutive-press count
     /// (2 = double click) for text selection.
     pub fn pointerButtonEx(self: *Ui, x: f32, y: f32, btn: u32, down: bool, clicks: u32) void {
+        if (down) self.shortcuts.clearPending();
         self.input.pointerButtonEx(&self.tree, x, y, btn, down, clicks);
     }
 
@@ -650,9 +673,110 @@ pub const Ui = struct {
         self.input.wheel(&self.tree, x, y, dx, dy);
     }
 
-    /// Route a key press/release (`mods` are `keys.mod_*` bits).
+    /// Route a key press/release (`mods` are `keys.mod_*` bits). Order: the
+    /// focused node (capture, target, bubble), then shortcuts, then Tab focus
+    /// movement. Returns true if anything used the key.
+    pub fn keyHandled(self: *Ui, k: keys.Key, mods: u32, down: bool, repeat: bool) bool {
+        return self.input.keyEx(&self.tree, k, mods, down, repeat, 0, 0, .{ .ctx = self, .run = shortcutHook });
+    }
+
     pub fn key(self: *Ui, k: keys.Key, mods: u32, down: bool, repeat: bool) void {
-        self.input.key(&self.tree, k, mods, down, repeat, 0, 0);
+        _ = self.keyHandled(k, mods, down, repeat);
+    }
+
+    fn shortcutHook(ctx: *anyopaque, tree: *Tree, k: keys.Key, mods: u32, down: bool, repeat: bool) bool {
+        const self: *Ui = @ptrCast(@alignCast(ctx));
+        if (!down or k == .unknown) return false;
+        const chord: keys.Chord = .{ .key = k, .mods = mods & keys.mod_all };
+        // Plain typing belongs to the focused text widget, not to shortcuts.
+        if (!self.shortcuts.hasPending() and chord.isTyping()) {
+            if (tree.get(tree.focused)) |n| {
+                if (n.flags.accepts_text) return false;
+            }
+        }
+        return self.shortcuts.handleKey(tree, &self.commands, self.now_ms, chord, repeat).consumed;
+    }
+
+    // ---- commands and shortcuts -----------------------------------------------
+
+    /// Register a named command. `handler` receives a `command` event whose
+    /// text is the command name; it may be null for commands that only exist to
+    /// be enabled/disabled or listed.
+    pub fn registerCommand(self: *Ui, name: []const u8, title: []const u8, handler: ?event_types.Handler, user: ?*anyopaque) !Handle {
+        return self.commands.register(name, title, handler, user);
+    }
+
+    /// Run a command by name. The event targets the focused node, or the root.
+    /// False if it is unknown, disabled, or has no handler.
+    pub fn invokeCommand(self: *Ui, name: []const u8) bool {
+        const target = if (self.tree.isValid(self.tree.focused)) self.tree.focused else self.tree.root;
+        return self.commands.invokeByName(name, target);
+    }
+
+    /// Enable or disable a command (shortcuts skip it; linked buttons follow).
+    /// False if no such command.
+    pub fn setCommandEnabled(self: *Ui, name: []const u8, enabled: bool) bool {
+        const h = self.commands.find(name) orelse return false;
+        self.commands.setEnabled(h, enabled);
+        return true;
+    }
+
+    /// Let holding the shortcut key re-run the command (navigation: yes, save: no).
+    pub fn setCommandRepeat(self: *Ui, name: []const u8, repeat: bool) bool {
+        const h = self.commands.find(name) orelse return false;
+        self.commands.get(h).?.repeat = repeat;
+        return true;
+    }
+
+    /// Bind a chord sequence ("ctrl+k ctrl+c") to a command. Panel and widget
+    /// scopes need `node`. Fails with `Conflict` if the same scope already has
+    /// that sequence or one that is a prefix of it (or vice versa).
+    pub fn bindShortcut(self: *Ui, seq_text: []const u8, command: []const u8, scope: Scope, node: ?Handle) BindError!void {
+        return self.shortcuts.bindText(&self.commands, seq_text, command, scope, node orelse Handle.invalid, false);
+    }
+
+    /// Like `bindShortcut`, replacing an existing binding of the same sequence.
+    pub fn rebindShortcut(self: *Ui, seq_text: []const u8, command: []const u8, scope: Scope, node: ?Handle) BindError!void {
+        return self.shortcuts.bindText(&self.commands, seq_text, command, scope, node orelse Handle.invalid, true);
+    }
+
+    /// Load bindings from keymap text (see `Shortcuts.loadKeymap`).
+    pub fn loadKeymap(self: *Ui, text: []const u8) LoadReport {
+        return self.shortcuts.loadKeymap(&self.commands, text);
+    }
+
+    /// The first shortcut bound to `command`, as display text ("Ctrl+S").
+    pub fn shortcutText(self: *Ui, command: []const u8, buf: []u8) ?[]const u8 {
+        const h = self.commands.find(command) orelse return null;
+        return self.shortcuts.shortcutText(h, buf);
+    }
+
+    fn linkHandler(ev: *event_types.Event, user: ?*anyopaque) callconv(.c) void {
+        _ = ev;
+        const link: *CommandLink = @ptrCast(@alignCast(user.?));
+        _ = link.ui.invokeCommand(link.name);
+    }
+
+    fn freeLink(self: *Ui, slot: *ButtonSlot) void {
+        const link = slot.link orelse return;
+        self.gpa.free(link.name);
+        self.gpa.destroy(link);
+        slot.link = null;
+    }
+
+    /// Make clicking the button run `command`. The button is enabled only while
+    /// the command is (this overrides `props.enabled`), and the command need not
+    /// exist yet. Pass the same command to keep a button, menu item, and
+    /// shortcut in sync.
+    pub fn setButtonCommand(self: *Ui, b: *Button, command: []const u8) !void {
+        const slot: *ButtonSlot = @fieldParentPtr("block", b);
+        const link = try self.gpa.create(CommandLink);
+        errdefer self.gpa.destroy(link);
+        link.* = .{ .ui = self, .name = try self.gpa.dupe(u8, command) };
+        self.freeLink(slot);
+        slot.link = link;
+        b.props.on_click = linkHandler;
+        b.props.on_click_user = link;
     }
 
     /// Deliver committed text (typing, paste, IME) to the focused widget.
@@ -678,6 +802,16 @@ pub const Ui = struct {
         self.sweep(&self.buttons);
         self.sweep(&self.labels);
         self.sweep(&self.fields);
+
+        if (self.shortcuts.count() > 0) self.shortcuts.prune(&self.tree, &self.commands);
+
+        // Buttons linked to a command mirror its enabled state.
+        var lit0 = self.buttons.iterator();
+        while (lit0.next()) |e| {
+            const link = e.ptr.link orelse continue;
+            const enabled = if (self.commands.find(link.name)) |h| self.commands.isEnabled(h) else false;
+            self.setButtonEnabled(&e.ptr.block, enabled);
+        }
 
         // Disabled buttons leave the tab order; losing focus fires events, so
         // settle focus before looks are resolved.
@@ -745,6 +879,7 @@ pub const Ui = struct {
             self.freeField(slot);
         } else {
             self.freeText(&slot.block.props.text);
+            if (@TypeOf(slot) == *ButtonSlot) self.freeLink(slot);
         }
     }
 
@@ -1569,4 +1704,267 @@ test "removing a field frees its storage" {
     try t.h.frame();
     try std.testing.expectEqual(@as(u32, 0), ui.fields.count());
     try std.testing.expect(ui.focused() == null);
+}
+
+// ---- commands and shortcuts through the Ui --------------------------------------
+
+const CmdLog = struct {
+    var buf: [64]u8 = undefined;
+    var len: usize = 0;
+    var last_target: Handle = Handle.invalid;
+
+    fn reset() void {
+        len = 0;
+        last_target = Handle.invalid;
+    }
+
+    fn str() []const u8 {
+        return buf[0..len];
+    }
+
+    /// Logs the last character of the command name.
+    fn handler(ev: *event_mod.Event, _: ?*anyopaque) callconv(.c) void {
+        const name = ev.textSlice();
+        if (len < buf.len) {
+            buf[len] = name[name.len - 1];
+            len += 1;
+        }
+        last_target = ev.target;
+    }
+};
+
+fn regCmd(ui: *Ui, name: []const u8) !void {
+    _ = try ui.registerCommand(name, name, CmdLog.handler, null);
+}
+
+test "a bound shortcut runs its command with the focused node as target" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    CmdLog.reset();
+    try regCmd(ui, "file.s");
+    try ui.bindShortcut("ctrl+s", "file.s", .app, null);
+    const b = try ui.createButton(ui.tree.root, box(80, 30));
+    try t.frame();
+
+    try std.testing.expect(ui.keyHandled(.s, keys.mod_ctrl, true, false));
+    try std.testing.expectEqualStrings("s", CmdLog.str());
+    try std.testing.expect(Handle.eql(CmdLog.last_target, ui.tree.root)); // nothing focused
+    ui.setFocus(b.node);
+    _ = ui.keyHandled(.s, keys.mod_ctrl, true, false);
+    try std.testing.expect(Handle.eql(CmdLog.last_target, b.node));
+    try std.testing.expect(!ui.keyHandled(.x, keys.mod_ctrl, true, false)); // unbound
+    try std.testing.expect(!ui.keyHandled(.s, keys.mod_ctrl, false, false)); // key-up never triggers
+    try std.testing.expect(ui.invokeCommand("file.s"));
+    try std.testing.expect(!ui.invokeCommand("nope"));
+}
+
+test "widgets get the key first: a button's Enter beats an Enter shortcut" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    CmdLog.reset();
+    try regCmd(ui, "x.e");
+    try ui.bindShortcut("enter", "x.e", .app, null);
+    const b = try ui.createButton(ui.tree.root, box(80, 30));
+    try t.frame();
+
+    // Nothing focused: the shortcut fires.
+    _ = ui.keyHandled(.enter, 0, true, false);
+    try std.testing.expectEqualStrings("e", CmdLog.str());
+    // A focused button claims Enter for itself.
+    ui.setFocus(b.node);
+    _ = ui.keyHandled(.enter, 0, true, false);
+    try std.testing.expectEqualStrings("e", CmdLog.str());
+    try std.testing.expectEqual(@as(u32, 1), b.out.click_count);
+}
+
+test "a Tab shortcut beats focus movement; unbound Tab still moves focus" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    CmdLog.reset();
+    try regCmd(ui, "x.t");
+    const b = try ui.createButton(ui.tree.root, box(80, 30));
+    try t.frame();
+    _ = ui.keyHandled(.tab, 0, true, false);
+    try std.testing.expect(Handle.eql(ui.focused().?, b.node));
+    ui.setFocus(null);
+
+    try ui.bindShortcut("tab", "x.t", .app, null);
+    _ = ui.keyHandled(.tab, 0, true, false);
+    try std.testing.expectEqualStrings("t", CmdLog.str());
+    try std.testing.expect(ui.focused() == null);
+}
+
+test "typing in a text field is not stolen by plain-key shortcuts, but modified shortcuts still work" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    CmdLog.reset();
+    try regCmd(ui, "x.a"); // bare "a"
+    try regCmd(ui, "x.s"); // ctrl+s
+    try regCmd(ui, "x.q"); // ctrl+a: the field's own select-all must win
+    try ui.bindShortcut("a", "x.a", .app, null);
+    try ui.bindShortcut("ctrl+s", "x.s", .app, null);
+    try ui.bindShortcut("ctrl+a", "x.q", .app, null);
+    const tf = try focusedField(t);
+
+    _ = ui.keyHandled(.a, 0, true, false);
+    ui.textInput("a");
+    try t.h.frame();
+    try std.testing.expectEqualStrings("a", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("", CmdLog.str()); // the shortcut did not fire
+
+    _ = ui.keyHandled(.a, keys.mod_ctrl, true, false); // the field takes select-all
+    try std.testing.expectEqual(@as(u32, 1), tf.out.sel_end);
+    try std.testing.expectEqualStrings("", CmdLog.str());
+    _ = ui.keyHandled(.s, keys.mod_ctrl, true, false); // not claimed by the field
+    try std.testing.expectEqualStrings("s", CmdLog.str());
+
+    // Leave the field and the bare shortcut works again.
+    ui.setFocus(null);
+    _ = ui.keyHandled(.a, 0, true, false);
+    try std.testing.expectEqualStrings("sa", CmdLog.str());
+}
+
+test "panel and widget scopes follow focus" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    CmdLog.reset();
+    try regCmd(ui, "x.g"); // global
+    try regCmd(ui, "x.p"); // panel
+    try regCmd(ui, "x.w"); // widget
+    const panel = try ui.tree.create(.{});
+    try ui.tree.appendChild(ui.tree.root, panel);
+    const inside = try ui.createButton(panel, box(80, 30));
+    const outside = try ui.createButton(ui.tree.root, box(80, 30));
+    try ui.bindShortcut("f2", "x.g", .app, null);
+    try ui.bindShortcut("f2", "x.p", .panel, panel);
+    try ui.bindShortcut("f2", "x.w", .widget, inside.node);
+    try t.frame();
+
+    ui.setFocus(inside.node);
+    _ = ui.keyHandled(.f2, 0, true, false); // widget
+    ui.setFocus(outside.node);
+    _ = ui.keyHandled(.f2, 0, true, false); // outside the panel: global
+    try std.testing.expectEqualStrings("wg", CmdLog.str());
+    try std.testing.expectError(error.InvalidScope, ui.bindShortcut("f3", "x.p", .panel, null));
+    try std.testing.expectError(error.UnknownCommand, ui.bindShortcut("f3", "x.nope", .app, null));
+    try std.testing.expectError(error.InvalidSequence, ui.bindShortcut("zzz+q", "x.g", .app, null));
+}
+
+test "destroying a panel drops its bindings on the next update" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    CmdLog.reset();
+    try regCmd(ui, "x.p");
+    const panel = try ui.tree.create(.{});
+    try ui.tree.appendChild(ui.tree.root, panel);
+    try ui.bindShortcut("f2", "x.p", .panel, panel);
+    try std.testing.expectEqual(@as(usize, 1), ui.shortcuts.count());
+    _ = ui.tree.destroySubtree(panel);
+    try t.frame();
+    try std.testing.expectEqual(@as(usize, 0), ui.shortcuts.count());
+}
+
+test "chords work through the Ui and a click cancels a pending chord" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    CmdLog.reset();
+    try regCmd(ui, "edit.c");
+    try ui.bindShortcut("ctrl+k ctrl+c", "edit.c", .app, null);
+    _ = ui.tick(0);
+    try std.testing.expect(ui.keyHandled(.k, keys.mod_ctrl, true, false));
+    try std.testing.expect(ui.shortcuts.hasPending());
+    try std.testing.expect(ui.keyHandled(.c, keys.mod_ctrl, true, false));
+    try std.testing.expectEqualStrings("c", CmdLog.str());
+
+    _ = ui.keyHandled(.k, keys.mod_ctrl, true, false);
+    ui.pointerButtonEx(300, 90, 1, true, 1);
+    try std.testing.expect(!ui.shortcuts.hasPending());
+    try std.testing.expect(!ui.keyHandled(.c, keys.mod_ctrl, true, false));
+    try std.testing.expectEqualStrings("c", CmdLog.str());
+
+    // The timeout uses the time given to tick.
+    _ = ui.tick(1000);
+    _ = ui.keyHandled(.k, keys.mod_ctrl, true, false);
+    _ = ui.tick(1000 + 2000);
+    try std.testing.expect(!ui.keyHandled(.c, keys.mod_ctrl, true, false));
+}
+
+test "a command-linked button runs the command, mirrors its enabled state, and frees its link" {
+    const t = try Harness.init();
+    defer t.deinit(); // leak-checked
+    const ui = &t.ui;
+    CmdLog.reset();
+    const b = try ui.createButton(ui.tree.root, box(80, 30));
+    try ui.setButtonCommand(b, "view.v"); // the command does not exist yet
+    try t.frame();
+    try std.testing.expect(!b.props.enabled);
+
+    try regCmd(ui, "view.v");
+    try t.frame();
+    try std.testing.expect(b.props.enabled);
+    t.click(10, 10);
+    try std.testing.expectEqualStrings("v", CmdLog.str());
+    try std.testing.expect(Handle.eql(CmdLog.last_target, b.node)); // focused by the click
+
+    try std.testing.expect(ui.setCommandEnabled("view.v", false));
+    try t.frame();
+    try std.testing.expect(!b.props.enabled);
+    t.click(10, 10);
+    try std.testing.expectEqualStrings("v", CmdLog.str()); // no second run
+    try std.testing.expect(!ui.setCommandEnabled("missing", false));
+
+    try ui.setButtonCommand(b, "view.v"); // re-linking replaces the old link
+    _ = ui.tree.destroySubtree(b.node);
+    try t.frame();
+    try std.testing.expectEqual(@as(u32, 0), ui.buttons.count());
+}
+
+test "keymaps load through the Ui, and shortcut text feeds menus and tooltips" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    CmdLog.reset();
+    try regCmd(ui, "file.s");
+    try regCmd(ui, "file.o");
+    const report = ui.loadKeymap(
+        \\ctrl+s = file.s
+        \\ctrl+o = file.o
+        \\ctrl+k ctrl+s = file.s   # a second binding for the same command
+        \\
+    );
+    try std.testing.expectEqual(@as(u32, 3), report.bound);
+    try std.testing.expectEqual(@as(u32, 0), report.errors);
+    var buf: [48]u8 = undefined;
+    try std.testing.expectEqualStrings("Ctrl+S", ui.shortcutText("file.s", &buf).?);
+    try std.testing.expect(ui.shortcutText("file.none", &buf) == null);
+
+    // Remapping: rebind replaces.
+    try ui.rebindShortcut("ctrl+s", "file.o", .app, null);
+    _ = ui.keyHandled(.s, keys.mod_ctrl, true, false);
+    try std.testing.expectEqualStrings("o", CmdLog.str());
+    try std.testing.expectError(error.Conflict, ui.bindShortcut("ctrl+s", "file.s", .app, null));
+}
+
+test "repeatable commands re-run on auto-repeat; others do not" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    CmdLog.reset();
+    try regCmd(ui, "nav.d");
+    try regCmd(ui, "nav.s");
+    try ui.bindShortcut("down", "nav.d", .app, null);
+    try ui.bindShortcut("ctrl+s", "nav.s", .app, null);
+    try std.testing.expect(ui.setCommandRepeat("nav.d", true));
+    _ = ui.keyHandled(.down, 0, true, false);
+    _ = ui.keyHandled(.down, 0, true, true);
+    _ = ui.keyHandled(.s, keys.mod_ctrl, true, false);
+    _ = ui.keyHandled(.s, keys.mod_ctrl, true, true);
+    try std.testing.expectEqualStrings("dds", CmdLog.str());
 }

@@ -26,6 +26,10 @@ pub const EventKind = enum(u32) {
     /// Committed text (typing, paste, IME). Separate from key events. `text`
     /// and `text_len` hold UTF-8 valid only during dispatch.
     text_input,
+    /// A named command is being run (from a shortcut, a button, a menu, or code).
+    /// `text` holds the command name. Delivered straight to the command's
+    /// handler, not through the tree.
+    command,
     _,
 
     pub fn bubbles(self: EventKind) bool {

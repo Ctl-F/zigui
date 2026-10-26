@@ -7,7 +7,7 @@ https://claude.ai/artifact/XGC2eMeVS2WEMebrHEk6iT
 ## Status
 
 Foundation layer only. Builds and passes all tests on Zig 0.17.0
-(`zig build test`; 182 tests). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
+(`zig build test`; 218 tests). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
 now exposing `field_names` / `field_types` instead of `fields` (`shadow.zig`).
 
 The shadow-checker tests intentionally trigger `ui_check` warnings, so the
@@ -29,7 +29,9 @@ src/core/
   style.zig          Style: size/min/max, grow/shrink, direction, gap, padding, margin, align
   layout.zig         flex layout pass: measure (bottom-up) then place (top-down)
   paint.zig          paint pass: laid-out tree to draw list (stopgap `Visual` look)
-  keys.zig           Key enum and modifier bits (platform-independent)
+  keys.zig           Key enum, modifier bits, Chord; parse/format ("ctrl+shift+p")
+  commands.zig       command registry: named actions with title, enabled, handler
+  shortcuts.zig      scoped bindings, multi-key chords, keymap text loader
   event.zig          Event, EventKind, Listener (extern): capture/target/bubble
   dispatch.zig       immediate dispatch; destroys deferred until it finishes
   input.zig          pointer state machine (hover, capture, click) and keyboard
@@ -75,7 +77,12 @@ SDL_VIDEODRIVER=dummy ZIGUI_SCRIPT="click 700 22;type lay" ZIGUI_SCREENSHOT=out.
 
 Keys for the demo: Tab / Shift+Tab move focus, Enter or Space activate a focused
 button, the header's filter field narrows the sidebar as you type (Enter selects
-the first match), Esc leaves a focused field or quits.
+the first match), Esc leaves a focused field or quits. Commands and shortcuts:
+Ctrl+N / Ctrl+D add / remove a card, Ctrl+K Ctrl+X removes all cards (a two-key
+chord), Ctrl+B toggles the sidebar, Ctrl+F focuses the filter, Up/Down move
+through files while focus is in the sidebar (panel scope), Esc clears the filter
+while it has focus (widget scope). The header buttons run the same commands and
+show their shortcuts.
 
 The demo has working buttons (header "+ Card" / "- Card" / "Toggle sidebar" and
 selectable sidebar rows), real text in a UI font and a monospace font, and a
@@ -139,6 +146,24 @@ override with `ZIGUI_FONT=/path/ui.ttf` and `ZIGUI_MONO_FONT=/path/mono.ttf`.
   caret is (window coordinates) for the platform to enable text input and place
   the IME popup; `Ui.cursor()` picks the I-beam over fields. Clipboard access
   comes from the platform through `Ui.clipboard`.
+- Commands and shortcuts: a command is a named action (`file.save`) with a title,
+  an enabled flag, and a `callconv(.c)` handler that receives a `command` event
+  whose text is the name. Shortcuts bind chord sequences to commands in four
+  scopes: app, window, panel (focus inside a node's subtree), and widget (that
+  node has focus). The most specific scope wins, the deeper panel beats the
+  shallower, ties go to the latest binding, and a disabled command is skipped so
+  a less specific binding can take over. Key order: focused node (capture,
+  target, bubble) first, then shortcuts, then Tab focus movement. Plain typing
+  (printable key, at most Shift) never reaches shortcuts while a text widget is
+  focused; modified chords still do. Chords wait up to 1.5 s for the next key
+  (time comes from `Ui.tick`, so tick with the current time before delivering
+  input), a focus change or click cancels them, and a dead chord swallows its
+  last key. Within one scope a sequence may not be a prefix of another (`Conflict`).
+  Keymaps are text (`ctrl+k ctrl+c = edit.comment`, `window:` prefix,
+  `= none` to unbind, `#` comments) so users can remap; later lines override.
+  Auto-repeat re-runs only commands marked repeatable. Buttons can be linked to
+  a command (`setButtonCommand`): they run it on click and mirror its enabled
+  state.
 - Layout (`layout.zig`): border-box sizing; margins join the main-axis solve;
   percent is of the parent content box and falls back to auto (counted in
   `Layout.circular_percent`) under a `fit` parent. Children are descended into
@@ -162,10 +187,14 @@ override with `ZIGUI_FONT=/path/ui.ttf` and `ZIGUI_MONO_FONT=/path/mono.ttf`.
 3. Renderer gaps: glyph runs (needs the text system), image paints, damage-rect
    tracking in the paint pass, the SDL3 GPU backend. The software renderer
    evaluates paints in float per pixel; optimize when it shows up in profiles.
-4. Input and platform: a shortcut/command registry (scoped, multi-key chords,
-   remappable) and raw-key mode for canvases, focus scopes (modal traps, per-panel
+4. Input and platform: raw-key mode for canvases (they get keys before
+   shortcuts, minus a reserved escape set), focus scopes (modal traps, per-panel
    memory), tab indices and arrow-key groups, IME composition display (preedit),
-   multi-window, canvas pointer modes (lock, coalescing), accessibility tree.
+   multi-window (app scope would then span windows), canvas pointer modes (lock,
+   coalescing), accessibility tree. Commands: menus and a command palette (the
+   registry already has titles and shortcut text), checked/toggle state, a
+   ZON keymap format, `when`-style context conditions beyond scope and enabled,
+   keybinding display for chord prefixes ("Ctrl+K ..." hints).
    Text fields: undo/redo, max length, password mode, multi-line, rich text.
 5. Text follow-ups: wrapping and a width-constrained measure callback, multi-line,
    a HarfBuzz/FreeType backend (ligatures, bidi, GPOS kerning, variable fonts),

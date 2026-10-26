@@ -137,7 +137,21 @@ fn mapKey(scancode: u32) Key {
     if (scancode >= a and scancode <= a + 25) return @enumFromInt(@intFromEnum(Key.a) + (scancode - a));
     const f1 = sc(c.SDL_SCANCODE_F1);
     if (scancode >= f1 and scancode <= f1 + 11) return @enumFromInt(@intFromEnum(Key.f1) + (scancode - f1));
+    const n1 = sc(c.SDL_SCANCODE_1);
+    if (scancode >= n1 and scancode <= n1 + 8) return @enumFromInt(@intFromEnum(Key.d1) + (scancode - n1));
     return switch (scancode) {
+        sc(c.SDL_SCANCODE_0) => .d0,
+        sc(c.SDL_SCANCODE_MINUS) => .minus,
+        sc(c.SDL_SCANCODE_EQUALS) => .equals,
+        sc(c.SDL_SCANCODE_LEFTBRACKET) => .left_bracket,
+        sc(c.SDL_SCANCODE_RIGHTBRACKET) => .right_bracket,
+        sc(c.SDL_SCANCODE_BACKSLASH) => .backslash,
+        sc(c.SDL_SCANCODE_SEMICOLON) => .semicolon,
+        sc(c.SDL_SCANCODE_APOSTROPHE) => .quote,
+        sc(c.SDL_SCANCODE_GRAVE) => .grave,
+        sc(c.SDL_SCANCODE_COMMA) => .comma,
+        sc(c.SDL_SCANCODE_PERIOD) => .period,
+        sc(c.SDL_SCANCODE_SLASH) => .slash,
         sc(c.SDL_SCANCODE_RETURN), sc(c.SDL_SCANCODE_KP_ENTER) => .enter,
         sc(c.SDL_SCANCODE_ESCAPE) => .escape,
         sc(c.SDL_SCANCODE_BACKSPACE) => .backspace,
