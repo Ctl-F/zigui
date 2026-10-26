@@ -175,21 +175,28 @@ pub const LineEditor = struct {
     pub fn selectWordAt(self: *LineEditor, pos: usize) void {
         const s = self.text();
         if (s.len == 0) return;
-        var p = @min(pos, s.len - 1);
-        while (p > 0 and isContinuation(s[p])) p -= 1;
-        const cls = classAt(s, p);
-        var a = p;
-        while (a > 0) {
-            const pb = prevBoundary(s, a);
-            if (classAt(s, pb) != cls) break;
-            a = pb;
-        }
-        var b = nextBoundary(s, p);
-        while (b < s.len and classAt(s, b) == cls) b = nextBoundary(s, b);
-        self.anchor = a;
-        self.caret = b;
+        const r = wordRangeAt(s, pos);
+        self.anchor = r.start;
+        self.caret = r.end;
     }
 };
+
+/// The word (or run of spaces/punctuation) containing `pos` in `s`. `s` must be
+/// non-empty; `pos` is clamped to the last character.
+pub fn wordRangeAt(s: []const u8, pos: usize) Range {
+    var p = @min(pos, s.len - 1);
+    while (p > 0 and isContinuation(s[p])) p -= 1;
+    const cls = classAt(s, p);
+    var a = p;
+    while (a > 0) {
+        const pb = prevBoundary(s, a);
+        if (classAt(s, pb) != cls) break;
+        a = pb;
+    }
+    var b = nextBoundary(s, p);
+    while (b < s.len and classAt(s, b) == cls) b = nextBoundary(s, b);
+    return .{ .start = a, .end = b };
+}
 
 /// Start of the word to the left: skip spaces, then one run of a class.
 pub fn wordLeft(s: []const u8, pos: usize) usize {
