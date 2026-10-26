@@ -7,7 +7,7 @@ https://claude.ai/artifact/XGC2eMeVS2WEMebrHEk6iT
 ## Status
 
 Foundation layer only. Builds and passes all tests on Zig 0.17.0
-(`zig build test`; 276 tests). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
+(`zig build test`; 275 tests). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
 now exposing `field_names` / `field_types` instead of `fields` (`shadow.zig`).
 
 The shadow-checker tests intentionally trigger `ui_check` warnings, so the
