@@ -8,8 +8,10 @@ const Handle = zigui.Handle;
 
 const App = struct {
     ui: *Ui,
+    io: std.Io,
+    gpa: std.mem.Allocator,
 
-    fn addNode(self: *App, parent: Handle, style: zigui.Style, visual: zigui.Visual) !Handle {
+    fn addNode(self: *App, parent: Handle, style: zigui.Style, visual: zigui.tree.Visual) !Handle {
         const h = try self.ui.tree.create(.{ .style = style, .visual = visual });
         try self.ui.tree.appendChild(parent, h);
         return h;
@@ -19,7 +21,6 @@ const App = struct {
 fn app(user: ?*anyopaque) *App {
     return @ptrCast(@alignCast(user.?));
 }
-
 
 fn buildUi(a: *App) !void {
     const ui = a.ui;
@@ -31,15 +32,14 @@ fn buildUi(a: *App) !void {
     const header = try a.addNode(tree.root, .{
         .direction = .row,
         .height = zigui.Length.px(44),
-        .padding = zigui.Edges.xy(12, 8),
+        .padding = zigui.style.Edges.xy(12, 8),
         .gap = zigui.Length.px(8),
         .shrink = 0,
-    }, .{ .backgroudn = zigui.Color.rgb(80, 80, 80) });
+    }, .{ .background = zigui.Color.rgb(80, 80, 80) });
     const label = try ui.createLabel(header, .{ .grow = 1 }, "Hello World");
     label.props.size = 12;
     label.props.color = zigui.Color.white;
 }
-
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -55,10 +55,10 @@ pub fn main(init: std.process.Init) !void {
     defer window.destroy();
 
     var ui = try Ui.init(gpa);
-    defer ui.deinit();;
+    defer ui.deinit();
 
     const ui_bytes = stb.loadFirst(io, gpa, init.environ_map.get("ZIGUI_FONT"), &stb.ui_font_candidates);
-    defer if(ui_bytes) |b| gpa.free(b);
+    defer if (ui_bytes) |b| gpa.free(b);
 
     const mono_bytes = stb.loadFirst(io, gpa, init.environ_map.get("ZIGUI_MONO_FONT"), &stb.mono_font_candidates);
     defer if (mono_bytes) |b| gpa.free(b);
@@ -66,15 +66,14 @@ pub fn main(init: std.process.Init) !void {
     var ui_font: stb.StbFont = undefined;
     var mono_font: stb.StbFont = undefined;
 
-    if(ui_bytes) |bytes| {
+    if (ui_bytes) |bytes| {
         try ui_font.init(bytes, 0);
         _ = try ui.addFont(ui_font.backend());
-        if(mono_bytes) |mb| {
+        if (mono_bytes) |mb| {
             try mono_font.init(mb, 0);
             ui.theme.mono_font = try ui.addFont(mono_font.backend());
         }
-    }
-    else {
+    } else {
         std.log.warn("no UI font found", .{});
     }
 
@@ -95,11 +94,11 @@ pub fn main(init: std.process.Init) !void {
     var frames_drawn: u64 = 0;
 
     var running = true;
-    while(running) {
+    while (running) {
         _ = ui.tick(sdl.ticks());
 
         ui.update();
-        if(force or ui.isDirty()) {
+        if (force or ui.isDirty()) {
             const px = window.pixelSize();
             const scale = window.scale();
             try fb.resize(gpa, px.w, px.h);
@@ -107,16 +106,16 @@ pub fn main(init: std.process.Init) !void {
                 .w = @as(f32, @floatFromInt(px.w)) / scale,
                 .h = @as(f32, @floatFromInt(px.h)) / scale,
             };
-            if(scale != prewarmed_scale) {
+            if (scale != prewarmed_scale) {
                 prewarmed_scale = scale;
-                for(0..ui.text.fonts.items.len) |f| {
+                for (0..ui.text.fonts.items.len) |f| {
                     ui.text.prewarmAscii(@intCast(f), ui.theme.font_size * scale);
                     ui.text.prewarmAscii(@intCast(f), 13 * scale);
                 }
             }
 
             try ui.layoutAndPaint(logical, &list);
-            zigui.software.render(&fb, &list, .{ .scale = scale, .clear = zigui.Color.black, .glyphs = ui.glyphProvider()  });
+            zigui.software.render(&fb, &list, .{ .scale = scale, .clear = zigui.Color.black, .glyphs = ui.glyphProvider() });
             try window.present(fb.bytes(), fb.width, fb.height);
 
             force = false;
@@ -125,8 +124,25 @@ pub fn main(init: std.process.Init) !void {
 
         ui.endFrame();
 
-        const timeout: i32 = if(ui.nextWakeMs()) |ms| @intCast(ms) else -1;
+        const timeout: i32 = if (ui.nextWakeMs()) |ms| @intCast(ms) else -1;
         var ev = sdl.waitEvent(timeout);
         _ = ui.tick(sdl.ticks());
+        while (ev) |e| : (ev = sdl.pollEvent()) {
+            switch (e.data) {
+                .quit, .close_requested => running = false,
+                .resized, .expose => force = true,
+                .mouse_move => |m| ui.pointerMove(m.x, m.y),
+                .mouse_button => |m| ui.pointerButtonEx(m.x, m.y, @backingInt(m.button), m.down, m.clicks),
+                .mouse_wheel => |m| ui.wheel(0, 0, m.x, m.y),
+                .text_input => |t| ui.textInput(t.bytes[0..t.len]),
+                .key => |k| {
+                    const used = ui.keyHandled(k.key, k.mods, k.down, k.repeat);
+                    // Escape that nothing used: leave a focused widget, else quit.
+                    if (k.down and k.key == .escape and !used) {
+                        if (ui.focused() != null) ui.setFocus(null) else running = false;
+                    }
+                },
+            }
+        }
     }
 }

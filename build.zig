@@ -103,7 +103,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zigui", .module = mod },
                 .{ .name = "zigui_sdl", .module = sdl_mod },
-                .{ .name = "sigui_stb", .module = stb_mod },
+                .{ .name = "zigui_stb", .module = stb_mod },
             },
         }),
     });
