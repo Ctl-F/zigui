@@ -93,7 +93,26 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(demo);
 
+    const dedit = b.addExecutable(.{
+        .name = "dedit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/dedit.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zigui", .module = mod },
+                .{ .name = "zigui_sdl", .module = sdl_mod },
+                .{ .name = "sigui_stb", .module = stb_mod },
+            },
+        }),
+    });
+
     const run_demo = b.addRunArtifact(demo);
     const demo_step = b.step("demo", "Build and run the demo window (needs SDL3)");
     demo_step.dependOn(&run_demo.step);
+
+    const run_dedit = b.addRunArtifact(dedit);
+    const dedit_step = b.step("dedit", "Build and run the demo editor");
+    dedit_step.dependOn(&run_dedit.step);
 }

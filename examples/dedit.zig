@@ -1,0 +1,132 @@
+const std = @import("std");
+const sdl = @import("zigui_sdl");
+const stb = @import("zigui_stb");
+const zigui = @import("zigui");
+
+const Ui = zigui.Ui;
+const Handle = zigui.Handle;
+
+const App = struct {
+    ui: *Ui,
+
+    fn addNode(self: *App, parent: Handle, style: zigui.Style, visual: zigui.Visual) !Handle {
+        const h = try self.ui.tree.create(.{ .style = style, .visual = visual });
+        try self.ui.tree.appendChild(parent, h);
+        return h;
+    }
+};
+
+fn app(user: ?*anyopaque) *App {
+    return @ptrCast(@alignCast(user.?));
+}
+
+
+fn buildUi(a: *App) !void {
+    const ui = a.ui;
+    const tree = &ui.tree;
+
+    tree.get(tree.root).?.style = .{ .direction = .column };
+    tree.get(tree.root).?.visual = .{ .background = zigui.Color.rgb(32, 40, 60) };
+
+    const header = try a.addNode(tree.root, .{
+        .direction = .row,
+        .height = zigui.Length.px(44),
+        .padding = zigui.Edges.xy(12, 8),
+        .gap = zigui.Length.px(8),
+        .shrink = 0,
+    }, .{ .backgroudn = zigui.Color.rgb(80, 80, 80) });
+    const label = try ui.createLabel(header, .{ .grow = 1 }, "Hello World");
+    label.props.size = 12;
+    label.props.color = zigui.Color.white;
+}
+
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+
+    try sdl.init();
+    defer sdl.quit();
+
+    var window = sdl.Window.create("demo editor", 960, 600) catch |err| {
+        std.log.err("could not create window: {s} ({s})", .{ @errorName(err), sdl.lastError() });
+        return err;
+    };
+    defer window.destroy();
+
+    var ui = try Ui.init(gpa);
+    defer ui.deinit();;
+
+    const ui_bytes = stb.loadFirst(io, gpa, init.environ_map.get("ZIGUI_FONT"), &stb.ui_font_candidates);
+    defer if(ui_bytes) |b| gpa.free(b);
+
+    const mono_bytes = stb.loadFirst(io, gpa, init.environ_map.get("ZIGUI_MONO_FONT"), &stb.mono_font_candidates);
+    defer if (mono_bytes) |b| gpa.free(b);
+
+    var ui_font: stb.StbFont = undefined;
+    var mono_font: stb.StbFont = undefined;
+
+    if(ui_bytes) |bytes| {
+        try ui_font.init(bytes, 0);
+        _ = try ui.addFont(ui_font.backend());
+        if(mono_bytes) |mb| {
+            try mono_font.init(mb, 0);
+            ui.theme.mono_font = try ui.addFont(mono_font.backend());
+        }
+    }
+    else {
+        std.log.warn("no UI font found", .{});
+    }
+
+    var state: App = .{ .ui = &ui, .io = io, .gpa = gpa };
+    try buildUi(&state);
+
+    const commands = try gpa.alloc(zigui.draw_list.Command, 32768);
+    defer gpa.free(commands);
+    const glyphs = try gpa.alloc(zigui.draw_list.Glyph, 65536);
+    defer gpa.free(glyphs);
+    var list = zigui.DrawList.init(commands, glyphs);
+    var prewarmed_scale: f32 = 0;
+
+    var fb = try zigui.software.Framebuffer.init(gpa, 1, 1);
+    defer fb.deinit(gpa);
+
+    var force = true;
+    var frames_drawn: u64 = 0;
+
+    var running = true;
+    while(running) {
+        _ = ui.tick(sdl.ticks());
+
+        ui.update();
+        if(force or ui.isDirty()) {
+            const px = window.pixelSize();
+            const scale = window.scale();
+            try fb.resize(gpa, px.w, px.h);
+            const logical: zigui.geometry.Size = .{
+                .w = @as(f32, @floatFromInt(px.w)) / scale,
+                .h = @as(f32, @floatFromInt(px.h)) / scale,
+            };
+            if(scale != prewarmed_scale) {
+                prewarmed_scale = scale;
+                for(0..ui.text.fonts.items.len) |f| {
+                    ui.text.prewarmAscii(@intCast(f), ui.theme.font_size * scale);
+                    ui.text.prewarmAscii(@intCast(f), 13 * scale);
+                }
+            }
+
+            try ui.layoutAndPaint(logical, &list);
+            zigui.software.render(&fb, &list, .{ .scale = scale, .clear = zigui.Color.black, .glyphs = ui.glyphProvider()  });
+            try window.present(fb.bytes(), fb.width, fb.height);
+
+            force = false;
+            frames_drawn += 1;
+        }
+
+        ui.endFrame();
+
+        const timeout: i32 = if(ui.nextWakeMs()) |ms| @intCast(ms) else -1;
+        var ev = sdl.waitEvent(timeout);
+        _ = ui.tick(sdl.ticks());
+    }
+}
