@@ -55,6 +55,27 @@ pub fn build(b: *std.Build) void {
     });
     sdl_mod.addImport("sdl_c", sdl_c_mod);
 
+    // stb_truetype font backend. Separate module so core never needs C.
+    const stb_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/text/stb_c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    stb_c.addIncludePath(b.path("third_party/stb"));
+    const stb_mod = b.addModule("zigui_stb", .{
+        .root_source_file = b.path("src/text/stb.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    stb_mod.addImport("zigui", mod);
+    stb_mod.addImport("stb_c", stb_c.createModule());
+    stb_mod.addIncludePath(b.path("third_party/stb"));
+    stb_mod.addCSourceFile(.{ .file = b.path("src/text/stb_impl.c"), .flags = &.{} });
+
+    const stb_tests = b.addTest(.{ .root_module = stb_mod });
+    test_step.dependOn(&b.addRunArtifact(stb_tests).step);
+
     const demo = b.addExecutable(.{
         .name = "demo",
         .root_module = b.createModule(.{
@@ -65,6 +86,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zigui", .module = mod },
                 .{ .name = "zigui_sdl", .module = sdl_mod },
+                .{ .name = "zigui_stb", .module = stb_mod },
             },
         }),
     });

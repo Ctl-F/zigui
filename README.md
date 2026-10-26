@@ -7,7 +7,7 @@ https://claude.ai/artifact/XGC2eMeVS2WEMebrHEk6iT
 ## Status
 
 Foundation layer only. Builds and passes all tests on Zig 0.17.0
-(`zig build test`; 115 tests). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
+(`zig build test`; 140 tests). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
 now exposing `field_names` / `field_types` instead of `fields` (`shadow.zig`).
 
 The shadow-checker tests intentionally trigger `ui_check` warnings, so the
@@ -34,6 +34,8 @@ src/core/
   input.zig          pointer state machine: hover enter/leave, press capture, click
   ui.zig             Ui: tree + layout + input + widgets + theme, frame protocol
 src/widgets/
+  label.zig          Label state block (text, font, size, color, align)
+  common.zig         shared widget types (Text)
   button.zig         Button state block (props/out/node), listener, default painter
   theme.zig          Theme: colors, metrics, swappable painters
   shadow.zig         comptime shadow-copy checker (void when checks are off)
@@ -43,6 +45,13 @@ src/widgets/
 src/render/
   software.zig       software rasterizer: DrawList to RGBA8 (SDF-based AA)
   png.zig            tiny PNG encoder for screenshots
+src/text/
+  font.zig           font backend interface (swappable) + synthetic TestFont
+  atlas.zig          glyph atlas: shelf-packed 1024px pages, LRU page eviction
+  system.zig         TextSystem: font registry, shaping, monospace fast path
+  block.zig          TextBlock: a shaped line owned by a node
+  stb.zig            stb_truetype backend (own module `zigui_stb`, needs C)
+third_party/stb/     stb_truetype.h v1.26 (public domain), vendored unmodified
 src/platform/
   sdl.zig            SDL3 shim: windows, events, present (own types only)
 examples/demo.zig    IDE-style demo window
@@ -57,9 +66,10 @@ SDL_VIDEODRIVER=dummy ZIGUI_SCREENSHOT=out.png ./zig-out/bin/demo   # headless P
 SDL_VIDEODRIVER=dummy ZIGUI_SCRIPT="move 60 20;click 60 20" ZIGUI_SCREENSHOT=out.png ./zig-out/bin/demo
 ```
 
-The demo has working buttons: header "+ Card" / "- Card" / "Sidebar", and
-selectable sidebar rows. Text is not drawn yet (no text renderer), so buttons
-are unlabeled; the window title shows click and card counts.
+The demo has working buttons (header "+ Card" / "- Card" / "Toggle sidebar" and
+selectable sidebar rows), real text in a UI font and a monospace font, and a
+status label that updates with clicks. Fonts come from system paths (Linux);
+override with `ZIGUI_FONT=/path/ui.ttf` and `ZIGUI_MONO_FONT=/path/mono.ttf`.
 
 `zig build test` does not need SDL: the platform shim is a separate module.
 
@@ -85,6 +95,18 @@ are unlabeled; the window title shows click and card counts.
   button's block is reclaimed in `update` once its node is destroyed.
 - Frame protocol (see `ui.zig`): input, app logic, `update`, layout and paint
   if `isDirty`, then `endFrame`.
+- Text: `font.Backend` is the swappable layer (stb_truetype today). The text
+  system shapes UTF-8 lines (cmap, advances, pair kerning; no ligatures, bidi, or
+  complex scripts yet) into glyph ids plus positions, and the draw list carries
+  those, not strings. Monospace fonts get a fast path for ASCII. Glyphs are
+  rasterized on demand into the atlas at the exact device size with 4 subpixel
+  buckets (proportional text) or whole pixels (monospace). Atlas pages are only
+  evicted when not used this frame (`Ui.layoutAndPaint` starts a frame).
+- Text ownership: widget text is copied by the `Ui` setters and owned by the
+  toolkit; the node's shaped `TextBlock` is owned by the node. `Ui.update`
+  reshapes when the text, font, or size changed, including raw prop writes.
+  Layout learns a text node's size from `Node.intrinsic` (single line, no
+  wrapping yet, so no width-constrained measure callback).
 - Layout (`layout.zig`): border-box sizing; margins join the main-axis solve;
   percent is of the parent content box and falls back to auto (counted in
   `Layout.circular_percent`) under a `fit` parent. Children are descended into
@@ -110,8 +132,13 @@ are unlabeled; the window title shows click and card counts.
    evaluates paints in float per pixel; optimize when it shows up in profiles.
 4. Input and platform: keyboard focus and tab order, key routing and shortcuts,
    cursors, clipboard, IME, multi-window, canvas pointer modes (lock, coalescing).
-5. Text system: glyph atlas, shaping cache, monospace fast path.
+5. Text follow-ups: wrapping and a width-constrained measure callback, multi-line,
+   a HarfBuzz/FreeType backend (ligatures, bidi, GPOS kerning, variable fonts),
+   color glyphs/emoji, font fallback chains, bundled default font, text gamma/
+   contrast tuning, GPU atlas upload (pages already track a dirty flag), the
+   monospace draw-list record from the design doc (positions are still emitted
+   per glyph). Text selection, caret, IME, and the text field/editor widgets.
 6. Piece-table editor core with reversible command log.
-7. Strings: the node `label` is not owned; ownership policy is undecided.
+7. The accessibility `label` on nodes is still unowned (widget text is owned).
 
 Tests live next to the code (`test` blocks) and run through `src/root.zig`.

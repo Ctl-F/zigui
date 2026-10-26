@@ -11,6 +11,7 @@ const DirtyFlags = @import("dirty.zig").DirtyFlags;
 const Rect = @import("geometry.zig").Rect;
 const Size = @import("geometry.zig").Size;
 const event = @import("event.zig");
+const TextBlock = @import("../text/block.zig").TextBlock;
 
 /// Accessibility role. Reserved on every node from v0.1; platform bridges come later.
 pub const Role = enum(u16) {
@@ -76,6 +77,8 @@ pub const Node = struct {
     user_data: ?*anyopaque = null,
     /// Lazily allocated listener table; null for nodes without listeners.
     listeners: ?*ListenerList = null,
+    /// Shaped text drawn inside this node's content box; owned by the node.
+    text: ?*TextBlock = null,
 
     /// Intrusive link for the tree's dirty-boundary stack (engine-internal).
     layout_queue_next: Handle = Handle.invalid,
@@ -118,7 +121,10 @@ pub const Tree = struct {
 
     pub fn deinit(self: *Tree) void {
         var it = self.pool.iterator();
-        while (it.next()) |entry| self.freeListeners(entry.ptr);
+        while (it.next()) |entry| {
+            self.freeListeners(entry.ptr);
+            self.freeText(entry.ptr);
+        }
         self.deferred.deinit(self.allocator);
         self.pool.deinit();
         self.* = undefined;
@@ -287,6 +293,7 @@ pub const Tree = struct {
             }
             if (node.layout_queued) self.unqueueBoundary(cur);
             self.freeListeners(node);
+            self.freeText(node);
             _ = self.pool.destroy(cur);
             destroyed += 1;
             if (is_top) break;
@@ -304,6 +311,34 @@ pub const Tree = struct {
         self.dispatch_depth -= 1;
         if (self.dispatch_depth > 0) return;
         while (self.deferred.pop()) |h| _ = self.destroySubtree(h);
+    }
+
+    fn freeText(self: *Tree, node: *Node) void {
+        if (node.text) |t| {
+            self.allocator.free(t.glyphs);
+            self.allocator.destroy(t);
+            node.text = null;
+        }
+    }
+
+    /// Attach (or replace) the node's text. `block.glyphs` must have been
+    /// allocated with the tree's allocator; the node takes ownership.
+    pub fn setText(self: *Tree, h: Handle, block: TextBlock) TreeError!void {
+        const node = self.get(h) orelse {
+            self.allocator.free(block.glyphs);
+            return error.InvalidHandle;
+        };
+        const copy = self.allocator.create(TextBlock) catch |e| {
+            self.allocator.free(block.glyphs);
+            return e;
+        };
+        copy.* = block;
+        self.freeText(node);
+        node.text = copy;
+    }
+
+    pub fn clearText(self: *Tree, h: Handle) void {
+        if (self.get(h)) |node| self.freeText(node);
     }
 
     fn freeListeners(self: *Tree, node: *Node) void {

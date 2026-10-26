@@ -11,6 +11,7 @@ const Tree = @import("tree.zig").Tree;
 const DrawList = @import("draw_list.zig").DrawList;
 const Paint = @import("draw_list.zig").Paint;
 const Rect = @import("geometry.zig").Rect;
+const layout_mod = @import("layout.zig");
 
 pub const Error = @import("draw_list.zig").Error;
 
@@ -38,11 +39,40 @@ fn paintNode(tree: *Tree, h: Handle, ox: f32, oy: f32, list: *DrawList) Error!vo
         try list.strokeRoundedRect(abs, v.border_width, v.radius, Paint.solid(v.border_color));
     }
 
+    if (node.text) |block| try paintText(block, node.style.padding, abs, list);
+
     const clip = node.flags.clip_children;
     if (clip) try list.pushClip(abs);
     var it = tree.children(h);
     while (it.next()) |c| try paintNode(tree, c, abs.x, abs.y, list);
     if (clip) _ = try list.popClip();
+}
+
+/// Draw a node's text block in its content box: vertically centered, aligned
+/// horizontally per the block. Text wider than the box is clipped to it.
+fn paintText(block: *const @import("../text/block.zig").TextBlock, padding: @import("style.zig").Edges, abs: Rect, list: *DrawList) Error!void {
+    if (block.glyphs.len == 0) return;
+    const pad = layout_mod.resolveEdges(padding, null);
+    const content: Rect = .{
+        .x = abs.x + pad.l,
+        .y = abs.y + pad.t,
+        .w = @max(abs.w - pad.l - pad.r, 0),
+        .h = @max(abs.h - pad.t - pad.b, 0),
+    };
+    const free = content.w - block.width;
+    const dx: f32 = switch (block.align_x) {
+        .start => 0,
+        .center => @max(free / 2, 0),
+        .end => @max(free, 0),
+    };
+    const gap = block.line_height - block.ascent - block.descent;
+    const baseline = content.y + (content.h - block.line_height) / 2 + gap / 2 + block.ascent;
+    const bounds: Rect = .{ .x = content.x + dx, .y = baseline - block.ascent, .w = block.width, .h = block.line_height };
+
+    const overflow = block.width > content.w;
+    if (overflow) try list.pushClip(content);
+    try list.glyphRunAt(bounds, block.glyphs, .{ .x = content.x + dx, .y = baseline }, block.color, block.font, block.size, block.subpixel);
+    if (overflow) _ = try list.popClip();
 }
 
 test "paints backgrounds in tree order with absolute coordinates" {

@@ -35,13 +35,13 @@ const Edges = @import("style.zig").Edges;
 const Tree = @import("tree.zig").Tree;
 const Node = @import("tree.zig").Node;
 
-const Pad = struct { l: f32, t: f32, r: f32, b: f32 };
+pub const Pad = struct { l: f32, t: f32, r: f32, b: f32 };
 
 fn edge(len: Length, base: ?f32) f32 {
     return length.resolve(len, .{ .parent = base, .content = 0 }).value;
 }
 
-fn resolveEdges(e: Edges, base: ?f32) Pad {
+pub fn resolveEdges(e: Edges, base: ?f32) Pad {
     return .{ .l = edge(e.left, base), .t = edge(e.top, base), .r = edge(e.right, base), .b = edge(e.bottom, base) };
 }
 

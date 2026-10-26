@@ -79,8 +79,11 @@ pub const Glyph = extern struct {
 ///   push_clip:         rect
 ///   push_opacity:      params[0] = opacity 0..1
 ///   glyph_run:         a = glyph offset, b = glyph count, rect = bounds,
-///                      paint = text color, aux via params[0] = font id,
-///                      params[1] = font size
+///                      paint = text color, params[0] = font id,
+///                      params[1] = font size (logical px),
+///                      params[2] = 1 for subpixel glyph positioning, else
+///                      positions snap to whole device pixels.
+///                      Glyph x/y are baseline pen positions in logical pixels.
 pub const Command = extern struct {
     kind: CommandKind,
     a: u32 = 0,
@@ -203,11 +206,41 @@ pub const DrawList = struct {
         font_id: u32,
         font_size: f32,
     ) Error!void {
+        return self.glyphRunEx(bounds, run, color, font_id, font_size, false);
+    }
+
+    /// Like `glyphRun`, with control over subpixel positioning (proportional
+    /// UI text) versus whole-pixel snapping (monospace editor text).
+    pub fn glyphRunEx(
+        self: *DrawList,
+        bounds: Rect,
+        run: []const Glyph,
+        color: Color,
+        font_id: u32,
+        font_size: f32,
+        subpixel: bool,
+    ) Error!void {
+        return self.glyphRunAt(bounds, run, .{}, color, font_id, font_size, subpixel);
+    }
+
+    /// Like `glyphRunEx`, adding `origin` to every glyph position as it is copied.
+    pub fn glyphRunAt(
+        self: *DrawList,
+        bounds: Rect,
+        run: []const Glyph,
+        origin: Vec2,
+        color: Color,
+        font_id: u32,
+        font_size: f32,
+        subpixel: bool,
+    ) Error!void {
         if (self.glyph_len + run.len > self.glyphs.len) return error.GlyphBufferFull;
         if (self.len == self.commands.len) return error.DrawListFull;
 
         const offset = self.glyph_len;
-        @memcpy(self.glyphs[offset .. offset + run.len], run);
+        for (run, self.glyphs[offset .. offset + run.len]) |src, *dst| {
+            dst.* = .{ .id = src.id, .x = src.x + origin.x, .y = src.y + origin.y };
+        }
         self.glyph_len += run.len;
 
         try self.push(.{
@@ -216,7 +249,7 @@ pub const DrawList = struct {
             .b = @intCast(run.len),
             .rect = bounds,
             .paint = Paint.solid(color),
-            .params = .{ @floatFromInt(font_id), font_size, 0, 0 },
+            .params = .{ @floatFromInt(font_id), font_size, if (subpixel) 1 else 0, 0 },
         });
     }
 };

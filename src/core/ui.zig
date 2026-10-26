@@ -24,37 +24,57 @@ const DrawList = @import("draw_list.zig").DrawList;
 const shadow = @import("shadow.zig");
 const button = @import("../widgets/button.zig");
 const Theme = @import("../widgets/theme.zig").Theme;
+const label = @import("../widgets/label.zig");
+const Text = @import("../widgets/common.zig").Text;
+const font = @import("../text/font.zig");
+const TextSystem = @import("../text/system.zig").TextSystem;
+const text_block = @import("../text/block.zig");
+const Color = geometry.Color;
 
 const Button = button.Button;
+const Label = label.Label;
 
 const ButtonSlot = struct {
     block: Button,
     checker: shadow.Checker(Button.Props),
 };
 
+const LabelSlot = struct {
+    block: Label,
+    checker: shadow.Checker(Label.Props),
+};
+
 pub const Ui = struct {
     gpa: std.mem.Allocator,
+    text: TextSystem,
     tree: Tree,
     layout: Layout,
     input: Input = .{},
     theme: Theme = .{},
     buttons: Pool(ButtonSlot, 64),
+    labels: Pool(LabelSlot, 64),
 
     pub fn init(gpa: std.mem.Allocator) !Ui {
         var tree = try Tree.init(gpa);
         errdefer tree.deinit();
         return .{
             .gpa = gpa,
+            .text = TextSystem.init(gpa),
             .tree = tree,
             .layout = Layout.init(gpa),
             .buttons = Pool(ButtonSlot, 64).init(gpa),
+            .labels = Pool(LabelSlot, 64).init(gpa),
         };
     }
 
     pub fn deinit(self: *Ui) void {
         var it = self.buttons.iterator();
-        while (it.next()) |e| self.freeText(&e.ptr.block);
+        while (it.next()) |e| self.freeText(&e.ptr.block.props.text);
         self.buttons.deinit();
+        var lit = self.labels.iterator();
+        while (lit.next()) |e| self.freeText(&e.ptr.block.props.text);
+        self.labels.deinit();
+        self.text.deinit();
         self.layout.deinit();
         self.tree.deinit();
         self.* = undefined;
@@ -79,17 +99,104 @@ pub const Ui = struct {
         return &slot.block;
     }
 
-    fn freeText(self: *Ui, b: *Button) void {
-        if (b.props.text.ptr) |p| self.gpa.free(p[0..b.props.text.len]);
-        b.props.text = .{};
+    fn freeText(self: *Ui, t: *Text) void {
+        if (t.ptr) |p| self.gpa.free(p[0..t.len]);
+        t.* = .{};
+    }
+
+    /// Replace a widget's text with a toolkit-owned copy of `text`.
+    fn replaceText(self: *Ui, t: *Text, text: []const u8) !void {
+        const copy = try self.gpa.dupe(u8, text);
+        self.freeText(t);
+        t.* = .{ .ptr = copy.ptr, .len = copy.len };
     }
 
     /// Copy `text` into toolkit-owned storage; the caller may free its own copy.
     pub fn setButtonText(self: *Ui, b: *Button, text: []const u8) !void {
-        const copy = try self.gpa.dupe(u8, text);
-        self.freeText(b);
-        b.props.text = .{ .ptr = copy.ptr, .len = copy.len };
+        try self.replaceText(&b.props.text, text);
         self.tree.markDirty(b.node, DirtyFlags.layout_and_paint);
+    }
+
+    // ---- labels -----------------------------------------------------------
+
+    pub fn createLabel(self: *Ui, parent: Handle, style: Style, text: []const u8) !*Label {
+        const node_h = try self.tree.create(.{ .role = .label, .style = style });
+        errdefer _ = self.tree.destroySubtree(node_h);
+        try self.tree.appendChild(parent, node_h);
+
+        var blk: Label = .{ .node = node_h };
+        const slot_h = try self.labels.create(.{ .block = blk, .checker = shadow.Checker(Label.Props).init(&blk.props) });
+        errdefer _ = self.labels.destroy(slot_h);
+        const slot = self.labels.get(slot_h).?;
+        try self.replaceText(&slot.block.props.text, text);
+        slot.checker.sync(&slot.block.props);
+        return &slot.block;
+    }
+
+    pub fn setLabelText(self: *Ui, l: *Label, text: []const u8) !void {
+        try self.replaceText(&l.props.text, text);
+        self.tree.markDirty(l.node, DirtyFlags.layout_and_paint);
+    }
+
+    // ---- fonts ------------------------------------------------------------
+
+    /// Register a font backend. The first font added becomes both theme fonts.
+    pub fn addFont(self: *Ui, backend: font.Backend) !u32 {
+        const id = try self.text.addFont(backend);
+        if (id == 0) {
+            self.theme.ui_font = 0;
+            self.theme.mono_font = 0;
+        }
+        return id;
+    }
+
+    /// Shape `text` for the node and set its intrinsic size, if it changed.
+    /// Silently keeps the old text if allocation fails or no font exists.
+    fn syncText(self: *Ui, h: Handle, text: Text, f: u32, size: f32, color: Color, al: text_block.Align) void {
+        if (f >= self.text.fonts.items.len) return;
+        const node = self.tree.get(h) orelse return;
+        const src = text.slice();
+
+        if (node.text) |old| {
+            const same = old.src_ptr == @intFromPtr(src.ptr) and old.src_len == src.len and old.font == f and old.size == size;
+            if (same) {
+                if (!std.meta.eql(old.color, color) or old.align_x != al) {
+                    old.color = color;
+                    old.align_x = al;
+                    self.tree.markDirty(h, DirtyFlags.paint_only);
+                }
+                return;
+            }
+        } else if (src.len == 0) {
+            return;
+        }
+
+        var glyphs: std.ArrayListUnmanaged(@import("../text/system.zig").Glyph) = .empty;
+        const r = self.text.shape(f, size, src, &glyphs, self.gpa) catch {
+            glyphs.deinit(self.gpa);
+            return;
+        };
+        const m = self.text.metrics(f, size);
+        const owned = glyphs.toOwnedSlice(self.gpa) catch {
+            glyphs.deinit(self.gpa);
+            return;
+        };
+        self.tree.setText(h, .{
+            .glyphs = owned,
+            .width = r.width,
+            .ascent = m.ascent,
+            .descent = m.descent,
+            .line_height = m.lineHeight(),
+            .font = f,
+            .size = size,
+            .color = color,
+            .align_x = al,
+            .subpixel = !self.text.isMonospace(f),
+            .src_ptr = @intFromPtr(src.ptr),
+            .src_len = src.len,
+        }) catch return;
+        node.intrinsic = .{ .w = r.width, .h = m.lineHeight() };
+        self.tree.markDirty(h, DirtyFlags.layout_and_paint);
     }
 
     pub fn setButtonEnabled(self: *Ui, b: *Button, enabled: bool) void {
@@ -133,38 +240,72 @@ pub const Ui = struct {
     /// shadow copies (debug builds), and resolve each widget's look through
     /// the theme's painter.
     pub fn update(self: *Ui) void {
-        // Reclaim stale blocks. Restart after each removal: the pool must not
-        // be mutated mid-iteration.
-        while (true) {
-            var stale: ?Handle = null;
-            var it = self.buttons.iterator();
-            while (it.next()) |e| {
-                if (!self.tree.isValid(e.ptr.block.node)) {
-                    stale = e.handle;
-                    break;
-                }
-            }
-            const h = stale orelse break;
-            self.freeText(&self.buttons.get(h).?.block);
-            _ = self.buttons.destroy(h);
-        }
+        self.sweep(&self.buttons);
+        self.sweep(&self.labels);
 
         var it = self.buttons.iterator();
         while (it.next()) |e| {
             const b = &e.ptr.block;
             const node = self.tree.get(b.node).?;
-
-            var flags = node.dirty;
-            e.ptr.checker.verify(&b.props, &flags, "button");
-            const added = DirtyFlags.fromBits(flags.bits() & ~node.dirty.bits());
-            if (!added.isClean()) self.tree.markDirty(b.node, added);
+            self.verifyProps(b.node, &e.ptr.checker, &b.props, "button");
 
             const look = self.theme.button_painter(b, &self.theme);
             if (!std.mem.eql(u8, std.mem.asBytes(&look), std.mem.asBytes(&node.visual))) {
                 node.visual = look;
                 self.tree.markDirty(b.node, DirtyFlags.paint_only);
             }
+            const c = self.theme.button_colors[@min(@intFromEnum(b.props.variant), self.theme.button_colors.len - 1)];
+            self.syncText(b.node, b.props.text, self.theme.ui_font, self.theme.font_size, if (b.props.enabled) c.text else c.text_disabled, b.props.text_align);
         }
+
+        var lit = self.labels.iterator();
+        while (lit.next()) |e| {
+            const l = &e.ptr.block;
+            self.verifyProps(l.node, &e.ptr.checker, &l.props, "label");
+            const f = switch (l.props.font) {
+                .ui => self.theme.ui_font,
+                .mono => self.theme.mono_font,
+            };
+            const size = if (l.props.size > 0) l.props.size else self.theme.font_size;
+            const color = if (l.props.color.a != 0) l.props.color else self.theme.text_color;
+            self.syncText(l.node, l.props.text, f, size, color, l.props.text_align);
+            if (self.tree.get(l.node).?.text) |t| {
+                l.out.text_width = t.width;
+                l.out.text_height = t.line_height;
+            }
+        }
+    }
+
+    /// Free blocks whose node was destroyed. Restarts after each removal: the
+    /// pool must not be mutated mid-iteration.
+    fn sweep(self: *Ui, pool: anytype) void {
+        while (true) {
+            var stale: ?Handle = null;
+            var it = pool.iterator();
+            while (it.next()) |e| {
+                if (!self.tree.isValid(e.ptr.block.node)) {
+                    stale = e.handle;
+                    break;
+                }
+            }
+            const h = stale orelse return;
+            self.freeText(&pool.get(h).?.block.props.text);
+            _ = pool.destroy(h);
+        }
+    }
+
+    /// Shadow-check raw prop writes; fold any missing dirty bits into the tree.
+    fn verifyProps(self: *Ui, h: Handle, checker: anytype, props: anytype, name: []const u8) void {
+        const node = self.tree.get(h).?;
+        var flags = node.dirty;
+        checker.verify(props, &flags, name);
+        const added = DirtyFlags.fromBits(flags.bits() & ~node.dirty.bits());
+        if (!added.isClean()) self.tree.markDirty(h, added);
+    }
+
+    /// Glyph bitmap source for the renderer: `software.render(..., .{ .glyphs = ui.glyphProvider() })`.
+    pub fn glyphProvider(self: *Ui) @import("../text/system.zig").GlyphProvider {
+        return self.text.provider();
     }
 
     /// True if anything needs layout or repaint.
@@ -175,6 +316,7 @@ pub const Ui = struct {
 
     /// Lay out for a window of `size` (logical pixels) and rebuild `list`.
     pub fn layoutAndPaint(self: *Ui, size: geometry.Size, list: *DrawList) !void {
+        self.text.atlas.beginFrame();
         try self.layout.run(&self.tree, size);
         try paint.build(&self.tree, list);
     }
@@ -190,18 +332,19 @@ pub const Ui = struct {
 // ---- tests -----------------------------------------------------------------
 
 const Length = @import("length.zig").Length;
-const Color = geometry.Color;
+const Edges = @import("style.zig").Edges;
 const draw_list = @import("draw_list.zig");
 
 const Harness = struct {
     ui: Ui,
     cmds: [64]draw_list.Command = undefined,
+    glyph_store: [256]draw_list.Glyph = undefined,
     list: DrawList = undefined,
 
     fn init() !*Harness {
         const h = try std.testing.allocator.create(Harness);
         h.ui = try Ui.init(std.testing.allocator);
-        h.list = DrawList.init(&h.cmds, &.{});
+        h.list = DrawList.init(&h.cmds, &h.glyph_store);
         h.ui.tree.get(h.ui.tree.root).?.style = .{ .align_items = .start, .gap = Length.px(10) };
         return h;
     }
@@ -392,4 +535,135 @@ test "setHidden relays out the parent" {
     t.click(10, 10); // the hidden button no longer takes the click; b is under it now
     try std.testing.expectEqual(@as(u32, 0), a.out.click_count);
     try std.testing.expectEqual(@as(u32, 1), b.out.click_count);
+}
+
+// ---- text integration tests -------------------------------------------------
+
+const TextHarness = struct {
+    h: *Harness,
+    prop: font.TestFont = .{},
+    mono: font.TestFont = .{ .monospace = true },
+
+    fn init() !*TextHarness {
+        const t = try std.testing.allocator.create(TextHarness);
+        t.* = .{ .h = try Harness.init() };
+        _ = try t.h.ui.addFont(t.prop.backend());
+        t.h.ui.theme.mono_font = try t.h.ui.addFont(t.mono.backend());
+        t.h.ui.theme.font_size = 20;
+        return t;
+    }
+
+    fn deinit(self: *TextHarness) void {
+        self.h.deinit();
+        std.testing.allocator.destroy(self);
+    }
+};
+
+test "a label measures its text and lays out at that size" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const l = try t.h.ui.createLabel(t.h.ui.tree.root, .{}, "Mi");
+    try t.h.frame();
+    const node = t.h.ui.tree.get(l.node).?;
+    // M = 0.9em, i = 0.25em at 20px; line height = (0.8 + 0.2 + 0.1) * 20.
+    try std.testing.expectApproxEqAbs(@as(f32, 23), node.rect.w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 22), node.rect.h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 23), l.out.text_width, 0.01);
+}
+
+test "labels reshape when text, size, or font change, and keep their text copy" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const l = try ui.createLabel(ui.tree.root, .{}, "ab");
+    try t.h.frame();
+    const w1 = l.out.text_width;
+
+    var buf = [_]u8{ 'a', 'b', 'c' };
+    try ui.setLabelText(l, &buf);
+    buf[0] = 'Z'; // the toolkit copied it
+    try t.h.frame();
+    try std.testing.expect(l.out.text_width > w1);
+    try std.testing.expectEqual(@as(u32, 'a'), ui.tree.get(l.node).?.text.?.glyphs[0].id);
+
+    const w2 = l.out.text_width;
+    l.props.size = 40; // raw write: the shadow checker or sync must pick it up
+    try t.h.frame();
+    try std.testing.expectApproxEqAbs(w2 * 2, l.out.text_width, 0.01);
+
+    l.props.font = .mono;
+    try t.h.frame();
+    try std.testing.expect(!ui.tree.get(l.node).?.text.?.subpixel); // monospace snaps to pixels
+    try std.testing.expectApproxEqAbs(@as(f32, 3 * 0.6 * 40), l.out.text_width, 0.01);
+}
+
+test "an auto-sized button wraps its label plus padding, and paints centered text" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.tree.get(ui.tree.root).?.style = .{ .align_items = .start };
+    const b = try ui.createButton(ui.tree.root, .{ .padding = Edges.xy(10, 5) });
+    try ui.setButtonText(b, "MM"); // 2 * 0.9 * 20 = 36 wide
+    try t.h.frame();
+
+    const node = ui.tree.get(b.node).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 56), node.rect.w, 0.01); // 36 + 2 * 10
+    try std.testing.expectApproxEqAbs(@as(f32, 32), node.rect.h, 0.01); // 22 + 2 * 5
+
+    var found = false;
+    for (t.h.list.items()) |cmd| {
+        if (cmd.kind != .glyph_run) continue;
+        found = true;
+        try std.testing.expectEqual(@as(u32, 2), cmd.b);
+        const g = t.h.list.glyphItems()[cmd.a];
+        try std.testing.expectApproxEqAbs(@as(f32, 10), g.x, 0.01); // content-box left
+        // Baseline: padding 5 + half the 2px line gap + ascent 16.
+        try std.testing.expectApproxEqAbs(@as(f32, 22), g.y, 0.01);
+        try std.testing.expectEqual(ui.theme.button_colors[0].text, cmd.paint.color);
+    }
+    try std.testing.expect(found);
+}
+
+test "disabled buttons use the disabled text color" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const b = try ui.createButton(ui.tree.root, .{ .padding = Edges.all(4) });
+    try ui.setButtonText(b, "x");
+    ui.setButtonEnabled(b, false);
+    try t.h.frame();
+    try std.testing.expectEqual(ui.theme.button_colors[0].text_disabled, ui.tree.get(b.node).?.text.?.color);
+}
+
+test "destroying a node frees its text, and text outlives nothing" {
+    const t = try TextHarness.init();
+    defer t.deinit(); // leak-checked
+    const ui = &t.h.ui;
+    const l = try ui.createLabel(ui.tree.root, .{}, "temporary");
+    const b = try ui.createButton(ui.tree.root, .{});
+    try ui.setButtonText(b, "also temporary");
+    try t.h.frame();
+    _ = ui.tree.destroySubtree(l.node);
+    t.h.ui.update();
+    try std.testing.expectEqual(@as(u32, 0), ui.labels.count());
+    try std.testing.expectEqual(@as(u32, 1), ui.buttons.count());
+}
+
+test "text renders through the software renderer" {
+    const software = @import("../render/software.zig");
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.tree.get(ui.tree.root).?.visual.background = Color.white;
+    const l = try ui.createLabel(ui.tree.root, .{}, "MMM");
+    l.props.color = Color.black;
+    try t.h.frame();
+
+    var fb = try software.Framebuffer.init(std.testing.allocator, 400, 100);
+    defer fb.deinit(std.testing.allocator);
+    software.render(&fb, &t.h.list, .{ .clear = Color.white, .glyphs = ui.glyphProvider() });
+    var ink: usize = 0;
+    for (fb.pixels) |p| ink += @intFromBool(p.r < 128);
+    try std.testing.expect(ink > 100);
+    try std.testing.expect(ui.text.atlas.count() >= 1);
 }

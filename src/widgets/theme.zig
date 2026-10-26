@@ -13,6 +13,8 @@ pub const ButtonColors = struct {
     disabled: Color,
     border: Color = Color.transparent,
     border_width: f32 = 0,
+    text: Color = Color.rgb(0xdf, 0xe1, 0xe5),
+    text_disabled: Color = Color.rgb(0x7a, 0x7d, 0x83),
 };
 
 /// Turns a button's state into a `Visual`. Replace to restyle all buttons.
@@ -51,5 +53,11 @@ pub const Theme = struct {
         },
     },
     corner_radius: f32 = 6,
+    /// Font ids from `Ui.addFont`. Both default to font 0 until a mono font is added.
+    ui_font: u32 = 0,
+    mono_font: u32 = 0,
+    /// Default em size for UI text, logical pixels.
+    font_size: f32 = 14,
+    text_color: Color = Color.rgb(0xdf, 0xe1, 0xe5),
     button_painter: ButtonPainter = button.defaultPainter,
 };

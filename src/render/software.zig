@@ -7,8 +7,12 @@
 //!
 //! Supported: fill_rect, stroke_rect (with radius), fill_rounded_rect (per-corner
 //! radii), line, push/pop clip (rectangular, pixel-snapped outward), push/pop
-//! opacity, solid / linear / radial paints. Not yet: glyph runs (no atlas
-//! exists), image patterns. Unsupported commands are skipped.
+//! opacity, solid / linear / radial paints, and glyph runs (through a
+//! `GlyphProvider`; without one, runs are skipped). Not yet: image patterns.
+//! Unsupported commands are skipped.
+//!
+//! Text blends coverage straight over the destination in sRGB space (no gamma
+//! correction or contrast tuning yet).
 //!
 //! Coordinates are logical pixels; `Options.scale` converts to device pixels.
 //! Pixels are straight (non-premultiplied) RGBA, matching `geometry.Color`.
@@ -22,6 +26,7 @@ const Color = geometry.Color;
 const Paint = draw_list.Paint;
 const DrawList = draw_list.DrawList;
 const Command = draw_list.Command;
+const GlyphProvider = @import("../text/system.zig").GlyphProvider;
 
 pub const Framebuffer = struct {
     pixels: []Color,
@@ -68,6 +73,8 @@ pub const Options = struct {
     clear: ?Color = null,
     /// Logical-pixel region to redraw. Everything outside is left untouched.
     damage: ?Rect = null,
+    /// Source of glyph bitmaps for `glyph_run` commands.
+    glyphs: ?GlyphProvider = null,
 };
 
 /// Half-open integer pixel rectangle.
@@ -207,6 +214,8 @@ fn toU8(v: f32) u8 {
 const Renderer = struct {
     fb: *Framebuffer,
     scale: f32,
+    glyphs: ?GlyphProvider = null,
+    glyph_items: []const draw_list.Glyph = &.{},
 
     clip: IRect,
     clips: [max_clip_depth]IRect = undefined,
@@ -292,6 +301,50 @@ const Renderer = struct {
         }
     }
 
+    fn drawGlyphRun(self: *Renderer, cmd: Command) void {
+        const provider = self.glyphs orelse return;
+        const end = @as(usize, cmd.a) + cmd.b;
+        if (end > self.glyph_items.len) return;
+        const font_id: u32 = @intFromFloat(@max(cmd.params[0], 0));
+        const size_px = cmd.params[1] * self.scale;
+        const subpixel = cmd.params[2] != 0;
+        const color = cmd.paint.color;
+        const w: usize = self.fb.width;
+
+        for (self.glyph_items[cmd.a..end]) |g| {
+            const dx = g.x * self.scale;
+            var ix: i32 = undefined;
+            var sub: u8 = 0;
+            if (subpixel) {
+                const fl = @floor(dx);
+                ix = floorI(fl);
+                sub = @intFromFloat(std.math.clamp(@floor((dx - fl) * 4), 0, 3));
+            } else {
+                ix = floorI(@round(dx));
+            }
+            const iy = floorI(@round(g.y * self.scale));
+            const img = provider.lookup(font_id, g.id, size_px, sub) orelse continue;
+            if (img.w == 0 or img.h == 0) continue;
+
+            const gx0 = ix + img.left;
+            const gy0 = iy - img.top;
+            const area = (IRect{ .x0 = gx0, .y0 = gy0, .x1 = gx0 + @as(i32, @intCast(img.w)), .y1 = gy0 + @as(i32, @intCast(img.h)) }).intersect(self.clip);
+            if (area.isEmpty()) continue;
+
+            var y = area.y0;
+            while (y < area.y1) : (y += 1) {
+                const src_row = img.pixels[(img.y + @as(u32, @intCast(y - gy0))) * img.stride + img.x ..];
+                const row = self.fb.pixels[@as(usize, @intCast(y)) * w ..][0..w];
+                var x = area.x0;
+                while (x < area.x1) : (x += 1) {
+                    const cov = src_row[@intCast(x - gx0)];
+                    if (cov == 0) continue;
+                    blend(&row[@intCast(x)], color, @as(f32, @floatFromInt(cov)) / 255.0 * self.opacity);
+                }
+            }
+        }
+    }
+
     fn execute(self: *Renderer, cmd: Command) void {
         switch (cmd.kind) {
             .fill_rect => self.fillRoundBox(cmd.rect, .{ 0, 0, 0, 0 }, cmd.paint),
@@ -355,8 +408,9 @@ const Renderer = struct {
                     self.opacity = self.opacities[self.opacity_n];
                 }
             },
-            // No glyph atlas yet; image paints and unknown kinds are skipped.
-            .glyph_run, _ => {},
+            .glyph_run => self.drawGlyphRun(cmd),
+            // Image paints and unknown kinds are skipped.
+            _ => {},
         }
     }
 };
@@ -368,7 +422,7 @@ pub fn render(fb: *Framebuffer, list: *const DrawList, opts: Options) void {
         const d: Rect = .{ .x = dmg.x * opts.scale, .y = dmg.y * opts.scale, .w = dmg.w * opts.scale, .h = dmg.h * opts.scale };
         bounds = bounds.intersect(IRect.covering(d, 0));
     }
-    var r: Renderer = .{ .fb = fb, .scale = opts.scale, .clip = bounds };
+    var r: Renderer = .{ .fb = fb, .scale = opts.scale, .clip = bounds, .glyphs = opts.glyphs, .glyph_items = list.glyphItems() };
 
     if (opts.clear) |c| {
         var y = bounds.y0;
@@ -522,4 +576,82 @@ test "line covers its path" {
     try std.testing.expectEqual(Color.black, fb.at(5, 4));
     try std.testing.expectEqual(Color.black, fb.at(5, 5));
     try std.testing.expectEqual(Color.white, fb.at(5, 2));
+}
+
+test "glyph runs blit atlas coverage at the pen position" {
+    const font = @import("../text/font.zig");
+    const system = @import("../text/system.zig");
+    var tf: font.TestFont = .{};
+    var ts = system.TextSystem.init(std.testing.allocator);
+    defer ts.deinit();
+    const f = try ts.addFont(tf.backend());
+
+    var fb = try Framebuffer.init(std.testing.allocator, 40, 30);
+    defer fb.deinit(std.testing.allocator);
+    var cmds: [4]Command = undefined;
+    var glyphs: [4]draw_list.Glyph = undefined;
+    var dl = DrawList.init(&cmds, &glyphs);
+    // Test-font 'x' at size 10: box is (5 wide, 7 tall) sitting on the baseline.
+    const run = [_]draw_list.Glyph{.{ .id = 'x', .x = 10, .y = 20 }};
+    try dl.glyphRun(.{ .x = 10, .y = 13, .w = 6, .h = 7 }, &run, Color.black, f, 10);
+    render(&fb, &dl, .{ .clear = Color.white, .glyphs = ts.provider() });
+
+    try std.testing.expectEqual(Color.black, fb.at(10, 19)); // just above the baseline
+    try std.testing.expectEqual(Color.black, fb.at(10, 13)); // top row of the box
+    try std.testing.expectEqual(Color.white, fb.at(10, 20)); // below the baseline
+    try std.testing.expectEqual(Color.white, fb.at(9, 15)); // left of the pen
+    try std.testing.expectEqual(Color.white, fb.at(10, 12)); // above the box
+}
+
+test "glyph runs respect clip and opacity, and are skipped without a provider" {
+    const font = @import("../text/font.zig");
+    const system = @import("../text/system.zig");
+    var tf: font.TestFont = .{};
+    var ts = system.TextSystem.init(std.testing.allocator);
+    defer ts.deinit();
+    const f = try ts.addFont(tf.backend());
+
+    var fb = try Framebuffer.init(std.testing.allocator, 40, 30);
+    defer fb.deinit(std.testing.allocator);
+    var cmds: [8]Command = undefined;
+    var glyphs: [4]draw_list.Glyph = undefined;
+    var dl = DrawList.init(&cmds, &glyphs);
+    const run = [_]draw_list.Glyph{.{ .id = 'x', .x = 10, .y = 20 }};
+    try dl.pushClip(.{ .x = 0, .y = 0, .w = 12, .h = 30 });
+    try dl.pushOpacity(0.5);
+    try dl.glyphRun(.{}, &run, Color.black, f, 10);
+    _ = try dl.popOpacity();
+    _ = try dl.popClip();
+
+    render(&fb, &dl, .{ .clear = Color.white, .glyphs = ts.provider() });
+    try std.testing.expectEqual(@as(u8, 128), fb.at(11, 15).r); // half opacity, inside clip
+    try std.testing.expectEqual(Color.white, fb.at(12, 15)); // clipped
+
+    render(&fb, &dl, .{ .clear = Color.white }); // no provider
+    try std.testing.expectEqual(Color.white, fb.at(11, 15));
+}
+
+test "glyph runs rasterize at the device size when scaled" {
+    const font = @import("../text/font.zig");
+    const system = @import("../text/system.zig");
+    var tf: font.TestFont = .{};
+    var ts = system.TextSystem.init(std.testing.allocator);
+    defer ts.deinit();
+    const f = try ts.addFont(tf.backend());
+
+    var fb = try Framebuffer.init(std.testing.allocator, 60, 60);
+    defer fb.deinit(std.testing.allocator);
+    var cmds: [4]Command = undefined;
+    var glyphs: [4]draw_list.Glyph = undefined;
+    var dl = DrawList.init(&cmds, &glyphs);
+    const run = [_]draw_list.Glyph{.{ .id = 'x', .x = 10, .y = 20 }};
+    try dl.glyphRun(.{}, &run, Color.black, f, 10);
+    render(&fb, &dl, .{ .clear = Color.white, .glyphs = ts.provider(), .scale = 2 });
+
+    // At 2x the pen is at (20, 40) and the glyph is rasterized at size 20: 10 wide, 14 tall.
+    try std.testing.expectEqual(Color.black, fb.at(20, 26));
+    try std.testing.expectEqual(Color.black, fb.at(29, 39));
+    try std.testing.expectEqual(Color.white, fb.at(30, 30));
+    try std.testing.expectEqual(Color.white, fb.at(20, 40));
+    try std.testing.expectEqual(Color.white, fb.at(20, 25));
 }

@@ -13,19 +13,11 @@ const event = @import("../core/event.zig");
 const shadow = @import("../core/shadow.zig");
 const Visual = @import("../core/style.zig").Visual;
 const Theme = @import("theme.zig").Theme;
+const Align = @import("../text/block.zig").Align;
 
 pub const Variant = enum(u32) { normal = 0, primary, danger, flat };
 
-/// Toolkit-owned string: set it through `Ui.setButtonText`, which copies.
-pub const Text = extern struct {
-    ptr: ?[*]const u8 = null,
-    len: usize = 0,
-
-    pub fn slice(self: Text) []const u8 {
-        const p = self.ptr orelse return "";
-        return p[0..self.len];
-    }
-};
+pub const Text = @import("common.zig").Text;
 
 pub const Button = extern struct {
     props: Props = .{},
@@ -36,6 +28,7 @@ pub const Button = extern struct {
         text: Text = .{},
         enabled: bool = true,
         variant: Variant = .normal,
+        text_align: Align = .center,
         on_click: ?event.Handler = null,
         on_click_user: ?*anyopaque = null,
 
@@ -43,6 +36,7 @@ pub const Button = extern struct {
             .text = shadow.Category.layout,
             .enabled = shadow.Category.paint,
             .variant = shadow.Category.paint,
+            .text_align = shadow.Category.paint,
         };
     };
 
