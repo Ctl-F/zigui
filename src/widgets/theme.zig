@@ -5,6 +5,7 @@ const geometry = @import("../core/geometry.zig");
 const Color = geometry.Color;
 const Visual = @import("../core/style.zig").Visual;
 const button = @import("button.zig");
+const syntax = @import("../editor/syntax.zig");
 
 pub const ButtonColors = struct {
     normal: Color,
@@ -32,7 +33,32 @@ pub const FieldColors = struct {
     caret: Color = Color.rgb(0xdf, 0xe1, 0xe5),
 };
 
+/// Default token colors, indexed by `syntax.TokenKind`.
+fn defaultSyntaxColors() [syntax.token_kind_count]Color {
+    var c: [syntax.token_kind_count]Color = undefined;
+    c[@intFromEnum(syntax.TokenKind.plain)] = Color.rgb(0xd4, 0xd4, 0xd4);
+    c[@intFromEnum(syntax.TokenKind.keyword)] = Color.rgb(0x56, 0x9c, 0xd6);
+    c[@intFromEnum(syntax.TokenKind.type)] = Color.rgb(0x4e, 0xc9, 0xb0);
+    c[@intFromEnum(syntax.TokenKind.function)] = Color.rgb(0xdc, 0xdc, 0xaa);
+    c[@intFromEnum(syntax.TokenKind.builtin)] = Color.rgb(0xc5, 0x86, 0xc0);
+    c[@intFromEnum(syntax.TokenKind.constant)] = Color.rgb(0x4f, 0xc1, 0xff);
+    c[@intFromEnum(syntax.TokenKind.string)] = Color.rgb(0xce, 0x91, 0x78);
+    c[@intFromEnum(syntax.TokenKind.number)] = Color.rgb(0xb5, 0xce, 0xa8);
+    c[@intFromEnum(syntax.TokenKind.comment)] = Color.rgb(0x6a, 0x99, 0x55);
+    c[@intFromEnum(syntax.TokenKind.doc_comment)] = Color.rgb(0x7f, 0xb8, 0x6a);
+    c[@intFromEnum(syntax.TokenKind.operator)] = Color.rgb(0xc8, 0xc8, 0xc8);
+    c[@intFromEnum(syntax.TokenKind.punctuation)] = Color.rgb(0xa8, 0xaa, 0xb0);
+    c[@intFromEnum(syntax.TokenKind.preprocessor)] = Color.rgb(0xc5, 0x86, 0xc0);
+    c[@intFromEnum(syntax.TokenKind.heading)] = Color.rgb(0x56, 0x9c, 0xd6);
+    c[@intFromEnum(syntax.TokenKind.emphasis)] = Color.rgb(0xdc, 0xdc, 0xaa);
+    return c;
+}
+
 pub const EditorColors = struct {
+    /// Colors for syntax tokens, indexed by `syntax.TokenKind`. `plain` is the
+    /// text color used when there is no highlighting.
+    syntax: [syntax.token_kind_count]Color = defaultSyntaxColors(),
+
     background: Color = Color.rgb(0x1e, 0x1f, 0x22),
     gutter_background: Color = Color.rgb(0x1e, 0x1f, 0x22),
     gutter_text: Color = Color.rgb(0x6b, 0x6f, 0x76),
@@ -43,6 +69,10 @@ pub const EditorColors = struct {
     selection_unfocused: Color = Color.rgba(0x6b, 0x6f, 0x76, 0x60),
     caret: Color = Color.rgb(0xe8, 0xea, 0xed),
     scrollbar: Color = Color.rgba(0xff, 0xff, 0xff, 0x28),
+
+    pub fn tokenColor(self: *const EditorColors, kind: syntax.TokenKind) Color {
+        return self.syntax[@intFromEnum(kind)];
+    }
 };
 
 pub const Theme = struct {

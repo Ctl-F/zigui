@@ -7,7 +7,7 @@ https://claude.ai/artifact/XGC2eMeVS2WEMebrHEk6iT
 ## Status
 
 Foundation layer only. Builds and passes all tests on Zig 0.17.0
-(`zig build test`; 275 tests). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
+(`zig build test`; 304 tests). The only 0.17 fix needed was `@typeInfo(...).@"struct"`
 now exposing `field_names` / `field_types` instead of `fields` (`shadow.zig`).
 
 The shadow-checker tests intentionally trigger `ui_check` warnings, so the
@@ -57,6 +57,8 @@ src/editor/
   document.zig       Document: one edit path (Op/Command), change records, lines, columns
   selection.zig      SelectionSet: sorted, merged (anchor, head) ranges; one cursor = list of one
   editor.zig         Editor: motion, edits, transactions, undo/redo, multi-cursor
+  syntax.zig         line lexer + languages as data (Zig, C/C++, JSON, Markdown, plain)
+  highlighter.zig    incremental per-line lexer state, driven by Document.changes
 src/text/
   font.zig           font backend interface (swappable) + synthetic TestFont
   gap_buffer.zig    byte gap buffer (storage for single-line fields)
@@ -192,6 +194,19 @@ override with `ZIGUI_FONT=/path/ui.ttf` and `ZIGUI_MONO_FONT=/path/mono.ttf`.
   after. Cursor movement is not undoable. A saved-state marker tracks `modified`
   (and notices when redo history that held the saved state is discarded).
   Columns count code points; "\r\n" is one character and one line terminator.
+- Syntax highlighting: a `Language` is data (comment and string syntax, a word
+  table, a few flags); `lexLine(lang, state, line, spans)` colors one line and
+  returns the state the next line starts in. State only holds what crosses a line
+  break (block comment depth, a Markdown fence), so most lines lex independently.
+  The `Highlighter` keeps each line's end state and a dirty flag, splices them from
+  `Document.changes`, and relexes dirty lines in order, stopping as soon as a line
+  ends in the state it had before (editing one line of a 2000-line file relexes
+  one line; opening a block comment recolors exactly as far as it matters). Spans
+  are computed on demand for visible lines, so only the lines above the viewport
+  are ever lexed, once. The lexer is approximate, like a TextMate grammar: it
+  colors what is lexically obvious and guesses the rest (a name before `(` is a
+  function, a capitalized name is a type where the language asks for it). The draw
+  list now reserves slots for pops so a full frame can still close its clips.
 - Code editor widget: only visible lines are built and drawn (tabs expanded,
   shaped through the text system), so cost does not grow with document size. Caret
   stops come from the same shaping loop as the glyphs. The widget has a paint hook
@@ -235,8 +250,11 @@ override with `ZIGUI_FONT=/path/ui.ttf` and `ZIGUI_MONO_FONT=/path/mono.ttf`.
    contrast tuning, GPU atlas upload (pages already track a dirty flag), the
    monospace draw-list record from the design doc (positions are still emitted
    per glyph). Text selection, caret, IME, and the text field/editor widgets.
-6. Editor follow-ups: syntax highlighting (subscribe to `Document.changes`;
-   per-line state with incremental re-lex), find/replace, soft wrap, code folding,
+6. Editor follow-ups: more languages (Python, JS/TS, Rust, Go, shell, TOML, YAML, HTML/CSS
+   are mostly word lists and comment rules), language injection (code inside
+   Markdown fences), semantic coloring (types of names, via a language server or
+   tree-sitter), bold/italic token styles, bracket matching, a theme file format for
+   token colors, find/replace, soft wrap, code folding,
    bracket matching, add-next-occurrence, move/duplicate lines, rectangular
    selection, scrollbar dragging, file I/O (memory-mapping the original instead of
    reading it; the newline index scan could move off-thread), add-buffer

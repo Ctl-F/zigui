@@ -650,6 +650,14 @@ pub const Ui = struct {
         slot.scroll_y = 0;
         slot.last_version = 0;
         slot.repaint = true;
+        slot.resetHighlighting();
+    }
+
+    /// Choose the syntax highlighting language for an editor (null for none).
+    /// Use `syntax.languageForPath` to pick one from a file name.
+    pub fn setCodeEditorLanguage(self: *Ui, ed: *CodeEditor, lang: ?*const @import("../editor/syntax.zig").Language) !void {
+        _ = self;
+        try editorSlot(ed).setLanguage(lang);
     }
 
     pub fn markCodeEditorSaved(self: *Ui, ed: *CodeEditor) void {
@@ -1052,8 +1060,8 @@ const draw_list = @import("draw_list.zig");
 
 const Harness = struct {
     ui: Ui,
-    cmds: [64]draw_list.Command = undefined,
-    glyph_store: [256]draw_list.Glyph = undefined,
+    cmds: [1024]draw_list.Command = undefined,
+    glyph_store: [4096]draw_list.Glyph = undefined,
     list: DrawList = undefined,
 
     fn init() !*Harness {
@@ -2425,4 +2433,148 @@ test "a larger document keeps its caret stops, line numbers, and mouse mapping i
     // "\n\nnew" went in before "line 1", so row 3 shows "line 2".
     try std.testing.expectEqualStrings("line 2", try core.doc.lineText(3));
     try std.testing.expectEqualStrings("newline 1", try core.doc.lineText(2));
+}
+
+// ---- syntax highlighting through the widget ---------------------------------------------
+
+const syntax_mod = @import("../editor/syntax.zig");
+
+/// Colors of the glyph runs drawn for text row `row` (0-based from the top of
+/// the view), left to right, with their glyph counts. Gutter runs are skipped.
+const RowRun = struct { color: geometry.Color, glyphs: u32, first_x: f32 };
+
+fn rowRuns(list: *const DrawList, row: usize, out: *[32]RowRun) usize {
+    var n: usize = 0;
+    const y = @as(f32, @floatFromInt(row)) * line_px;
+    for (list.items()) |c| {
+        if (c.kind != .glyph_run or @abs(c.rect.y - y) > 0.5) continue;
+        const first = list.glyphItems()[c.a];
+        if (first.x < gutter_px) continue; // the gutter's line number
+        if (n < out.len) {
+            out[n] = .{ .color = c.paint.color, .glyphs = c.b, .first_x = first.x };
+            n += 1;
+        }
+    }
+    return n;
+}
+
+test "highlighted text is drawn in one run per color, with the right colors" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    try ui.loadCodeEditorText(ed, "const x = 42; // hi", false);
+    try t.h.frame();
+    const colors = ui.theme.editor;
+
+    // No language yet: the whole line is one plain run.
+    var runs: [32]RowRun = undefined;
+    var n = rowRuns(&t.h.list, 0, &runs);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqual(colors.tokenColor(.plain), runs[0].color);
+
+    try ui.setCodeEditorLanguage(ed, &syntax_mod.zig);
+    try t.h.frame();
+    n = rowRuns(&t.h.list, 0, &runs);
+    try std.testing.expect(n >= 5);
+    try std.testing.expectEqual(colors.tokenColor(.keyword), runs[0].color); // "const"
+    try std.testing.expectEqual(@as(u32, 5), runs[0].glyphs);
+    try std.testing.expectApproxEqAbs(gutter_px, runs[0].first_x, 0.01);
+    var saw_number = false;
+    for (runs[0..n]) |r| {
+        if (std.meta.eql(r.color, colors.tokenColor(.number))) {
+            saw_number = true;
+            try std.testing.expectEqual(@as(u32, 2), r.glyphs);
+        }
+    }
+    try std.testing.expect(saw_number);
+    try std.testing.expectEqual(colors.tokenColor(.comment), runs[n - 1].color); // "// hi"
+    try std.testing.expectEqual(@as(u32, 4), runs[n - 1].glyphs); // the space has no glyph
+
+    // Switching the language off goes back to a single run.
+    try ui.setCodeEditorLanguage(ed, null);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(usize, 1), rowRuns(&t.h.list, 0, &runs));
+}
+
+test "tokens line up with expanded tabs and carry their colors" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    try ui.loadCodeEditorText(ed, "\tconst x", false);
+    try ui.setCodeEditorLanguage(ed, &syntax_mod.zig);
+    try t.h.frame();
+    var runs: [32]RowRun = undefined;
+    const n = rowRuns(&t.h.list, 0, &runs);
+    try std.testing.expect(n >= 2);
+    try std.testing.expectEqual(ui.theme.editor.tokenColor(.keyword), runs[0].color);
+    try std.testing.expectApproxEqAbs(gutter_px + 4 * cell_px, runs[0].first_x, 0.01); // after the 4-cell tab
+}
+
+test "opening a block comment above recolors the lines below it" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    try ui.loadCodeEditorText(ed, "int a;\nint b;\nint c;", false);
+    try ui.setCodeEditorLanguage(ed, &syntax_mod.c);
+    try t.h.frame();
+    const colors = ui.theme.editor;
+    var runs: [32]RowRun = undefined;
+    _ = rowRuns(&t.h.list, 2, &runs);
+    try std.testing.expectEqual(colors.tokenColor(.type), runs[0].color);
+
+    ui.codeEditorCore(ed).setCaret(6, false); // end of line 0
+    try type_(t, "/*");
+    const n = rowRuns(&t.h.list, 2, &runs);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqual(colors.tokenColor(.comment), runs[0].color); // "int c;" is now comment text
+
+    try type_(t, "*/"); // closing it restores the lines below
+    _ = rowRuns(&t.h.list, 2, &runs);
+    try std.testing.expectEqual(colors.tokenColor(.type), runs[0].color);
+}
+
+test "a large file is lexed lazily: only to the viewport, then up to the caret when jumping" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    t.h.list = DrawList.init(&t.h.cmds, &t.h.glyph_store);
+    const ed = try editorBox(t);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (0..20000) |i| {
+        var line: [64]u8 = undefined;
+        try buf.appendSlice(testing_alloc, try std.fmt.bufPrint(&line, "const v{d}: u32 = {d}; // c\n", .{ i, i }));
+    }
+    try ui.loadCodeEditorText(ed, try buf.toOwnedSlice(testing_alloc), true);
+    try ui.setCodeEditorLanguage(ed, &syntax_mod.zig);
+    try t.h.frame();
+    const hl = &Ui.editorSlot(ed).highlighter.?;
+    try std.testing.expect(hl.lexed <= 10); // just the lines above the visible ones (none) plus a few
+
+    try press(t, .end, keys.mod_ctrl); // jump to the bottom: lex everything above it, once
+    try std.testing.expect(hl.lexed >= 19990);
+    const after_jump = hl.lexed;
+    try press(t, .up, 0);
+    try press(t, .down, 0);
+    try std.testing.expectEqual(after_jump, hl.lexed); // cached
+
+    // Typing on the last line only relexes the changed line.
+    try type_(t, "x");
+    try std.testing.expect(hl.lexed - after_jump <= 3);
+}
+
+test "no highlighter, no cost: plain editors never create one" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    try ui.loadCodeEditorText(ed, "const x = 1;", false);
+    try t.h.frame();
+    try std.testing.expect(Ui.editorSlot(ed).highlighter == null);
+    try ui.setCodeEditorLanguage(ed, &syntax_mod.plain); // "plain" lexes nothing but is still a language
+    try t.h.frame();
+    var runs: [32]RowRun = undefined;
+    try std.testing.expectEqual(@as(usize, 1), rowRuns(&t.h.list, 0, &runs));
 }

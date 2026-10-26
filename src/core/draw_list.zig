@@ -139,8 +139,14 @@ pub const DrawList = struct {
         return self.clip_depth == 0 and self.opacity_depth == 0;
     }
 
+    /// Slots kept free for pop commands in lists large enough to spare them, so
+    /// a frame that fills up can still close the clips and opacities it opened.
+    pub const pop_reserve = 16;
+
     pub fn push(self: *DrawList, cmd: Command) Error!void {
-        if (self.len == self.commands.len) return error.DrawListFull;
+        const is_pop = cmd.kind == .pop_clip or cmd.kind == .pop_opacity;
+        const reserve: usize = if (is_pop or self.commands.len <= 64) 0 else pop_reserve;
+        if (self.len + reserve >= self.commands.len) return error.DrawListFull;
         self.commands[self.len] = cmd;
         self.len += 1;
     }
@@ -367,4 +373,21 @@ test "glyph buffer overflow is reported and leaves the list untouched" {
     try std.testing.expectError(error.GlyphBufferFull, dl.glyphRun(.{}, &run, Color.black, 0, 14));
     try std.testing.expectEqual(@as(usize, 0), dl.items().len);
     try std.testing.expectEqual(@as(usize, 0), dl.glyphItems().len);
+}
+
+test "a full list still accepts the pops that close what it opened" {
+    var cmds: [128]Command = undefined;
+    var glyphs: [8]Glyph = undefined;
+    var dl = DrawList.init(&cmds, &glyphs);
+    try dl.pushClip(.{ .w = 10, .h = 10 });
+    try dl.pushClip(.{ .w = 5, .h = 5 });
+    var filled: usize = 0;
+    while (true) : (filled += 1) {
+        dl.fillRect(.{ .w = 1, .h = 1 }, Paint.solid(Color.black)) catch break;
+    }
+    try std.testing.expectEqual(@as(usize, 128 - DrawList.pop_reserve - 2), filled);
+    try std.testing.expectError(error.DrawListFull, dl.pushClip(.{ .w = 1, .h = 1 })); // pushes stop at the reserve
+    try std.testing.expect(try dl.popClip());
+    try std.testing.expect(try dl.popClip());
+    try std.testing.expect(dl.isBalanced());
 }

@@ -41,6 +41,8 @@ const Theme = @import("theme.zig").Theme;
 const label = @import("label.zig");
 const Editor = @import("../editor/editor.zig").Editor;
 const Selection = @import("../editor/selection.zig").Selection;
+const syntax = @import("../editor/syntax.zig");
+const Highlighter = @import("../editor/highlighter.zig").Highlighter;
 
 pub const Font = label.Font;
 
@@ -123,14 +125,43 @@ pub const Slot = struct {
     map: std.ArrayListUnmanaged(u32) = .empty,
     stops: std.ArrayListUnmanaged(Stop) = .empty,
     glyphs: std.ArrayListUnmanaged(Glyph) = .empty,
+    spans: std.ArrayListUnmanaged(syntax.Span) = .empty,
     number_buf: [24]u8 = undefined,
 
+    /// Syntax highlighting, if a language is set.
+    highlighter: ?Highlighter = null,
+
     pub fn deinit(self: *Slot) void {
+        if (self.highlighter) |*h| h.deinit();
+        self.spans.deinit(self.gpa);
         self.editor.deinit();
         self.display.deinit(self.gpa);
         self.map.deinit(self.gpa);
         self.stops.deinit(self.gpa);
         self.glyphs.deinit(self.gpa);
+    }
+
+    /// Choose the syntax highlighting language (null for none).
+    pub fn setLanguage(self: *Slot, lang: ?*const syntax.Language) !void {
+        if (lang) |l| {
+            if (self.highlighter) |*h| {
+                h.setLanguage(l);
+            } else {
+                var h = Highlighter.init(self.gpa, l);
+                errdefer h.deinit();
+                try h.reset(self.editor.doc.lineCount());
+                self.highlighter = h;
+            }
+        } else if (self.highlighter) |*h| {
+            h.deinit();
+            self.highlighter = null;
+        }
+        self.repaint = true;
+    }
+
+    /// Call after the editor core was replaced.
+    pub fn resetHighlighting(self: *Slot) void {
+        if (self.highlighter) |*h| h.reset(self.editor.doc.lineCount()) catch {};
     }
 
     // ---- metrics -------------------------------------------------------------------
@@ -326,7 +357,16 @@ pub const Slot = struct {
         }
 
         if (self.editor.doc.changes.items.len > 0 or self.editor.doc.version != self.last_version) {
-            // Subscribers (a highlighter) would drain the change records here.
+            // Subscribers drain the change records here: the highlighter follows
+            // every edit so only the affected lines are relexed.
+            if (self.highlighter) |*h| {
+                for (self.editor.doc.changes.items) |c| {
+                    h.onChange(c) catch {
+                        h.reset(self.editor.doc.lineCount()) catch {};
+                        break;
+                    };
+                }
+            }
             self.editor.doc.clearChanges();
             self.last_version = self.editor.doc.version;
             self.repaint = true;
@@ -402,14 +442,11 @@ pub const Slot = struct {
                     }
                 }
 
-                // Text: shape the expanded line.
+                // Text: shape the expanded line, then draw it in colored runs.
                 self.glyphs.clearRetainingCapacity();
                 _ = self.env.text.shape(m.font, m.size, self.display.items, &self.glyphs, self.gpa) catch break;
-                if (self.glyphs.items.len > 0) {
-                    const baseline = row_y + (m.line_h - (m.ascent + m.descent)) / 2 + m.ascent;
-                    const bounds: Rect = .{ .x = origin_x, .y = row_y, .w = self.stopX(std.math.maxInt(usize)), .h = m.line_h };
-                    try list.glyphRunAt(bounds, self.glyphs.items, .{ .x = origin_x, .y = baseline }, colors.text, m.font, m.size, !self.env.text.isMonospace(m.font));
-                }
+                const baseline = row_y + (m.line_h - (m.ascent + m.descent)) / 2 + m.ascent;
+                try self.emitLine(list, m, origin_x, baseline, row_y, line);
 
                 if (show_caret) {
                     for (ed.sel.items.items) |s| {
@@ -449,6 +486,51 @@ pub const Slot = struct {
             const y = abs.y + geo.pad.t + (if (max_scroll > 0) track * self.scroll_y / max_scroll else 0);
             try list.fillRoundedRect(.{ .x = abs.x + abs.w - 8, .y = y, .w = 5, .h = thumb_h }, .{ 2.5, 2.5, 2.5, 2.5 }, Paint.solid(colors.scrollbar));
         }
+    }
+
+    /// x of a source byte within the line built by `buildLine`.
+    fn spanX(self: *const Slot, src_byte: u32) f32 {
+        const idx = @min(@as(usize, src_byte), self.map.items.len - 1);
+        return self.stopX(self.map.items[idx]);
+    }
+
+    /// Draw the shaped glyphs of the built line, split into runs by token color.
+    fn emitLine(self: *Slot, list: *DrawList, m: Metrics, origin_x: f32, baseline: f32, row_y: f32, line: usize) draw_list.Error!void {
+        const glyphs = self.glyphs.items;
+        if (glyphs.len == 0) return;
+        const colors = self.env.theme.editor;
+        const subpixel = !self.env.text.isMonospace(m.font);
+        const bounds: Rect = .{ .x = origin_x, .y = row_y, .w = self.stopX(std.math.maxInt(usize)), .h = m.line_h };
+        const plain = colors.tokenColor(.plain);
+
+        var have_spans = false;
+        if (self.highlighter) |*h| {
+            if (h.spansForLine(&self.editor.doc, line, &self.spans)) |_| {
+                have_spans = self.spans.items.len > 0;
+            } else |_| {}
+        }
+        if (!have_spans) {
+            try list.glyphRunAt(bounds, glyphs, .{ .x = origin_x, .y = baseline }, plain, m.font, m.size, subpixel);
+            return;
+        }
+
+        const spans = self.spans.items;
+        var si: usize = 0;
+        var run_start: usize = 0;
+        var cur = plain;
+        const eps = 0.01;
+        for (glyphs, 0..) |g, gi| {
+            while (si < spans.len and g.x >= self.spanX(spans[si].end) - eps) si += 1;
+            const color = if (si < spans.len and g.x >= self.spanX(spans[si].start) - eps) colors.tokenColor(spans[si].kind) else plain;
+            if (gi == 0) {
+                cur = color;
+            } else if (!std.meta.eql(color, cur)) {
+                try list.glyphRunAt(bounds, glyphs[run_start..gi], .{ .x = origin_x, .y = baseline }, cur, m.font, m.size, subpixel);
+                run_start = gi;
+                cur = color;
+            }
+        }
+        try list.glyphRunAt(bounds, glyphs[run_start..], .{ .x = origin_x, .y = baseline }, cur, m.font, m.size, subpixel);
     }
 
     // ---- events ----------------------------------------------------------------------------

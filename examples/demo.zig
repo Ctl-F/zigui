@@ -59,6 +59,7 @@ const App = struct {
     names: [9][]const u8 = undefined,
     paths: [9][]const u8 = undefined,
     editor: ?*zigui.CodeEditor = null,
+    language: *const zigui.syntax.Language = &zigui.syntax.plain,
     io: std.Io = undefined,
     gpa: std.mem.Allocator = undefined,
     last_status: [160]u8 = undefined,
@@ -99,6 +100,8 @@ fn openFile(a: *App, index: usize) void {
         a.gpa.free(bytes);
         return;
     };
+    a.language = zigui.syntax.languageForPath(a.paths[index]);
+    a.ui.setCodeEditorLanguage(ed, a.language) catch {};
 }
 
 fn onSelectItem(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
@@ -446,9 +449,11 @@ pub fn main(init: std.process.Init) !void {
     try buildUi(&state);
     try setupCommands(&state);
 
-    const commands = try gpa.alloc(zigui.draw_list.Command, 4096);
+    // Highlighted code emits one glyph run per token color change, so the
+    // list needs room: a full screen of code is a few thousand commands.
+    const commands = try gpa.alloc(zigui.draw_list.Command, 32768);
     defer gpa.free(commands);
-    const glyphs = try gpa.alloc(zigui.draw_list.Glyph, 16384);
+    const glyphs = try gpa.alloc(zigui.draw_list.Glyph, 65536);
     defer gpa.free(glyphs);
     var list = zigui.DrawList.init(commands, glyphs);
     var prewarmed_scale: f32 = 0;
@@ -472,8 +477,9 @@ pub fn main(init: std.process.Init) !void {
         if (state.status) |st| {
             const ed = state.editor.?;
             var sbuf: [160]u8 = undefined;
-            const msg = std.fmt.bufPrint(&sbuf, "{s}   Ln {d}, Col {d}{s}   |   {d} lines   |   {d} cursor(s)   |   {d} cards   |   {d} clicks", .{
+            const msg = std.fmt.bufPrint(&sbuf, "{s} ({s})   Ln {d}, Col {d}{s}   |   {d} lines   |   {d} cursor(s)   |   {d} cards   |   {d} clicks", .{
                 state.names[state.selected],
+                state.language.name,
                 ed.out.caret_line + 1,
                 ed.out.caret_column + 1,
                 if (ed.out.modified) "   (modified)" else "",
