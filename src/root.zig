@@ -15,6 +15,7 @@ pub const style = @import("core/style.zig");
 pub const layout = @import("core/layout.zig");
 pub const event = @import("core/event.zig");
 pub const dispatch = @import("core/dispatch.zig");
+pub const keys = @import("core/keys.zig");
 pub const input = @import("core/input.zig");
 pub const ui = @import("core/ui.zig");
 pub const button = @import("widgets/button.zig");

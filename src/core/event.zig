@@ -6,6 +6,7 @@
 //! the current node, then stop) or `markHandled`.
 
 const Handle = @import("handle.zig").Handle;
+const keys = @import("keys.zig");
 
 pub const EventKind = enum(u32) {
     pointer_down = 0,
@@ -22,6 +23,9 @@ pub const EventKind = enum(u32) {
     key_up,
     focus_in,
     focus_out,
+    /// Committed text (typing, paste, IME). Separate from key events. `text`
+    /// and `text_len` hold UTF-8 valid only during dispatch.
+    text_input,
     _,
 
     pub fn bubbles(self: EventKind) bool {
@@ -62,9 +66,26 @@ pub const Event = extern struct {
     button: u32 = 0,
     scancode: u32 = 0,
     keycode: u32 = 0,
+    /// Toolkit key for key events (`.unknown` if unmapped).
+    key: keys.Key = .unknown,
+    /// `keys.mod_*` bits held during the event.
+    mods: u32 = 0,
+    /// Consecutive press count for pointer_down (2 = double click).
+    clicks: u32 = 0,
+    text: ?[*]const u8 = null,
+    text_len: usize = 0,
     repeat: bool = false,
     handled: bool = false,
     stopped: bool = false,
+
+    pub fn hasMod(self: *const Event, mod: u32) bool {
+        return self.mods & mod != 0;
+    }
+
+    pub fn textSlice(self: *const Event) []const u8 {
+        const p = self.text orelse return "";
+        return p[0..self.text_len];
+    }
 
     pub fn stopPropagation(self: *Event) void {
         self.stopped = true;

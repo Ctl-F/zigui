@@ -45,6 +45,10 @@ pub const Button = extern struct {
         clicked: bool = false,
         hovered: bool = false,
         pressed: bool = false,
+        /// Has keyboard focus.
+        focused: bool = false,
+        /// Focused after keyboard use: painters draw a focus ring.
+        focus_visible: bool = false,
         /// Total clicks since creation.
         click_count: u32 = 0,
     };
@@ -54,22 +58,32 @@ pub const Button = extern struct {
 pub fn handleEvent(ev: *event.Event, user: ?*anyopaque) callconv(.c) void {
     const b: *Button = @ptrCast(@alignCast(user.?));
     switch (ev.kind) {
+        .focus_in => b.out.focused = true,
+        .focus_out => b.out.focused = false,
+        // Enter and Space activate, like a click.
+        .key_down => if (b.props.enabled and !ev.repeat and (ev.key == .enter or ev.key == .space)) {
+            ev.markHandled();
+            activate(b, ev);
+        },
         .pointer_enter => b.out.hovered = true,
         .pointer_leave => b.out.hovered = false,
         .pointer_down => if (b.props.enabled) {
             b.out.pressed = true;
         },
         .pointer_up => b.out.pressed = false,
-        .click => if (b.props.enabled) {
-            b.out.clicked = true;
-            b.out.click_count +%= 1;
-            if (b.props.on_click) |cb| cb(ev, b.props.on_click_user);
-        },
+        .click => if (b.props.enabled) activate(b, ev),
         else => {},
     }
 }
 
-pub const listened_kinds = [_]event.EventKind{ .pointer_enter, .pointer_leave, .pointer_down, .pointer_up, .click };
+/// The one path for clicks and keyboard activation, so flags and callbacks agree.
+fn activate(b: *Button, ev: *event.Event) void {
+    b.out.clicked = true;
+    b.out.click_count +%= 1;
+    if (b.props.on_click) |cb| cb(ev, b.props.on_click_user);
+}
+
+pub const listened_kinds = [_]event.EventKind{ .pointer_enter, .pointer_leave, .pointer_down, .pointer_up, .click, .focus_in, .focus_out, .key_down };
 
 pub fn defaultPainter(b: *const Button, theme: *const Theme) Visual {
     const idx: usize = @intFromEnum(b.props.variant);
@@ -82,10 +96,11 @@ pub fn defaultPainter(b: *const Button, theme: *const Theme) Visual {
         c.hover
     else
         c.normal;
+    const ring = b.out.focus_visible and b.props.enabled;
     return .{
         .background = bg,
-        .border_color = c.border,
-        .border_width = c.border_width,
+        .border_color = if (ring) theme.focus_ring else c.border,
+        .border_width = if (ring) theme.focus_ring_width else c.border_width,
         .radius = theme.corner_radius,
     };
 }

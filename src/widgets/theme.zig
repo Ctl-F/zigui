@@ -53,6 +53,8 @@ pub const Theme = struct {
         },
     },
     corner_radius: f32 = 6,
+    focus_ring: Color = Color.rgb(0x9d, 0xc4, 0xff),
+    focus_ring_width: f32 = 2,
     /// Font ids from `Ui.addFont`. Both default to font 0 until a mono font is added.
     ui_font: u32 = 0,
     mono_font: u32 = 0,

@@ -103,6 +103,10 @@ pub const Tree = struct {
     /// queued in `deferred` and run when the outermost dispatch ends.
     dispatch_depth: u32 = 0,
     deferred: std.ArrayListUnmanaged(Handle) = .empty,
+    /// The window's focused node (invalid if none). `Input` notifies nodes of
+    /// changes with focus_in/focus_out. If the focused node is destroyed, focus
+    /// falls back to the nearest focusable ancestor.
+    focused: Handle = Handle.invalid,
     /// Top of the stack of relayout boundaries that need a layout pass. It is
     /// intrusive (links live in `Node`), so marking dirty never allocates or fails.
     layout_queue_head: Handle = Handle.invalid,
@@ -269,6 +273,10 @@ pub const Tree = struct {
             };
             return 0;
         }
+        if (Handle.eql(self.focused, h) or self.isAncestor(h, self.focused)) {
+            const parent = if (self.get(h)) |n| n.parent else Handle.invalid;
+            self.focused = self.focusableAtOrAbove(parent) orelse Handle.invalid;
+        }
         self.detach(h);
 
         var destroyed: u32 = 0;
@@ -300,6 +308,63 @@ pub const Tree = struct {
             cur = if (next_h.isNull()) parent_h else next_h;
         }
         return destroyed;
+    }
+
+    /// True if neither `h` nor any ancestor is hidden.
+    pub fn isVisible(self: *Tree, h: Handle) bool {
+        var cur = h;
+        while (self.get(cur)) |n| : (cur = n.parent) {
+            if (n.flags.hidden) return false;
+        }
+        return true;
+    }
+
+    pub fn isFocusable(self: *Tree, h: Handle) bool {
+        const n = self.get(h) orelse return false;
+        return n.flags.focusable and self.isVisible(h);
+    }
+
+    /// `h` if it is focusable, else the nearest focusable ancestor.
+    pub fn focusableAtOrAbove(self: *Tree, h: Handle) ?Handle {
+        var cur = h;
+        while (self.get(cur)) |n| : (cur = n.parent) {
+            if (n.flags.focusable and self.isVisible(cur)) return cur;
+        }
+        return null;
+    }
+
+    /// Next focusable node after `from` in tree order (previous if `!forward`),
+    /// wrapping around; `from` itself is returned if it is the only candidate.
+    /// With an invalid `from`, the first (or last) focusable. Null if nothing
+    /// is focusable.
+    pub fn nextFocusable(self: *Tree, from: Handle, forward: bool) ?Handle {
+        const have_from = self.isValid(from);
+        if (forward) {
+            var cur: ?Handle = if (have_from) self.nextPreorder(self.root, from) else self.root;
+            while (cur) |c| : (cur = self.nextPreorder(self.root, c)) {
+                if (self.isFocusable(c)) return c;
+            }
+            if (!have_from) return null;
+            // Wrap: from the start up to and including `from`.
+            cur = self.root;
+            while (cur) |c| : (cur = self.nextPreorder(self.root, c)) {
+                if (self.isFocusable(c)) return c;
+                if (Handle.eql(c, from)) break;
+            }
+            return null;
+        }
+        // Backward: the last focusable before `from`, else the last overall.
+        var before: ?Handle = null;
+        var overall: ?Handle = null;
+        var seen_from = !have_from;
+        var cur: ?Handle = self.root;
+        while (cur) |c| : (cur = self.nextPreorder(self.root, c)) {
+            if (have_from and Handle.eql(c, from)) seen_from = true;
+            if (!self.isFocusable(c)) continue;
+            overall = c;
+            if (!seen_from) before = c;
+        }
+        return before orelse overall;
     }
 
     pub fn beginDispatch(self: *Tree) void {

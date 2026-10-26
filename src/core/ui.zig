@@ -19,6 +19,7 @@ const DirtyFlags = @import("dirty.zig").DirtyFlags;
 const Style = @import("style.zig").Style;
 const Layout = @import("layout.zig").Layout;
 const Input = @import("input.zig").Input;
+const keys = @import("keys.zig");
 const paint = @import("paint.zig");
 const DrawList = @import("draw_list.zig").DrawList;
 const shadow = @import("shadow.zig");
@@ -230,8 +231,33 @@ pub const Ui = struct {
         self.input.pointerButton(&self.tree, x, y, btn, down);
     }
 
+    /// Like `pointerButton`, with the platform's consecutive-press count
+    /// (2 = double click) for text selection.
+    pub fn pointerButtonEx(self: *Ui, x: f32, y: f32, btn: u32, down: bool, clicks: u32) void {
+        self.input.pointerButtonEx(&self.tree, x, y, btn, down, clicks);
+    }
+
     pub fn wheel(self: *Ui, x: f32, y: f32, dx: f32, dy: f32) void {
         self.input.wheel(&self.tree, x, y, dx, dy);
+    }
+
+    /// Route a key press/release (`mods` are `keys.mod_*` bits).
+    pub fn key(self: *Ui, k: keys.Key, mods: u32, down: bool, repeat: bool) void {
+        self.input.key(&self.tree, k, mods, down, repeat, 0, 0);
+    }
+
+    /// Deliver committed text (typing, paste, IME) to the focused widget.
+    pub fn textInput(self: *Ui, text: []const u8) void {
+        self.input.textInput(&self.tree, text);
+    }
+
+    pub fn setFocus(self: *Ui, h: ?Handle) void {
+        self.input.setFocus(&self.tree, h);
+    }
+
+    /// The focused node, if any.
+    pub fn focused(self: *Ui) ?Handle {
+        return if (self.tree.isValid(self.tree.focused)) self.tree.focused else null;
     }
 
     // ---- frame ------------------------------------------------------------
@@ -243,11 +269,18 @@ pub const Ui = struct {
         self.sweep(&self.buttons);
         self.sweep(&self.labels);
 
+        // Disabled buttons leave the tab order; losing focus fires events, so
+        // settle focus before looks are resolved.
+        var fit = self.buttons.iterator();
+        while (fit.next()) |e| self.tree.get(e.ptr.block.node).?.flags.focusable = e.ptr.block.props.enabled;
+        self.input.syncFocus(&self.tree);
+
         var it = self.buttons.iterator();
         while (it.next()) |e| {
             const b = &e.ptr.block;
             const node = self.tree.get(b.node).?;
             self.verifyProps(b.node, &e.ptr.checker, &b.props, "button");
+            b.out.focus_visible = b.out.focused and self.input.keyboard;
 
             const look = self.theme.button_painter(b, &self.theme);
             if (!std.mem.eql(u8, std.mem.asBytes(&look), std.mem.asBytes(&node.visual))) {
@@ -666,4 +699,83 @@ test "text renders through the software renderer" {
     for (fb.pixels) |p| ink += @intFromBool(p.r < 128);
     try std.testing.expect(ink > 100);
     try std.testing.expect(ui.text.atlas.count() >= 1);
+}
+
+// ---- keyboard focus tests -----------------------------------------------------
+
+test "Tab walks buttons, Enter and Space activate, and the ring shows after keyboard use only" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    const Count = struct {
+        var n: u32 = 0;
+        fn cb(_: *event_mod.Event, _: ?*anyopaque) callconv(.c) void {
+            n += 1;
+        }
+    };
+    Count.n = 0;
+    const a = try ui.createButton(ui.tree.root, box(80, 30));
+    const b = try ui.createButton(ui.tree.root, box(80, 30));
+    b.props.on_click = Count.cb;
+    try t.frame();
+
+    ui.key(.tab, 0, true, false);
+    ui.key(.tab, 0, true, false);
+    try t.frame();
+    try std.testing.expect(!a.out.focused);
+    try std.testing.expect(b.out.focused and b.out.focus_visible);
+    try std.testing.expectEqual(ui.theme.focus_ring, ui.tree.get(b.node).?.visual.border_color);
+
+    ui.key(.enter, 0, true, false);
+    ui.key(.space, 0, true, false);
+    ui.key(.space, 0, true, true); // auto-repeat does not re-activate
+    try std.testing.expectEqual(@as(u32, 2), b.out.click_count);
+    try std.testing.expectEqual(@as(u32, 2), Count.n);
+    try std.testing.expect(b.out.clicked);
+
+    // Clicking focuses without drawing the ring.
+    t.click(10, 10);
+    try t.frame();
+    try std.testing.expect(a.out.focused and !b.out.focused);
+    try std.testing.expect(!a.out.focus_visible);
+    try std.testing.expect(ui.tree.get(a.node).?.visual.border_width == 0);
+    try std.testing.expect(Handle.eql(ui.focused().?, a.node));
+}
+
+test "disabled buttons are skipped by Tab and cannot be activated by key" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    const a = try ui.createButton(ui.tree.root, box(80, 30));
+    const dis = try ui.createButton(ui.tree.root, box(80, 30));
+    const c = try ui.createButton(ui.tree.root, box(80, 30));
+    ui.setButtonEnabled(dis, false);
+    try t.frame();
+
+    ui.key(.tab, 0, true, false);
+    try t.frame();
+    try std.testing.expect(a.out.focused);
+    ui.key(.tab, 0, true, false);
+    try t.frame();
+    try std.testing.expect(c.out.focused and !dis.out.focused);
+
+    // Disabling the focused button drops its focus.
+    ui.setButtonEnabled(c, false);
+    try t.frame();
+    try std.testing.expect(!c.out.focused);
+    try std.testing.expect(ui.focused() == null);
+}
+
+test "removing the focused button falls back and never leaves a stale focus" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    const a = try ui.createButton(ui.tree.root, box(80, 30));
+    try t.frame();
+    ui.key(.tab, 0, true, false);
+    try t.frame();
+    try std.testing.expect(a.out.focused);
+    _ = ui.tree.destroySubtree(a.node);
+    try t.frame();
+    try std.testing.expect(ui.focused() == null);
 }
