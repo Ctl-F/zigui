@@ -272,6 +272,11 @@ pub fn ticks() u64 {
     return c.SDL_GetTicks();
 }
 
+/// Nanoseconds from a monotonic clock, for `Ui.clock`.
+pub fn ticksNs() u64 {
+    return c.SDL_GetTicksNS();
+}
+
 pub const Cursor = enum { default, text, pointer };
 
 var cursors: [3]?*c.SDL_Cursor = .{ null, null, null };

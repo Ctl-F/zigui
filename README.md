@@ -16,7 +16,7 @@ atlas, fields), commands and scoped shortcuts, a piece-table editor core with
 undo/redo and multi-cursor, a code editor widget with incremental syntax
 highlighting, a software renderer, an SDL3 platform shim, a runtime widget
 schema and registry, generated forms and wizards, ZON UI documents, and a visual
-builder. About 430 tests.
+builder. About 440 tests.
 
 Not built yet (largest first): a renderer backend interface and GPU path, canvas
 and frame scheduling, damage tracking, list/tree widgets and a model interface,
@@ -210,6 +210,17 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   native-pass mode (needs the GPU backend), pointer lock, pen pressure and tilt,
   motion coalescing. `Ui.backend` is set by `renderFrame` or `setBackend`.
   Release a canvas surface before destroying the canvas.
+- Frame stats (`core/frame_stats.zig`): `Ui.renderFrame` records each frame's
+  update/layout/build/submit cost (from `Ui.clock`, a nanosecond clock the platform
+  sets, e.g. `sdl.ticksNs`; without one timings read zero), command and glyph
+  counts, into a 120-frame ring. `ui.show_stats` draws a bar chart overlay (rects
+  only, so no font needed; F3 in the demo) with a line at the 60 Hz budget.
+  Input handlers are timed: one over `handler_budget_ns` (default 8 ms) is counted
+  in `slow_handlers` and logs a warning in debug builds. A test runs 32 frames of a
+  real scene (label, button, field, code editor, canvas, hover, caret blink, full
+  relayout and repaint) under a counting allocator and asserts zero allocations
+  after warmup; paint errors (draw list full, out of memory) now propagate from
+  `paintHook` instead of being swallowed.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.
@@ -321,14 +332,12 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
 Ordered by the spec-drift notes (`NOTES/spec-drift-notes.md`); the notes are the
 authority for rationale, and a few items are recommendations, not requirements.
 
-1. Frame stats ring buffer and overlay, a handler time-budget warning, and a test
-   that steady-state frames allocate nothing.
-2. Damage rects and per-repaint-boundary draw-record caching.
-3. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
+1. Damage rects and per-repaint-boundary draw-record caching.
+2. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
    focus scopes (modal traps), tab indices, IME preedit.
-4. Memory-mapped document open and an off-thread newline-index scan.
-5. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
-6. The C facade (`src/capi/`), once the core Zig library is done.
+3. Memory-mapped document open and an off-thread newline-index scan.
+4. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
+5. The C facade (`src/capi/`), once the core Zig library is done.
 
 Smaller gaps: theme metrics (padding, min sizes) and a painter measure override; layout follow-ups (width-constrained text measure, stack/absolute,
 split and scroll containers, wrap, grid, calc `Length`); draw commands for

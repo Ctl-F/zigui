@@ -16,7 +16,7 @@ const Rect = @import("geometry.zig").Rect;
 const layout_mod = @import("layout.zig");
 const PaintCtx = @import("paint_ctx.zig").PaintCtx;
 
-pub const Error = @import("draw_list.zig").Error;
+pub const Error = @import("paint_ctx.zig").Error;
 
 /// Rebuild `list` from `tree`. Resets the list first.
 pub fn build(tree: *Tree, list: *DrawList) Error!void {

@@ -500,7 +500,7 @@ pub const CodeEditor = struct {
             defer _ = list.popClip() catch {};
             var line = first;
             while (line < stop_line) : (line += 1) {
-                self.buildLine(line, m) catch break;
+                try self.buildLine(line, m);
                 const row_y = text_area.y + @as(f32, @floatFromInt(line)) * m.line_h - self.scroll_y;
                 const ls = ed.doc.lineStart(line);
                 const le = ed.doc.lineEnd(line);
@@ -523,7 +523,7 @@ pub const CodeEditor = struct {
 
                 // Text: shape the expanded line, then draw it in colored runs.
                 self.glyphs.clearRetainingCapacity();
-                _ = self.ui.text.shape(m.font, m.size, self.display.items, &self.glyphs, self.ui.gpa) catch break;
+                _ = try self.ui.text.shape(m.font, m.size, self.display.items, &self.glyphs, self.ui.gpa);
                 const baseline = row_y + (m.line_h - (m.ascent + m.descent)) / 2 + m.ascent;
                 try self.emitLine(list, m, origin_x, baseline, row_y, line);
 
@@ -547,7 +547,7 @@ pub const CodeEditor = struct {
                 const row_y = gutter.y + @as(f32, @floatFromInt(line)) * m.line_h - self.scroll_y;
                 const s = std.fmt.bufPrint(&self.number_buf, "{d}", .{line + 1}) catch continue;
                 self.glyphs.clearRetainingCapacity();
-                const r = self.ui.text.shape(m.font, m.size, s, &self.glyphs, self.ui.gpa) catch continue;
+                const r = try self.ui.text.shape(m.font, m.size, s, &self.glyphs, self.ui.gpa);
                 if (self.glyphs.items.len == 0) continue;
                 const baseline = row_y + (m.line_h - (m.ascent + m.descent)) / 2 + m.ascent;
                 const x = gutter.x + gutter.w - gutter_pad - r.width;

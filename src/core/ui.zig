@@ -30,6 +30,7 @@ const paint = @import("paint.zig");
 const DrawList = @import("draw_list.zig").DrawList;
 const shadow = @import("shadow.zig");
 const render_backend = @import("../render/backend.zig");
+const frame_stats = @import("frame_stats.zig");
 const event_types = @import("event.zig");
 const commands_mod = @import("commands.zig");
 const shortcuts_mod = @import("shortcuts.zig");
@@ -57,9 +58,6 @@ pub const TextField = text_field.TextField;
 pub const Canvas = canvas_mod.Canvas;
 const CodeEditor = code_editor.CodeEditor;
 
-/// The UI context: tree, layout, input, theme, and every widget.
-///
-/// DO NOT MOVE a `Ui` after the first widget is added (see the file header).
 /// A unique address per widget type, stored on nodes so the registry can tell
 /// which widget a node carries.
 pub fn typeTag(comptime W: type) *const anyopaque {
@@ -68,6 +66,9 @@ pub fn typeTag(comptime W: type) *const anyopaque {
     }.unique;
 }
 
+/// The UI context: tree, layout, input, theme, and every widget.
+///
+/// DO NOT MOVE a `Ui` after the first widget is added (see the file header).
 pub const Ui = struct {
     gpa: std.mem.Allocator,
     text: TextSystem,
@@ -84,6 +85,19 @@ pub const Ui = struct {
     /// canvases create their offscreen surfaces through it.
     backend: ?render_backend.Backend = null,
     clipboard: ?Clipboard = null,
+    /// Monotonic nanosecond clock for frame stats and the handler budget
+    /// (`sdl.ticksNs`). Without one, timings read zero.
+    clock: ?*const fn () u64 = null,
+    /// Costs of recent frames (see `frame_stats.zig`).
+    stats: frame_stats.FrameStats = .{},
+    /// Draw the frame-time overlay on top of the window (`renderFrame`).
+    show_stats: bool = false,
+    /// An input handler running longer than this logs a warning in debug builds
+    /// and is counted in `slow_handlers`. 0 disables the check.
+    handler_budget_ns: u64 = 8_000_000,
+    slow_handlers: u32 = 0,
+    pending_update_ns: u64 = 0,
+    pending_handler_ns: u64 = 0,
     /// Last time passed to `tick`, in milliseconds.
     now_ms: u64 = 0,
     commands: commands_mod.Commands,
@@ -369,23 +383,51 @@ pub const Ui = struct {
 
     // ---- input ---------------------------------------------------------------------
 
+    fn nowNs(self: *const Ui) u64 {
+        return if (self.clock) |c| c() else 0;
+    }
+
+    /// Account for an input handler that started at `t0`: add to the frame's
+    /// handler time and flag it if over budget.
+    fn endHandler(self: *Ui, t0: u64, what: []const u8) void {
+        if (self.clock == null) return;
+        const dt = self.nowNs() -| t0;
+        self.pending_handler_ns += dt;
+        if (self.handler_budget_ns > 0 and dt > self.handler_budget_ns) {
+            self.slow_handlers += 1;
+            if (comptime shadow.enabled) {
+                std.log.warn("ui_check: {s} handlers took {d:.1} ms (budget {d:.1} ms); long work belongs off the UI thread", .{
+                    what,
+                    @as(f64, @floatFromInt(dt)) / 1e6,
+                    @as(f64, @floatFromInt(self.handler_budget_ns)) / 1e6,
+                });
+            }
+        }
+    }
+
     pub fn pointerMove(self: *Ui, x: f32, y: f32) void {
+        const t0 = self.nowNs();
         self.input.pointerMove(&self.tree, x, y);
+        self.endHandler(t0, "pointer_move");
     }
 
     pub fn pointerButton(self: *Ui, x: f32, y: f32, btn: u32, down: bool) void {
-        self.input.pointerButton(&self.tree, x, y, btn, down);
+        self.pointerButtonEx(x, y, btn, down, 1);
     }
 
     /// Like `pointerButton`, with the platform's consecutive-press count
     /// (2 = double click) for text selection.
     pub fn pointerButtonEx(self: *Ui, x: f32, y: f32, btn: u32, down: bool, clicks: u32) void {
+        const t0 = self.nowNs();
         if (down) self.shortcuts.clearPending();
         self.input.pointerButtonEx(&self.tree, x, y, btn, down, clicks);
+        self.endHandler(t0, "pointer_button");
     }
 
     pub fn wheel(self: *Ui, x: f32, y: f32, dx: f32, dy: f32) void {
+        const t0 = self.nowNs();
         self.input.wheel(&self.tree, x, y, dx, dy);
+        self.endHandler(t0, "wheel");
     }
 
     /// Wheel scroll at the last known pointer position (positive `dy` = up).
@@ -397,7 +439,10 @@ pub const Ui = struct {
     /// focused node (capture, target, bubble), then shortcuts, then Tab focus
     /// movement. Returns true if anything used the key.
     pub fn keyHandled(self: *Ui, k: keys.Key, mods: keys.Mods, down: bool, repeat: bool) bool {
-        return self.input.keyEx(&self.tree, k, mods, down, repeat, 0, 0, .{ .ctx = self, .run = shortcutHook });
+        const t0 = self.nowNs();
+        const used = self.input.keyEx(&self.tree, k, mods, down, repeat, 0, 0, .{ .ctx = self, .run = shortcutHook });
+        self.endHandler(t0, "key");
+        return used;
     }
 
     pub fn key(self: *Ui, k: keys.Key, mods: keys.Mods, down: bool, repeat: bool) void {
@@ -473,7 +518,9 @@ pub const Ui = struct {
 
     /// Deliver committed text (typing, paste, IME) to the focused widget.
     pub fn textInput(self: *Ui, text: []const u8) void {
+        const t0 = self.nowNs();
         self.input.textInput(&self.tree, text);
+        self.endHandler(t0, "text_input");
     }
 
     pub fn setFocus(self: *Ui, h: ?Handle) void {
@@ -500,10 +547,14 @@ pub const Ui = struct {
 
     /// Lay out for a window of `size` (logical pixels) and rebuild `list`.
     pub fn layoutAndPaint(self: *Ui, size: geometry.Size, list: *DrawList) !void {
+        try self.layoutPhase(size);
+        try paint.build(&self.tree, list);
+    }
+
+    fn layoutPhase(self: *Ui, size: geometry.Size) !void {
         self.checkPinned();
         self.text.atlas.beginFrame();
         try self.layout.run(&self.tree, size);
-        try paint.build(&self.tree, list);
     }
 
     /// Tell the Ui which renderer the app uses, before the first frame, so
@@ -531,7 +582,12 @@ pub const Ui = struct {
             .w = @as(f32, @floatFromInt(o.pixel_w)) / scale,
             .h = @as(f32, @floatFromInt(o.pixel_h)) / scale,
         };
-        try self.layoutAndPaint(logical, list);
+        const t_start = self.nowNs();
+        try self.layoutPhase(logical);
+        const t_layout = self.nowNs();
+        try paint.build(&self.tree, list);
+        const t_build = self.nowNs();
+        if (self.show_stats) self.stats.drawOverlay(list, logical.w) catch {};
         const provider = self.glyphProvider();
         if (be.caps().atlas_upload) {
             render_backend.prepareGlyphs(list, scale, provider);
@@ -542,6 +598,20 @@ pub const Ui = struct {
         try be.beginFrame(.{ .pixel_w = o.pixel_w, .pixel_h = o.pixel_h, .scale = scale });
         try be.submit(.{ .list = list, .clear = o.clear, .glyphs = provider });
         try be.endFrame();
+        const t_end = self.nowNs();
+        var f: frame_stats.Frame = .{
+            .update_ns = self.pending_update_ns,
+            .layout_ns = t_layout -| t_start,
+            .build_ns = t_build -| t_layout,
+            .submit_ns = t_end -| t_build,
+            .handler_ns = self.pending_handler_ns,
+            .commands = @intCast(list.items().len),
+            .glyphs = @intCast(list.glyphItems().len),
+        };
+        f.total_ns = f.update_ns + f.layout_ns + f.build_ns + f.submit_ns;
+        self.stats.push(f);
+        self.pending_update_ns = 0;
+        self.pending_handler_ns = 0;
     }
 
     // ---- frame ------------------------------------------------------------
@@ -576,6 +646,8 @@ pub const Ui = struct {
     /// writes against the shadow copies (debug builds), and bring every
     /// widget's look and text up to date.
     pub fn update(self: *Ui) void {
+        const t0 = self.nowNs();
+        defer self.pending_update_ns += self.nowNs() -| t0;
         self.checkPinned();
         self.sweep(&self.buttons);
         self.sweep(&self.labels);
@@ -2643,4 +2715,168 @@ test "replacing a label's text every frame never reads the freed copy" {
         ui.endFrame();
     }
     try std.testing.expectEqualStrings("status line number 299", l.props.text.bytes);
+}
+
+const FakeClock = struct {
+    var now: u64 = 0;
+    fn read() u64 {
+        return now;
+    }
+};
+
+test "renderFrame records a frame with per-phase costs and command counts" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.clock = FakeClock.read;
+    FakeClock.now = 1000;
+    _ = try ui.add(Label, ui.tree.root, .{ .text = "Hi" });
+    ui.update();
+    var gpu: FakeGpu = .{};
+    try ui.renderFrame(gpu.backend(), &t.h.list, .{ .pixel_w = 100, .pixel_h = 50 });
+    try std.testing.expectEqual(@as(u64, 1), ui.stats.count);
+    const f = ui.stats.recent(0).?;
+    try std.testing.expect(f.commands >= 1 and f.glyphs >= 1);
+    // The clock is frozen, so every phase reads zero; counts still work.
+    try std.testing.expectEqual(@as(u64, 0), f.total_ns);
+}
+
+const TickingClock = struct {
+    var now: u64 = 0;
+    fn read() u64 {
+        now += 100;
+        return now;
+    }
+};
+
+test "phase costs add up to the frame total" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.clock = TickingClock.read;
+    _ = try ui.add(Label, ui.tree.root, .{ .text = "Hi" });
+    ui.update();
+    var gpu: FakeGpu = .{};
+    try ui.renderFrame(gpu.backend(), &t.h.list, .{ .pixel_w = 100, .pixel_h = 50 });
+    const f = ui.stats.recent(0).?;
+    try std.testing.expect(f.update_ns > 0 and f.layout_ns > 0 and f.build_ns > 0 and f.submit_ns > 0);
+    try std.testing.expectEqual(f.update_ns + f.layout_ns + f.build_ns + f.submit_ns, f.total_ns);
+    // Pending costs reset for the next frame.
+    try std.testing.expectEqual(@as(u64, 0), ui.pending_update_ns);
+}
+
+test "the overlay is appended to the draw list only when enabled" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.update();
+    var gpu: FakeGpu = .{};
+    try ui.renderFrame(gpu.backend(), &t.h.list, .{ .pixel_w = 400, .pixel_h = 100 });
+    const plain = t.h.list.items().len;
+    ui.show_stats = true;
+    ui.tree.markDirty(ui.tree.root, DirtyFlags.layout_and_paint);
+    try ui.renderFrame(gpu.backend(), &t.h.list, .{ .pixel_w = 400, .pixel_h = 100 });
+    try std.testing.expect(t.h.list.items().len > plain + 2);
+}
+
+const SlowHandler = struct {
+    fn slow(_: *event_mod.Event) void {
+        TickingClock.now += 20_000_000; // 20 ms of "work"
+    }
+};
+
+test "a slow input handler is counted against the budget" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.clock = TickingClock.read;
+    const b = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30), .on_click = event_mod.Callback.fromFn(SlowHandler.slow) });
+    _ = b;
+    ui.update();
+    try ui.layoutAndPaint(.{ .w = 200, .h = 100 }, &t.h.list);
+    ui.pointerMove(10, 10);
+    try std.testing.expectEqual(@as(u32, 0), ui.slow_handlers);
+    ui.pointerButtonEx(10, 10, 1, true, 1);
+    ui.pointerButtonEx(10, 10, 1, false, 1); // the click handler runs here
+    try std.testing.expectEqual(@as(u32, 1), ui.slow_handlers);
+    try std.testing.expect(ui.pending_handler_ns >= 20_000_000);
+    ui.handler_budget_ns = 0; // disabled
+    ui.pointerButtonEx(10, 10, 1, true, 1);
+    ui.pointerButtonEx(10, 10, 1, false, 1);
+    try std.testing.expectEqual(@as(u32, 1), ui.slow_handlers);
+}
+
+const SteadyScene = struct {
+    fa: std.testing.FailingAllocator,
+    ui: Ui,
+    prop: font.TestFont = .{},
+    mono: font.TestFont = .{ .monospace = true },
+    cmds: [4096]draw_list.Command = undefined,
+    glyphs: [8192]draw_list.Glyph = undefined,
+    list: DrawList = undefined,
+};
+
+test "steady-state frames allocate nothing after warmup" {
+    const sw = @import("../render/software_backend.zig");
+    const s = try std.testing.allocator.create(SteadyScene);
+    defer std.testing.allocator.destroy(s);
+    s.fa = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    s.prop = .{};
+    s.mono = .{ .monospace = true };
+    s.ui = try Ui.init(s.fa.allocator());
+    const ui = &s.ui;
+    defer ui.deinit();
+    _ = try ui.addFont(s.prop.backend());
+    ui.theme.mono_font = try ui.addFont(s.mono.backend());
+    ui.theme.font_size = 14;
+    s.list = DrawList.init(&s.cmds, &s.glyphs);
+
+    const root = ui.tree.root;
+    ui.tree.get(root).?.style = .{ .direction = .column, .gap = Length.px(4) };
+    _ = try ui.add(Label, root, .{ .text = "A label with some text" });
+    const btn = try ui.add(Button, root, .{ .text = "Click me", .style = box(120, 30) });
+    const field = try ui.add(TextField, root, .{ .text = "editable text", .style = .{ .height = Length.px(26), .shrink = 0 } });
+    const ed = try ui.add(CodeEditor, root, .{ .style = .{ .height = Length.px(120), .shrink = 0 } });
+    try ed.loadText("const std = @import(\"std\");\n\npub fn main() void {\n    // a comment\n    var x: u32 = 42;\n    _ = x;\n}\n", false);
+    const cv = try ui.add(canvas_mod.Canvas, root, .{ .style = box(100, 40) });
+    const Draw = struct {
+        fn run(_: ?*anyopaque, _: *Canvas, pc: *PaintCtx) @import("paint_ctx.zig").Error!void {
+            try pc.list.fillRect(.{ .x = pc.rect.x, .y = pc.rect.y, .w = 10, .h = 10 }, .{ .color = geometry.Color.white });
+        }
+    };
+    cv.props.on_draw = .{ .run = Draw.run };
+    cv.props.redraw_policy = .continuous;
+    ui.setFocus(field.node);
+
+    var sb = try sw.SoftwareBackend.init(std.testing.allocator, null);
+    defer sb.deinit();
+    const be = sb.backend();
+
+    // Frames that do real work: everything repaints and relayouts, the pointer
+    // hovers a button, the caret blinks, the canvas redraws.
+    const Frame = struct {
+        fn run(u: *Ui, b: render_backend.Backend, list: *DrawList, i: u64) !void {
+            _ = u.tick(i * 16);
+            u.pointerMove(@floatFromInt(10 + i % 40), 40);
+            u.update();
+            u.tree.markDirty(u.tree.root, DirtyFlags.layout_and_paint);
+            try u.renderFrame(b, list, .{ .pixel_w = 400, .pixel_h = 400, .clear = geometry.Color.black });
+            u.endFrame();
+        }
+    };
+    var i: u64 = 0;
+    while (i < 8) : (i += 1) try Frame.run(ui, be, &s.list, i); // warmup: scratch buffers, atlas, shaping caches
+    _ = btn;
+
+    const allocs = s.fa.allocations;
+    const resizes = s.fa.resize_index;
+    const frees = s.fa.deallocations;
+    while (i < 40) : (i += 1) try Frame.run(ui, be, &s.list, i);
+    // The frames really did work: text from the label, field, and editor, plus the canvas.
+    try std.testing.expect(s.list.items().len > 20);
+    try std.testing.expect(s.list.glyphItems().len > 60);
+    try std.testing.expect(cv.out.frames >= 30);
+    try std.testing.expectEqual(allocs, s.fa.allocations);
+    try std.testing.expectEqual(resizes, s.fa.resize_index);
+    try std.testing.expectEqual(frees, s.fa.deallocations);
 }

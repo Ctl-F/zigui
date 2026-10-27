@@ -175,6 +175,7 @@ pub fn main(init: std.process.Init) !void {
     defer window.destroy();
 
     var ui = try Ui.init(gpa);
+    ui.clock = sdl.ticksNs;
     defer ui.deinit();
     const ui_bytes = stb.loadFirst(io, gpa, init.environ_map.get("ZIGUI_FONT"), &stb.ui_font_candidates);
     defer if (ui_bytes) |b| gpa.free(b);

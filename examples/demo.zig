@@ -10,7 +10,7 @@
 //!
 //!   Commands and shortcuts (the header buttons show theirs):
 //!     Ctrl+N add card, Ctrl+D remove card, Ctrl+K Ctrl+X remove all cards,
-//!     Ctrl+B toggle sidebar, Ctrl+F focus the filter, Ctrl+T switch theme
+//!     F3 frame-time overlay, Ctrl+B toggle sidebar, Ctrl+F focus the filter, Ctrl+T switch theme
 //!     (an alternative theme with its own button painter and colors),
 //!     Up / Down move through the files while focus is in the sidebar (panel
 //!     scope), Esc clears the filter while it has focus (widget scope).
@@ -154,6 +154,11 @@ fn cmdSwitchTheme(a: *App, _: *zigui.Event) void {
     a.ui.setTheme(if (a.alt_active) a.alt_theme else a.base_theme);
 }
 
+fn cmdToggleStats(a: *App, _: *zigui.Event) void {
+    a.ui.show_stats = !a.ui.show_stats;
+    a.ui.tree.markDirty(a.ui.tree.root, .{ .paint = true });
+}
+
 fn cmdFocusFilter(a: *App, _: *zigui.Event) void {
     if (a.filter) |f| a.ui.setFocus(f.node);
 }
@@ -199,6 +204,7 @@ fn setupCommands(a: *App) !void {
     _ = try ui.registerCommand("cards.remove", .{ .title = "- Card", .run = .bind(a, cmdRemoveCard) });
     _ = try ui.registerCommand("cards.clear", .{ .title = "Clear cards", .run = .bind(a, cmdClearCards) });
     _ = try ui.registerCommand("view.sidebar", .{ .title = "Sidebar", .run = .bind(a, cmdToggleSidebar) });
+    _ = try ui.registerCommand("view.stats", .{ .title = "Frame stats", .run = .bind(a, cmdToggleStats) });
     _ = try ui.registerCommand("view.theme", .{ .title = "Switch theme", .run = .bind(a, cmdSwitchTheme) });
     _ = try ui.registerCommand("filter.focus", .{ .title = "Filter", .run = .bind(a, cmdFocusFilter) });
     _ = try ui.registerCommand("filter.clear", .{ .title = "Clear filter", .run = .bind(a, cmdClearFilter) });
@@ -213,6 +219,7 @@ fn setupCommands(a: *App) !void {
         \\ctrl+b = view.sidebar
         \\ctrl+f = filter.focus
         \\ctrl+t = view.theme
+        \\f3 = view.stats
         \\
     );
     if (report.errors > 0) std.log.warn("keymap: {d} bad line(s), first at line {d}", .{ report.errors, report.first_error_line });
@@ -446,6 +453,7 @@ pub fn main(init: std.process.Init) !void {
     defer window.destroy();
 
     var ui = try Ui.init(gpa);
+    ui.clock = sdl.ticksNs;
     defer ui.deinit();
 
     // Fonts: the file bytes and StbFont structs must outlive the Ui.

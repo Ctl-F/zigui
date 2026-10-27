@@ -12,7 +12,8 @@ const Visual = @import("style.zig").Visual;
 const Rect = geometry.Rect;
 const Color = geometry.Color;
 
-pub const Error = draw_list.Error;
+/// Painting fails when the draw list is full or a text buffer cannot grow.
+pub const Error = draw_list.Error || error{OutOfMemory};
 
 pub const PaintCtx = struct {
     list: *draw_list.DrawList,
