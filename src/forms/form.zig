@@ -34,6 +34,7 @@ const Length = @import("../core/length.zig").Length;
 const Style = @import("../core/style.zig").Style;
 const Color = @import("../core/geometry.zig").Color;
 const Button = @import("../widgets/button.zig").Button;
+const Text = @import("../widgets/common.zig").Text;
 const Label = @import("../widgets/label.zig").Label;
 const TextField = @import("../widgets/text_field.zig").TextField;
 
@@ -229,6 +230,9 @@ pub fn freeOwned(comptime T: type, v: T, a: std.mem.Allocator) void {
 
 pub const State = enum { open, submitted, cancelled };
 
+/// The `T` of a form over a value known only by its schema (`createDynamic`).
+pub const Dynamic = struct {};
+
 pub const Options = struct {
     title: []const u8 = "",
     submit_label: []const u8 = "OK",
@@ -276,6 +280,11 @@ pub fn Form(comptime T: type) type {
         ui: *Ui,
         gpa: std.mem.Allocator,
         opts: Options,
+        /// What is being edited: its schema and where it lives. For `Form(T)`
+        /// that is `value`; for `Form(Dynamic)` it is whatever was passed to
+        /// `createDynamic` (which must outlive the form).
+        root_type: *const schema.Type,
+        base: *anyopaque,
         /// The value being edited. Read it any time; `take` gives an owned copy.
         value: T,
         state: State = .open,
@@ -284,6 +293,9 @@ pub fn Form(comptime T: type) type {
         body: Handle = Handle.invalid,
         submit: ?*Button = null,
         form_error: ?*Label = null,
+        /// True for `createDynamic`: `Text` fields (toolkit-owned widget text) are
+        /// editable too.
+        dynamic: bool = false,
         /// Called after every revalidation (edit, rebuild).
         notify: ?event.Callback = null,
         /// Wizard pages: whether form-level (`""`) validation messages apply to
@@ -298,7 +310,6 @@ pub fn Form(comptime T: type) type {
         /// Strings the user typed, owned by the form.
         owned: std.ArrayListUnmanaged([]u8) = .empty,
 
-        const root_type = schema.typeOf(T);
 
         pub fn create(ui: *Ui, parent: Handle, opts: Options) !*Self {
             const self = try ui.gpa.create(Self);
@@ -307,7 +318,33 @@ pub fn Form(comptime T: type) type {
                 .ui = ui,
                 .gpa = ui.gpa,
                 .opts = opts,
+                .root_type = schema.typeOf(T),
+                .base = undefined,
                 .value = schema.defaultOf(T),
+                .arenas = .{ std.heap.ArenaAllocator.init(ui.gpa), std.heap.ArenaAllocator.init(ui.gpa) },
+            };
+            self.base = &self.value;
+            errdefer self.release();
+            try self.buildChrome(parent);
+            try self.rebuild();
+            return self;
+        }
+
+        /// A form over a value described only by its schema (the builder's
+        /// inspector). `T` must be `Dynamic`. Edits are written straight to
+        /// `base`; use `notify` to react (for example to mark dirty).
+        pub fn createDynamic(ui: *Ui, parent: Handle, root_type: *const schema.Type, base: *anyopaque, opts: Options) !*Self {
+            comptime std.debug.assert(T == Dynamic);
+            const self = try ui.gpa.create(Self);
+            errdefer ui.gpa.destroy(self);
+            self.* = .{
+                .ui = ui,
+                .gpa = ui.gpa,
+                .opts = opts,
+                .root_type = root_type,
+                .base = base,
+                .value = .{},
+                .dynamic = true,
                 .arenas = .{ std.heap.ArenaAllocator.init(ui.gpa), std.heap.ArenaAllocator.init(ui.gpa) },
             };
             errdefer self.release();
@@ -390,14 +427,14 @@ pub fn Form(comptime T: type) type {
             self.cur ^= 1;
             _ = self.arenas[self.cur].reset(.retain_capacity);
             self.bindings = .empty;
-            try self.buildFields(self.body, root_type, "", 0);
+            try self.buildFields(self.body, self.root_type, "", 0);
             self.revalidate();
         }
 
         fn buildFields(self: *Self, parent: Handle, ty: *const schema.Type, prefix: []const u8, depth: u32) anyerror!void {
             for (ty.fields) |*f| {
                 if (f.meta.hidden or !f.type.isEditable()) continue;
-                if (f.type.kind == .text) continue; // toolkit-owned widget text; not form material
+                if (f.type.kind == .text and !self.dynamic) continue; // toolkit-owned widget text
                 if (depth == 0 and !self.selected(f)) continue;
                 const path = if (prefix.len == 0)
                     try self.arena().dupe(u8, f.name)
@@ -423,7 +460,7 @@ pub fn Form(comptime T: type) type {
             if (self.opts.only == null and self.opts.group == null) return true;
             if (path.len == 0) return self.page_final;
             const end = std.mem.indexOfAny(u8, path, ".[") orelse path.len;
-            const f = root_type.field(path[0..end]) orelse return false;
+            const f = self.root_type.field(path[0..end]) orelse return false;
             return self.selected(f);
         }
 
@@ -470,7 +507,7 @@ pub fn Form(comptime T: type) type {
                     const col = try self.node(parent, .{ .direction = .column, .gap = Length.px(2) });
                     const row = try self.node(col, .{ .direction = .row, .gap = Length.px(8), .align_items = .center });
                     try self.labelCell(row, label);
-                    const present = schema.isPresent(root_type, &self.value, path) catch false;
+                    const present = schema.isPresent(self.root_type, self.base, path) catch false;
                     const pb = try self.bind(.presence, path, ty, meta);
                     pb.button = try self.ui.add(Button, row, .{
                         .text = if (present) "Set" else "Unset",
@@ -504,7 +541,7 @@ pub fn Form(comptime T: type) type {
         /// inside `col`.
         fn leafControl(self: *Self, col: Handle, row: Handle, path: []const u8, ty: *const schema.Type, meta: schema.Meta) !void {
             var vbuf: [64]u8 = undefined;
-            const current = schema.get(root_type, &self.value, path) catch schema.Value.none;
+            const current = schema.get(self.root_type, self.base, path) catch schema.Value.none;
             switch (ty.kind) {
                 .bool => {
                     const b = try self.bind(.toggle, path, ty, meta);
@@ -556,13 +593,18 @@ pub fn Form(comptime T: type) type {
             slot.* = copy;
         }
 
+        fn replaceWidgetText(ctx: ?*anyopaque, t: *anyopaque, bytes: []const u8) error{OutOfMemory}!void {
+            const self: *Self = @ptrCast(@alignCast(ctx.?));
+            try self.ui.replaceText(@ptrCast(@alignCast(t)), bytes);
+        }
+
         fn env(self: *Self) schema.Env {
-            return .{ .ctx = self, .replace_string = replaceString };
+            return .{ .ctx = self, .replace_string = replaceString, .replace_text = if (self.dynamic) replaceWidgetText else null };
         }
 
         fn write(self: *Self, b: *Binding, v: schema.Value) bool {
             const e = self.env();
-            schema.set(root_type, &self.value, b.path, v, &e) catch |err| {
+            schema.set(self.root_type, self.base, b.path, v, &e) catch |err| {
                 b.parse_error = switch (err) {
                     error.OutOfRange => "Out of range",
                     error.OutOfMemory => blk: {
@@ -597,7 +639,7 @@ pub fn Form(comptime T: type) type {
             const self = b.form;
             switch (b.kind) {
                 .toggle => {
-                    const cur = schema.get(root_type, &self.value, b.path) catch return;
+                    const cur = schema.get(self.root_type, self.base, b.path) catch return;
                     const next = !(cur == .bool and cur.bool);
                     if (!self.write(b, .{ .bool = next })) return;
                     const btn = b.button.?;
@@ -606,7 +648,7 @@ pub fn Form(comptime T: type) type {
                     self.ui.tree.markDirty(btn.node, .{ .paint = true });
                 },
                 .cycle => {
-                    const cur = schema.get(root_type, &self.value, b.path) catch return;
+                    const cur = schema.get(self.root_type, self.base, b.path) catch return;
                     const n = b.ty.enum_names.len;
                     if (n == 0 or cur != .choice) return;
                     const next: u32 = @intCast((cur.choice + 1) % n);
@@ -614,11 +656,11 @@ pub fn Form(comptime T: type) type {
                     b.button.?.setText(b.ty.enum_names[next]) catch {};
                 },
                 .presence => {
-                    const present = schema.isPresent(root_type, &self.value, b.path) catch return;
+                    const present = schema.isPresent(self.root_type, self.base, b.path) catch return;
                     if (present) {
-                        schema.setAbsent(root_type, &self.value, b.path) catch return;
+                        schema.setAbsent(self.root_type, self.base, b.path) catch return;
                     } else {
-                        schema.setPresentDefault(root_type, &self.value, b.path) catch return;
+                        schema.setPresentDefault(self.root_type, self.base, b.path) catch return;
                     }
                     self.rebuild() catch {
                         self.out.failed = true;
@@ -902,6 +944,35 @@ test "createWith starts from the given value and the `only` list filters top-lev
     defer f.destroy();
     try testing.expectEqualStrings("5", findBinding(f, "count").field.?.text());
     try testing.expectEqual(@as(usize, 2), f.bindings.items.len);
+}
+
+test "a dynamic form edits a value in place through its schema" {
+    const Live = struct {
+        title: Text = .{},
+        size: f32 = 0,
+        on: bool = true,
+    };
+    var ui = try Ui.init(testing.allocator);
+    defer ui.deinit();
+    var live: Live = .{};
+    defer ui.freeText(&live.title);
+    const f = try Form(Dynamic).createDynamic(&ui, ui.tree.root, schema.typeOf(Live), &live, .{ .footer = false });
+    defer f.destroy();
+    const Hits = struct {
+        var n: u32 = 0;
+        fn hit(_: *event.Event) void {
+            n += 1;
+        }
+    };
+    Hits.n = 0;
+    f.notify = event.Callback.fromFn(Hits.hit);
+    typeInto(&ui, findBinding(f, "title").field.?, "Hello");
+    try testing.expectEqualStrings("Hello", live.title.bytes);
+    typeInto(&ui, findBinding(f, "size").field.?, "12.5");
+    try testing.expectEqual(@as(f32, 12.5), live.size);
+    clickBinding(findBinding(f, "on"));
+    try testing.expect(!live.on);
+    try testing.expect(Hits.n >= 3);
 }
 
 test "cloneOwned and freeOwned handle nesting, optionals, and arrays without leaks" {

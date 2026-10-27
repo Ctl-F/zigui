@@ -30,6 +30,8 @@ pub const Info = struct {
     name: []const u8,
     /// Schema of the app-written state.
     props: *const schema.Type,
+    /// A `Props` value with every field at its default, for "what differs" diffs.
+    props_default: *const anyopaque,
     /// Schema of the toolkit-written state (read-only to callers).
     out: *const schema.Type,
     type_tag: *const anyopaque,
@@ -87,6 +89,7 @@ fn describe(comptime name: []const u8, comptime W: type) Info {
                 try x.loadText(copy, true);
             } else try x.setText(text);
         }
+        const default_props: W.Props = schema.defaultOf(W.Props);
         const event_fields = eventFieldNames(W.Props);
         const event_names = blk: {
             var out: [event_fields.len][]const u8 = undefined;
@@ -107,6 +110,7 @@ fn describe(comptime name: []const u8, comptime W: type) Info {
     return .{
         .name = name,
         .props = schema.typeOf(W.Props),
+        .props_default = &G.default_props,
         .out = schema.typeOf(W.Out),
         .type_tag = ui_mod.typeTag(W),
         .create = G.create,

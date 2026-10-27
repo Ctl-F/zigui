@@ -62,6 +62,20 @@ pub const Value = union(enum) {
     length: Length,
 };
 
+pub fn valueEql(a: Value, b: Value) bool {
+    if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+    return switch (a) {
+        .none => true,
+        .bool => |x| x == b.bool,
+        .int => |x| x == b.int,
+        .float => |x| x == b.float,
+        .choice => |x| x == b.choice,
+        .text => |x| std.mem.eql(u8, x, b.text),
+        .color => |x| std.meta.eql(x, b.color),
+        .length => |x| std.meta.eql(x, b.length),
+    };
+}
+
 /// What a setter needs from its owner. Text fields are toolkit-owned memory,
 /// so writing one must go through whoever owns the allocator.
 pub const Env = struct {
