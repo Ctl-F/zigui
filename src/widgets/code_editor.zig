@@ -706,7 +706,7 @@ pub const CodeEditor = struct {
             } else |_| {}
         }
         if (!have_spans) {
-            try list.glyphRunAt(bounds, glyphs, .{ .x = origin_x, .y = baseline }, plain, m.font, m.size, subpixel);
+            try self.emitRun(list, m, bounds, glyphs, origin_x, baseline, plain, subpixel);
             return;
         }
 
@@ -721,12 +721,20 @@ pub const CodeEditor = struct {
             if (gi == 0) {
                 cur = color;
             } else if (!std.meta.eql(color, cur)) {
-                try list.glyphRunAt(bounds, glyphs[run_start..gi], .{ .x = origin_x, .y = baseline }, cur, m.font, m.size, subpixel);
+                try self.emitRun(list, m, bounds, glyphs[run_start..gi], origin_x, baseline, cur, subpixel);
                 run_start = gi;
                 cur = color;
             }
         }
-        try list.glyphRunAt(bounds, glyphs[run_start..], .{ .x = origin_x, .y = baseline }, cur, m.font, m.size, subpixel);
+        try self.emitRun(list, m, bounds, glyphs[run_start..], origin_x, baseline, cur, subpixel);
+    }
+
+    /// One colored run. Monospace text goes in as cells (ids only) when its
+    /// positions sit on the cell grid, else as positioned glyphs.
+    fn emitRun(self: *CodeEditor, list: *DrawList, m: Metrics, bounds: Rect, run: []const draw_list.Glyph, origin_x: f32, baseline: f32, color: @import("../core/geometry.zig").Color, subpixel: bool) draw_list.Error!void {
+        if (!subpixel and try list.monoRunAt(bounds, run, .{ .x = origin_x, .y = baseline }, color, m.font, m.size, m.cell_w)) return;
+        _ = self;
+        try list.glyphRunAt(bounds, run, .{ .x = origin_x, .y = baseline }, color, m.font, m.size, subpixel);
     }
 
     // ---- events ----------------------------------------------------------------------------

@@ -387,45 +387,55 @@ const Renderer = struct {
     }
 
     fn drawGlyphRun(self: *Renderer, run: draw_list.GlyphRun) void {
-        const provider = self.glyphs orelse return;
         const end = @as(usize, run.offset) + run.count;
         if (end > self.glyph_items.len) return;
-        const font_id = run.font;
-        const size_px = run.size * self.scale;
-        const subpixel = run.subpixel;
-        const color = run.color;
-        const w: usize = self.fb.width;
-
         for (self.glyph_items[run.offset..end]) |g| {
             const dx = g.x * self.scale;
             var ix: i32 = undefined;
             var sub: u8 = 0;
-            if (subpixel) {
+            if (run.subpixel) {
                 const fl = @floor(dx);
                 ix = floorI(fl);
                 sub = @intFromFloat(std.math.clamp(@floor((dx - fl) * 4), 0, 3));
             } else {
                 ix = floorI(@round(dx));
             }
-            const iy = floorI(@round(g.y * self.scale));
-            const img = provider.lookup(font_id, g.id, size_px, sub) orelse continue;
-            if (img.w == 0 or img.h == 0) continue;
+            self.drawGlyph(run.font, g.id, run.size * self.scale, ix, floorI(@round(g.y * self.scale)), sub, run.color);
+        }
+    }
 
-            const gx0 = ix + img.left;
-            const gy0 = iy - img.top;
-            const area = (IRect{ .x0 = gx0, .y0 = gy0, .x1 = gx0 + @as(i32, @intCast(img.w)), .y1 = gy0 + @as(i32, @intCast(img.h)) }).intersect(self.clip);
-            if (area.isEmpty()) continue;
+    fn drawMonoRun(self: *Renderer, run: draw_list.MonoRun) void {
+        const end = @as(usize, run.offset) + run.count;
+        if (end > self.glyph_items.len) return;
+        const iy = floorI(@round(run.baseline_y * self.scale));
+        for (self.glyph_items[run.offset..end], 0..) |g, i| {
+            if (g.id == draw_list.empty_cell) continue;
+            const x = (run.first_x + @as(f32, @floatFromInt(i)) * run.cell_w) * self.scale;
+            self.drawGlyph(run.font, g.id, run.size * self.scale, floorI(@round(x)), iy, 0, run.color);
+        }
+    }
 
-            var y = area.y0;
-            while (y < area.y1) : (y += 1) {
-                const src_row = img.pixels[(img.y + @as(u32, @intCast(y - gy0))) * img.stride + img.x ..];
-                const row = self.fb.pixels[@as(usize, @intCast(y)) * w ..][0..w];
-                var x = area.x0;
-                while (x < area.x1) : (x += 1) {
-                    const cov = src_row[@intCast(x - gx0)];
-                    if (cov == 0) continue;
-                    blend(&row[@intCast(x)], color, @as(f32, @floatFromInt(cov)) / 255.0 * self.opacity);
-                }
+    /// Blit one glyph bitmap with its baseline origin at device pixel (ix, iy).
+    fn drawGlyph(self: *Renderer, font_id: u32, glyph: u32, size_px: f32, ix: i32, iy: i32, sub: u8, color: Color) void {
+        const provider = self.glyphs orelse return;
+        const w: usize = self.fb.width;
+        const img = provider.lookup(font_id, glyph, size_px, sub) orelse return;
+        if (img.w == 0 or img.h == 0) return;
+
+        const gx0 = ix + img.left;
+        const gy0 = iy - img.top;
+        const area = (IRect{ .x0 = gx0, .y0 = gy0, .x1 = gx0 + @as(i32, @intCast(img.w)), .y1 = gy0 + @as(i32, @intCast(img.h)) }).intersect(self.clip);
+        if (area.isEmpty()) return;
+
+        var y = area.y0;
+        while (y < area.y1) : (y += 1) {
+            const src_row = img.pixels[(img.y + @as(u32, @intCast(y - gy0))) * img.stride + img.x ..];
+            const row = self.fb.pixels[@as(usize, @intCast(y)) * w ..][0..w];
+            var x = area.x0;
+            while (x < area.x1) : (x += 1) {
+                const cov = src_row[@intCast(x - gx0)];
+                if (cov == 0) continue;
+                blend(&row[@intCast(x)], color, @as(f32, @floatFromInt(cov)) / 255.0 * self.opacity);
             }
         }
     }
@@ -494,6 +504,7 @@ const Renderer = struct {
                 }
             },
             .glyph_run => |run| self.drawGlyphRun(run),
+            .mono_run => |run| self.drawMonoRun(run),
             .image => |img| self.drawImage(img),
         }
     }

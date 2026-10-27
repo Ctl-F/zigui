@@ -2072,7 +2072,7 @@ test "only the lines in view are painted, with balanced clips" {
     try t.h.frame();
 
     var runs: usize = 0;
-    for (t.h.list.items()) |c| runs += @intFromBool(c == .glyph_run);
+    for (t.h.list.items()) |c| runs += @intFromBool(c == .glyph_run or c == .mono_run);
     // ~7 rows visible, each with a text run and a gutter number.
     try std.testing.expect(runs > 0 and runs <= 2 * 8);
     try std.testing.expect(t.h.list.isBalanced());
@@ -2239,11 +2239,24 @@ fn rowRuns(list: *const DrawList, row: usize, out: *[32]RowRun) usize {
     var n: usize = 0;
     const y = @as(f32, @floatFromInt(row)) * line_px;
     for (list.items()) |c| {
-        if (c != .glyph_run or @abs(c.glyph_run.bounds.y - y) > 0.5) continue;
-        const first = list.glyphItems()[c.glyph_run.offset];
-        if (first.x < gutter_px) continue; // the gutter's line number
+        var run: RowRun = undefined;
+        switch (c) {
+            .glyph_run => |g| {
+                if (@abs(g.bounds.y - y) > 0.5) continue;
+                const first = list.glyphItems()[g.offset];
+                run = .{ .color = g.color, .glyphs = g.count, .first_x = first.x };
+            },
+            .mono_run => |m| {
+                if (@abs(m.bounds.y - y) > 0.5) continue;
+                var ink: u32 = 0;
+                for (list.glyphItems()[m.offset..][0..m.count]) |g| ink += @intFromBool(g.id != draw_list.empty_cell);
+                run = .{ .color = m.color, .glyphs = ink, .first_x = m.first_x };
+            },
+            else => continue,
+        }
+        if (run.first_x < gutter_px) continue; // the gutter's line number
         if (n < out.len) {
-            out[n] = .{ .color = c.glyph_run.color, .glyphs = c.glyph_run.count, .first_x = first.x };
+            out[n] = run;
             n += 1;
         }
     }
@@ -3540,4 +3553,47 @@ test "openFile maps a file, shows it at once, indexes in the background, then al
     try std.testing.expectEqual(body.items.len, ed.editor.doc.len());
     _ = ui.tree.destroySubtree(ed.node);
     ui.update();
+}
+
+test "monospace runs draw exactly the pixels positioned glyphs would" {
+    const software = @import("../render/software.zig");
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.theme.font_size = 14;
+    const ed = try ui.add(CodeEditor, ui.tree.root, .{ .style = .{ .width = Length.px(260), .height = Length.px(120), .shrink = 0 } });
+    try ed.loadText("fn main() void {\n    var x: u32 = 42; // a comment\n\treturn;\n}\n", false);
+    try ed.setLanguage(&syntax_mod.zig);
+    try t.h.frame();
+
+    var monos: usize = 0;
+    for (t.h.list.items()) |c| monos += @intFromBool(c == .mono_run);
+    try std.testing.expect(monos > 2); // the editor really emitted cell runs
+
+    // The same frame with every cell run rewritten as positioned glyphs.
+    var cmds: [1024]draw_list.Command = undefined;
+    var glyphs: [4096]draw_list.Glyph = undefined;
+    var expanded = DrawList.init(&cmds, &glyphs);
+    for (t.h.list.items()) |c| switch (c) {
+        .mono_run => |m| {
+            var shaped: [128]draw_list.Glyph = undefined;
+            var n: usize = 0;
+            for (t.h.list.glyphItems()[m.offset..][0..m.count], 0..) |g, i| {
+                if (g.id == draw_list.empty_cell) continue;
+                shaped[n] = .{ .id = g.id, .x = m.first_x + @as(f32, @floatFromInt(i)) * m.cell_w, .y = m.baseline_y };
+                n += 1;
+            }
+            try expanded.glyphRunEx(m.bounds, shaped[0..n], m.color, m.font, m.size, false);
+        },
+        .glyph_run => |g| try expanded.glyphRunEx(g.bounds, t.h.list.glyphItems()[g.offset..][0..g.count], g.color, g.font, g.size, g.subpixel),
+        else => try expanded.push(c),
+    };
+
+    var a = try software.Framebuffer.init(std.testing.allocator, 300, 200);
+    defer a.deinit(std.testing.allocator);
+    var b = try software.Framebuffer.init(std.testing.allocator, 300, 200);
+    defer b.deinit(std.testing.allocator);
+    software.render(&a, &t.h.list, .{ .clear = geometry.Color.black, .glyphs = ui.glyphProvider() });
+    software.render(&b, &expanded, .{ .clear = geometry.Color.black, .glyphs = ui.glyphProvider() });
+    try std.testing.expectEqualSlices(u8, a.bytes(), b.bytes());
 }

@@ -159,6 +159,13 @@ fn translate(cmd: Command, dx: f32, dy: f32) Command {
             o.bounds = shift(g.bounds, dx, dy);
             break :blk .{ .glyph_run = o };
         },
+        .mono_run => |m| blk: {
+            var o = m;
+            o.bounds = shift(m.bounds, dx, dy);
+            o.first_x += dx;
+            o.baseline_y += dy;
+            break :blk .{ .mono_run = o };
+        },
         .image => |im| blk: {
             var o = im;
             o.rect = shift(im.rect, dx, dy);
@@ -186,6 +193,16 @@ fn replay(list: *DrawList, entry: *const Cache.Entry, dx: f32, dy: f32) Error!vo
                 g.offset = @intCast(at);
                 try list.push(cmd);
             },
+            .mono_run => |*m| {
+                // Cell ids only: nothing in the side array moves with the run.
+                const src = entry.glyphs.items[m.offset..][0..m.count];
+                if (list.glyph_len + src.len > list.glyphs.len) return error.GlyphBufferFull;
+                const at = list.glyph_len;
+                @memcpy(list.glyphs[at .. at + src.len], src);
+                list.glyph_len += src.len;
+                m.offset = @intCast(at);
+                try list.push(cmd);
+            },
             else => try list.push(cmd),
         }
     }
@@ -202,6 +219,7 @@ fn record(cache: *Cache, entry: *Cache.Entry, list: *const DrawList, c0: usize, 
     for (list.commands[c0..list.len]) |c| {
         var cmd = c;
         if (cmd == .glyph_run) cmd.glyph_run.offset -= @intCast(g0);
+        if (cmd == .mono_run) cmd.mono_run.offset -= @intCast(g0);
         entry.cmds.appendAssumeCapacity(cmd);
     }
     entry.glyphs.appendSliceAssumeCapacity(list.glyphs[g0..list.glyph_len]);

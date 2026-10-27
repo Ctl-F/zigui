@@ -16,7 +16,7 @@ atlas, fields), commands and scoped shortcuts, a piece-table editor core with
 undo/redo and multi-cursor, a code editor widget with incremental syntax
 highlighting, a software renderer, an SDL3 platform shim, a runtime widget
 schema and registry, generated forms and wizards, ZON UI documents, and a visual
-builder. About 470 tests.
+builder. About 475 tests.
 
 Not built yet (largest first): a renderer backend interface and GPU path, canvas
 and frame scheduling, damage tracking, list/tree widgets and a model interface,
@@ -279,6 +279,12 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   `platform/shaders/` compiled to SPIR-V and committed. Metal and D3D12 need the
   same shaders converted (SDL_shadercross) and are not set up. Headless runs use
   `SDL_VIDEO_DRIVER=offscreen`.
+- Monospace draw-list runs: `DrawList.monoRunAt` records a run of monospace
+  text as cells (one glyph id per column, `empty_cell` for spaces, a first x, a
+  baseline, and a cell width) instead of a positioned glyph each; refused (the
+  caller falls back to `glyphRunAt`) when positions are off the cell grid. Both
+  renderers, the paint cache, and `prepareGlyphs` handle it, the code editor
+  emits it, and a test requires identical pixels to positioned glyphs.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.
@@ -390,8 +396,7 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
 Ordered by the spec-drift notes (`NOTES/spec-drift-notes.md`); the notes are the
 authority for rationale, and a few items are recommendations, not requirements.
 
-1. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
-2. The C facade (`src/capi/`), once the core Zig library is done.
+1. The C facade (`src/capi/`), once the core Zig library is done.
 
 Smaller gaps: theme metrics (padding, min sizes) and a painter measure override; layout follow-ups (width-constrained text measure, stack/absolute,
 split and scroll containers, wrap, grid, calc `Length`); draw commands for

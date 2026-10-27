@@ -190,6 +190,13 @@ pub fn prepareGlyphs(list: *const DrawList, scale: f32, provider: GlyphProvider)
                 _ = provider.lookup(run.font, g.id, size_px, sub);
             }
         },
+        .mono_run => |run| {
+            const end = @as(usize, run.offset) + run.count;
+            if (end > items.len) continue;
+            for (items[run.offset..end]) |g| {
+                if (g.id != draw_list.empty_cell) _ = provider.lookup(run.font, g.id, run.size * scale, 0);
+            }
+        },
         else => {},
     };
 }

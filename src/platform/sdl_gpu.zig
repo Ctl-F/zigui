@@ -586,6 +586,7 @@ pub const GpuBackend = struct {
                     }
                 },
                 .glyph_run => |run| self.glyphRun(run),
+                .mono_run => |run| self.monoRun(run),
                 .image => |im| self.image(im),
             }
         }
@@ -598,10 +599,8 @@ pub const GpuBackend = struct {
         }
 
         fn glyphRun(self: *Builder, run: draw_list.GlyphRun) void {
-            const provider = self.provider orelse return;
             const end = @as(usize, run.offset) + run.count;
             if (end > self.glyph_items.len) return;
-            const size_px = run.size * self.scale;
             for (self.glyph_items[run.offset..end]) |g| {
                 const dx = g.x * self.scale;
                 var ix: i32 = undefined;
@@ -613,29 +612,45 @@ pub const GpuBackend = struct {
                 } else {
                     ix = @intFromFloat(@round(dx));
                 }
-                const iy: i32 = @intFromFloat(@round(g.y * self.scale));
-                const img = provider.lookup(run.font, g.id, size_px, sub) orelse continue;
-                if (img.w == 0 or img.h == 0) continue;
-                const page = self.pageOf(img.pixels) orelse continue;
-                const tex = self.be.atlas[page] orelse continue;
-                const gx0: f32 = @floatFromInt(ix + img.left);
-                const gy0: f32 = @floatFromInt(iy - img.top);
-                const gx1 = gx0 + @as(f32, @floatFromInt(img.w));
-                const gy1 = gy0 + @as(f32, @floatFromInt(img.h));
-                const area = IRect.covering(.{ .x = gx0, .y = gy0, .w = gx1 - gx0, .h = gy1 - gy0 }, 0).intersect(self.clip);
-                if (area.isEmpty()) continue;
-                self.use(.{ .texture = tex, .linear = false });
-                var v: Vertex = @splat(0);
-                v[4] = @floatFromInt(@intFromEnum(Kind.glyph));
-                setColor(&v, 12, run.color, self.opacity);
-                const inv = 1.0 / @as(f32, @floatFromInt(atlas_size));
-                self.quad(gx0, gy0, gx1, gy1, .{
-                    @as(f32, @floatFromInt(img.x)) * inv,
-                    @as(f32, @floatFromInt(img.y)) * inv,
-                    @as(f32, @floatFromInt(img.x + img.w)) * inv,
-                    @as(f32, @floatFromInt(img.y + img.h)) * inv,
-                }, v);
+                self.glyph(run.font, g.id, run.size * self.scale, ix, @intFromFloat(@round(g.y * self.scale)), sub, run.color);
             }
+        }
+
+        fn monoRun(self: *Builder, run: draw_list.MonoRun) void {
+            const end = @as(usize, run.offset) + run.count;
+            if (end > self.glyph_items.len) return;
+            const iy: i32 = @intFromFloat(@round(run.baseline_y * self.scale));
+            for (self.glyph_items[run.offset..end], 0..) |g, i| {
+                if (g.id == draw_list.empty_cell) continue;
+                const x = (run.first_x + @as(f32, @floatFromInt(i)) * run.cell_w) * self.scale;
+                self.glyph(run.font, g.id, run.size * self.scale, @intFromFloat(@round(x)), iy, 0, run.color);
+            }
+        }
+
+        /// One glyph quad with its baseline origin at device pixel (ix, iy).
+        fn glyph(self: *Builder, font_id: u32, id: u32, size_px: f32, ix: i32, iy: i32, sub: u8, color: Color) void {
+            const provider = self.provider orelse return;
+            const img = provider.lookup(font_id, id, size_px, sub) orelse return;
+            if (img.w == 0 or img.h == 0) return;
+            const page = self.pageOf(img.pixels) orelse return;
+            const tex = self.be.atlas[page] orelse return;
+            const gx0: f32 = @floatFromInt(ix + img.left);
+            const gy0: f32 = @floatFromInt(iy - img.top);
+            const gx1 = gx0 + @as(f32, @floatFromInt(img.w));
+            const gy1 = gy0 + @as(f32, @floatFromInt(img.h));
+            const area = IRect.covering(.{ .x = gx0, .y = gy0, .w = gx1 - gx0, .h = gy1 - gy0 }, 0).intersect(self.clip);
+            if (area.isEmpty()) return;
+            self.use(.{ .texture = tex, .linear = false });
+            var v: Vertex = @splat(0);
+            v[4] = @floatFromInt(@intFromEnum(Kind.glyph));
+            setColor(&v, 12, color, self.opacity);
+            const inv = 1.0 / @as(f32, @floatFromInt(atlas_size));
+            self.quad(gx0, gy0, gx1, gy1, .{
+                @as(f32, @floatFromInt(img.x)) * inv,
+                @as(f32, @floatFromInt(img.y)) * inv,
+                @as(f32, @floatFromInt(img.x + img.w)) * inv,
+                @as(f32, @floatFromInt(img.y + img.h)) * inv,
+            }, v);
         }
 
         fn image(self: *Builder, im: draw_list.Image) void {

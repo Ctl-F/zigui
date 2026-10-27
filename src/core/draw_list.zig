@@ -96,6 +96,26 @@ pub const GlyphRun = struct {
     subpixel: bool,
 };
 
+/// A run of monospace text as cells: the side array holds one glyph id per
+/// cell, starting at column 0 of the run, and cell `i` is drawn at
+/// `first_x + i * cell_w` (snapped to whole device pixels) on `baseline_y`. Cells
+/// without ink hold `empty_cell`. This is much less to write and store than a
+/// positioned glyph per character.
+pub const MonoRun = struct {
+    offset: u32,
+    count: u32,
+    bounds: Rect,
+    color: Color,
+    font: u32,
+    size: f32,
+    first_x: f32,
+    baseline_y: f32,
+    cell_w: f32,
+};
+
+/// The glyph id of a cell that draws nothing (a space) in a `MonoRun`.
+pub const empty_cell: u32 = std.math.maxInt(u32);
+
 /// One draw command. Records stay fixed-size, so the list is cheap to build,
 /// cache, and replay.
 pub const Command = union(enum) {
@@ -108,6 +128,7 @@ pub const Command = union(enum) {
     push_opacity: f32,
     pop_opacity,
     glyph_run: GlyphRun,
+    mono_run: MonoRun,
     image: Image,
 };
 
@@ -274,6 +295,57 @@ pub const DrawList = struct {
             .subpixel = subpixel,
         } });
     }
+
+    /// A monospace run built from shaped glyphs (`run`, positions relative to
+    /// `origin`) whose positions all fall on a `cell_w` grid. False, recording
+    /// nothing, if they do not (proportional text, kerning): draw those with
+    /// `glyphRunAt`. Gaps in the columns (spaces) become `empty_cell`.
+    pub fn monoRunAt(
+        self: *DrawList,
+        bounds: Rect,
+        run: []const Glyph,
+        origin: Vec2,
+        color: Color,
+        font_id: u32,
+        font_size: f32,
+        cell_w: f32,
+    ) Error!bool {
+        if (run.len == 0 or cell_w <= 0) return false;
+        var first_col: i64 = 0;
+        var last_col: i64 = 0;
+        for (run, 0..) |g, i| {
+            const col_f = g.x / cell_w;
+            const col: i64 = @intFromFloat(@round(col_f));
+            if (@abs(col_f - @as(f32, @floatFromInt(col))) > 0.02 or col < 0) return false;
+            if (i == 0) {
+                first_col = col;
+            } else if (col <= last_col) return false; // columns must ascend
+            last_col = col;
+        }
+        const cells: usize = @intCast(last_col - first_col + 1);
+        if (self.glyph_len + cells > self.glyphs.len) return error.GlyphBufferFull;
+        if (self.len == self.commands.len) return error.DrawListFull;
+        const offset = self.glyph_len;
+        const out = self.glyphs[offset .. offset + cells];
+        for (out) |*d| d.* = .{ .id = empty_cell, .x = 0, .y = 0 };
+        for (run) |g| {
+            const col: usize = @intCast(@as(i64, @intFromFloat(@round(g.x / cell_w))) - first_col);
+            out[col] = .{ .id = g.id, .x = 0, .y = 0 };
+        }
+        self.glyph_len += cells;
+        try self.push(.{ .mono_run = .{
+            .offset = @intCast(offset),
+            .count = @intCast(cells),
+            .bounds = bounds,
+            .color = color,
+            .font = font_id,
+            .size = font_size,
+            .first_x = origin.x + @as(f32, @floatFromInt(first_col)) * cell_w,
+            .baseline_y = origin.y,
+            .cell_w = cell_w,
+        } });
+        return true;
+    }
 };
 
 /// Owns the backing buffers. Allocate once at startup; `list()` hands out a
@@ -360,6 +432,35 @@ test "clip and opacity pushes and pops balance" {
     const before = dl.items().len;
     try std.testing.expect(!(try dl.popClip()));
     try std.testing.expectEqual(before, dl.items().len);
+}
+
+test "a monospace run stores one id per cell, with gaps for spaces" {
+    var storage = try Storage.init(std.testing.allocator, 8, 16);
+    defer storage.deinit();
+    var dl = storage.list();
+    // "a b" at 8 px cells: columns 0, 2 (the space is not emitted).
+    const run = [_]Glyph{ .{ .id = 10, .x = 0, .y = 0 }, .{ .id = 11, .x = 16, .y = 0 } };
+    try std.testing.expect(try dl.monoRunAt(.{ .w = 24, .h = 16 }, &run, .{ .x = 100, .y = 40 }, Color.white, 1, 14, 8));
+    const m = dl.items()[0].mono_run;
+    try std.testing.expectEqual(@as(u32, 3), m.count);
+    try std.testing.expectEqual(@as(f32, 100), m.first_x);
+    try std.testing.expectEqual(@as(f32, 40), m.baseline_y);
+    try std.testing.expectEqual(@as(u32, 10), dl.glyphItems()[0].id);
+    try std.testing.expectEqual(empty_cell, dl.glyphItems()[1].id);
+    try std.testing.expectEqual(@as(u32, 11), dl.glyphItems()[2].id);
+
+    // A run starting mid-line records where it begins.
+    const later = [_]Glyph{.{ .id = 5, .x = 32, .y = 0 }};
+    try std.testing.expect(try dl.monoRunAt(.{ .w = 8, .h = 16 }, &later, .{ .x = 0, .y = 0 }, Color.white, 1, 14, 8));
+    try std.testing.expectEqual(@as(f32, 32), dl.items()[1].mono_run.first_x);
+    try std.testing.expectEqual(@as(u32, 1), dl.items()[1].mono_run.count);
+
+    // Off-grid positions (proportional text) are refused and nothing is recorded.
+    const off = [_]Glyph{ .{ .id = 1, .x = 0, .y = 0 }, .{ .id = 2, .x = 5.5, .y = 0 } };
+    const before = dl.items().len;
+    try std.testing.expect(!(try dl.monoRunAt(.{ .w = 8, .h = 16 }, &off, .{}, Color.white, 1, 14, 8)));
+    try std.testing.expectEqual(before, dl.items().len);
+    try std.testing.expect(!(try dl.monoRunAt(.{}, &.{}, .{}, Color.white, 1, 14, 8)));
 }
 
 test "glyph runs copy into the side array and reference it by offset" {
