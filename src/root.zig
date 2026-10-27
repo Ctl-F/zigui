@@ -18,6 +18,7 @@ pub const event = @import("core/event.zig");
 pub const dispatch = @import("core/dispatch.zig");
 pub const schema = @import("core/schema.zig");
 pub const form = @import("forms/form.zig");
+pub const wizard = @import("forms/wizard.zig");
 pub const registry = @import("widgets/registry.zig");
 pub const keys = @import("core/keys.zig");
 pub const commands = @import("core/commands.zig");

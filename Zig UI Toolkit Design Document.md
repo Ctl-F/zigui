@@ -150,6 +150,8 @@ Implemented in `src/forms/form.zig` as the non-blocking form (`Form(T)`); enums 
 - Explicit wizard: custom pages plus custom next and back conditions.
 - In ZON, a wizard is almost entirely declarative, and the builder can edit it visually.
 
+Implemented in `src/forms/wizard.zig`: generated pages (by field names or `ui` group) and custom pages, `can_next` conditions, page-scoped validation. Declarative ZON wizards arrive with the ZON loader.
+
 ## 12. Runtime Schema (shared foundation)
 
 One runtime schema format (field name, type tag, offset, metadata) serves four consumers:

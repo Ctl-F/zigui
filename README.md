@@ -159,6 +159,11 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   validation errors show under the field and disable Submit. Typed strings are
   form-owned; `take(allocator)` returns a deep copy (`freeOwned` frees it). The
   blocking `prompt` belongs to the platform loop and is not built yet.
+- Wizards (`forms/wizard.zig`): `Wizard(T)` is a page list over one result
+  struct with Back/Next/Finish/Cancel chrome and a step indicator. Pages are
+  generated (named fields, or a `ui` `.group`; `generatedPages(T)` makes one per
+  group) or custom (a build callback). `can_next` conditions and page-scoped
+  validation gate Next; edits persist across pages.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.
@@ -279,7 +284,7 @@ authority for rationale, and a few items are recommendations, not requirements.
 5. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
    focus scopes (modal traps), tab indices, IME preedit.
 6. Memory-mapped document open and an off-thread newline-index scan.
-7. Wizards, then a ZON loader and the builder.
+7. A ZON loader and the builder.
 8. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
 9. The C facade (`src/capi/`), once the core Zig library is done.
 

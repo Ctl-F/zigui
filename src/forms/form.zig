@@ -239,6 +239,11 @@ pub const Options = struct {
     label_width: f32 = 140,
     /// Show only these top-level fields, in the order of the struct.
     only: ?[]const []const u8 = null,
+    /// Show only top-level fields whose `ui` metadata names this group (`""`
+    /// matches fields with no group). Ignored when `only` is set.
+    group: ?[]const u8 = null,
+    /// Include the Submit and Cancel buttons (wizards supply their own).
+    footer: bool = true,
 };
 
 pub fn Form(comptime T: type) type {
@@ -279,6 +284,11 @@ pub fn Form(comptime T: type) type {
         body: Handle = Handle.invalid,
         submit: ?*Button = null,
         form_error: ?*Label = null,
+        /// Called after every revalidation (edit, rebuild).
+        notify: ?event.Callback = null,
+        /// Wizard pages: whether form-level (`""`) validation messages apply to
+        /// the page being shown.
+        page_final: bool = true,
 
         /// Two build arenas: a rebuild can run inside a callback whose binding
         /// lives in the previous arena, so that one is only reset a rebuild later.
@@ -360,6 +370,7 @@ pub fn Form(comptime T: type) type {
             }
             self.body = try self.node(self.root, .{ .direction = .column, .gap = Length.px(6) });
             self.form_error = try self.ui.add(Label, self.root, .{ .color = error_color });
+            if (!self.opts.footer) return;
             const footer = try self.node(self.root, .{ .direction = .row, .gap = Length.px(8), .justify = .end });
             const cancel = try self.ui.add(Button, footer, .{ .text = self.opts.cancel_label });
             cancel.props.on_click = event.Callback.bind(self, onCancel);
@@ -379,19 +390,15 @@ pub fn Form(comptime T: type) type {
             self.cur ^= 1;
             _ = self.arenas[self.cur].reset(.retain_capacity);
             self.bindings = .empty;
-            try self.buildFields(self.body, root_type, "", 0, self.opts.only);
+            try self.buildFields(self.body, root_type, "", 0);
             self.revalidate();
         }
 
-        fn buildFields(self: *Self, parent: Handle, ty: *const schema.Type, prefix: []const u8, depth: u32, only: ?[]const []const u8) anyerror!void {
+        fn buildFields(self: *Self, parent: Handle, ty: *const schema.Type, prefix: []const u8, depth: u32) anyerror!void {
             for (ty.fields) |*f| {
                 if (f.meta.hidden or !f.type.isEditable()) continue;
                 if (f.type.kind == .text) continue; // toolkit-owned widget text; not form material
-                if (only) |names| {
-                    var listed = false;
-                    for (names) |n| listed = listed or std.mem.eql(u8, n, f.name);
-                    if (!listed) continue;
-                }
+                if (depth == 0 and !self.selected(f)) continue;
                 const path = if (prefix.len == 0)
                     try self.arena().dupe(u8, f.name)
                 else
@@ -400,6 +407,24 @@ pub fn Form(comptime T: type) type {
                 const label = try self.arena().dupe(u8, f.displayName(&buf));
                 try self.buildValue(parent, label, path, f.type, f.meta, depth);
             }
+        }
+
+        /// Whether a top-level field belongs on the page being shown.
+        fn selected(self: *const Self, f: *const schema.Field) bool {
+            if (self.opts.only) |names| {
+                for (names) |n| if (std.mem.eql(u8, n, f.name)) return true;
+                return false;
+            }
+            if (self.opts.group) |g| return std.mem.eql(u8, f.meta.group orelse "", g);
+            return true;
+        }
+
+        fn pathInPage(self: *const Self, path: []const u8) bool {
+            if (self.opts.only == null and self.opts.group == null) return true;
+            if (path.len == 0) return self.page_final;
+            const end = std.mem.indexOfAny(u8, path, ".[") orelse path.len;
+            const f = root_type.field(path[0..end]) orelse return false;
+            return self.selected(f);
         }
 
         fn labelCell(self: *Self, row: Handle, text: []const u8) !void {
@@ -430,7 +455,7 @@ pub fn Form(comptime T: type) type {
             switch (ty.kind) {
                 .@"struct" => {
                     const g = try self.group(parent, label, depth);
-                    try self.buildFields(g, ty, path, depth + 1, null);
+                    try self.buildFields(g, ty, path, depth + 1);
                 },
                 .array => {
                     const g = try self.group(parent, label, depth);
@@ -460,7 +485,7 @@ pub fn Form(comptime T: type) type {
                     } else {
                         const g = try self.group(col, "", depth);
                         switch (inner.kind) {
-                            .@"struct" => try self.buildFields(g, inner, path, depth + 1, null),
+                            .@"struct" => try self.buildFields(g, inner, path, depth + 1),
                             else => try self.buildValue(g, label, path, inner, meta, depth + 1),
                         }
                     }
@@ -621,13 +646,15 @@ pub fn Form(comptime T: type) type {
 
         pub fn revalidate(self: *Self) void {
             var report: Report = .{};
-            if (comptime @hasDecl(T, "validate")) T.validate(&self.value, &report);
+            if (comptime @hasDecl(T, "validate")) {
+                var all: Report = .{};
+                T.validate(&self.value, &all);
+                for (all.items[0..all.len]) |it| if (self.pathInPage(it.path)) report.add(it.path, it.message);
+            }
 
             var valid = report.len == 0;
-            var matched: usize = 0;
             for (self.bindings.items) |b| {
                 const msg = b.parse_error orelse report.forPath(b.path);
-                if (report.forPath(b.path) != null) matched += 1;
                 if (msg != null) valid = false;
                 if (b.err) |l| setLabel(l, msg orelse "");
             }
@@ -643,7 +670,11 @@ pub fn Form(comptime T: type) type {
             }
             if (self.form_error) |l| setLabel(l, general);
             self.out.valid = valid;
-            if (self.submit) |s| s.setEnabled(valid);
+            if (self.submit) |sb| sb.setEnabled(valid);
+            if (self.notify) |cb| {
+                var ev: event.Event = .{ .kind = .command };
+                cb.invoke(&ev);
+            }
         }
     };
 }
