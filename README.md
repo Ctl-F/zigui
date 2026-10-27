@@ -14,10 +14,10 @@ doc, and what to do next).
 Working and tested: node tree, flex layout, events and focus, text (shaping,
 atlas, fields), commands and scoped shortcuts, a piece-table editor core with
 undo/redo and multi-cursor, a code editor widget with incremental syntax
-highlighting, a software renderer, and an SDL3 platform shim. About 315 tests.
+highlighting, a software renderer, and an SDL3 platform shim. About 345 tests.
 
-Not built yet (largest first): the builder-friendly layer (runtime schema, widget
-registry, ZON loader, forms), a renderer backend interface and GPU path, canvas
+Not built yet (largest first): the builder-friendly layer (ZON loader, forms,
+the builder itself), a renderer backend interface and GPU path, canvas
 and frame scheduling, damage tracking, list/tree widgets and a model interface,
 docking and multi-window, accessibility. See "Next steps".
 
@@ -144,6 +144,19 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
 
 ## Decisions encoded so far
 
+- Runtime schema (`core/schema.zig`): `typeOf(T)` reflects a struct at compile
+  time into a constant `Type` tree (kinds, nested fields, enum names, dirty
+  category from `dirty_map`, optional `pub const ui` metadata) with compiler
+  generated typed get/set functions, so reads and writes through the schema are
+  type-checked, not raw memory. Paths like `colors.normal` or `syntax[3]` reach
+  nested values. Callbacks, painters, and slice strings are listed but not
+  editable. Text writes go through the owner's `replace_text` hook so the toolkit
+  keeps ownership.
+- Widget registry (`widgets/registry.zig`): one list of widget types gives each a
+  name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
+  (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.
+  `setProp`/`setStyle` write by path and mark the node with the prop's declared
+  dirty categories. `Text` declares `is_text` to be recognized.
 - Handles are index + generation; generation 0 is never issued. Anything that can
   be destroyed is referenced by a handle. Pool chunks never move, so a `*T` stays
   valid until that object is destroyed.
@@ -259,8 +272,7 @@ authority for rationale, and a few items are recommendations, not requirements.
 5. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
    focus scopes (modal traps), tab indices, IME preedit.
 6. Memory-mapped document open and an off-thread newline-index scan.
-7. Runtime schema generator (reflect over the widget interface), then forms and
-   wizards, then a ZON loader and the builder.
+7. Forms and wizards over the schema, then a ZON loader and the builder.
 8. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
 9. The C facade (`src/capi/`), once the core Zig library is done.
 

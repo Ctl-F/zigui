@@ -82,6 +82,10 @@ pub const Node = struct {
     /// Transient: set by the layout pass while it decides which children to descend into.
     place_pending: bool = false,
     user_data: ?*anyopaque = null,
+    /// The widget living on this node and its type tag (set by `Ui.add`); the
+    /// widget registry maps these back to a descriptor.
+    widget: ?*anyopaque = null,
+    widget_type: ?*const anyopaque = null,
     /// Lazily allocated listener table; null for nodes without listeners.
     listeners: ?*ListenerList = null,
     /// Shaped text drawn inside this node's content box; owned by the node.

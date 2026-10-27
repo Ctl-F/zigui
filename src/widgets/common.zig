@@ -6,6 +6,9 @@
 /// be freed later by the toolkit, which is why this is a wrapper and not a bare
 /// `[]const u8`.
 pub const Text = struct {
+    /// Marks this as toolkit-owned text for the runtime schema.
+    pub const is_text = true;
+
     bytes: []const u8 = "",
 
     pub fn slice(self: Text) []const u8 {

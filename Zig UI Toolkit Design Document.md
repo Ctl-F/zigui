@@ -159,6 +159,8 @@ One runtime schema format (field name, type tag, offset, metadata) serves four c
 
 Comptime reflection generates it on the Zig side. The engine only ever consumes runtime schemas.
 
+Implemented in `src/core/schema.zig` (`typeOf(T)`, path get/set, optional presence, per-field `ui` metadata, dirty category from `dirty_map`) and `src/widgets/registry.zig` (named widget list, create-by-name, `setProp`/`getProp`/`getOut`, `setStyle`). Offsets are recorded, but access goes through compiler-generated typed accessors. The C mirror is still deferred.
+
 ## 13. Builder
 
 - UI is described as data in ZON: widget type, props, layout, named bindings, named actions.

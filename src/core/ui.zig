@@ -57,6 +57,14 @@ pub const CodeEditor = code_editor.CodeEditor;
 /// The UI context: tree, layout, input, theme, and every widget.
 ///
 /// DO NOT MOVE a `Ui` after the first widget is added (see the file header).
+/// A unique address per widget type, stored on nodes so the registry can tell
+/// which widget a node carries.
+pub fn typeTag(comptime W: type) *const anyopaque {
+    return &struct {
+        const unique: u8 = @sizeOf(W) & 0;
+    }.unique;
+}
+
 pub const Ui = struct {
     gpa: std.mem.Allocator,
     text: TextSystem,
@@ -180,7 +188,10 @@ pub const Ui = struct {
         for (W.listened_kinds) |kind| {
             try self.tree.addListener(node_h, .{ .kind = kind, .callback = event_types.Callback.bind(w, W.handleEvent) });
         }
-        self.tree.get(node_h).?.paint_hook = tree_mod.PaintHook.bind(w, W.paintHook);
+        const node = self.tree.get(node_h).?;
+        node.paint_hook = tree_mod.PaintHook.bind(w, W.paintHook);
+        node.widget = w;
+        node.widget_type = typeTag(W);
         try w.apply(opts);
         return w;
     }
