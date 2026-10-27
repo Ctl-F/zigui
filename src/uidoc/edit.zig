@@ -38,6 +38,9 @@ pub const Editor = struct {
     version: u32 = 0,
     /// The last command was a record edit that the next one may merge into.
     coalescing: bool = false,
+    /// The single top-level field that edit changed (edits to other fields do
+    /// not merge into it), or null if it changed several.
+    coalesce_key: ?[]const u8 = null,
 
     pub fn init(gpa: Allocator, doc: Doc) Editor {
         return .{ .gpa = gpa, .doc = doc };
@@ -187,7 +190,8 @@ pub const Editor = struct {
         };
         if (old.eql(value)) return;
         const copy = try self.doc.copyValue(value);
-        if (self.coalescing and self.undo_stack.items.len > 0) {
+        const key = changedKey(old, copy);
+        if (self.coalescing and key != null and self.coalesce_key != null and std.mem.eql(u8, key.?, self.coalesce_key.?) and self.undo_stack.items.len > 0) {
             switch (self.undo_stack.items[self.undo_stack.items.len - 1]) {
                 .set_record => |*last| if (last.uid == uid and last.which == which) {
                     last.new = copy;
@@ -201,6 +205,26 @@ pub const Editor = struct {
         }
         try self.exec(.{ .set_record = .{ .uid = uid, .which = which, .old = old, .new = copy } });
         self.coalescing = true;
+        self.coalesce_key = key;
+    }
+
+    /// The one top-level field in which two records differ, if exactly one does.
+    fn changedKey(old: zon.Value, new: zon.Value) ?[]const u8 {
+        var found: ?[]const u8 = null;
+        const of: []const zon.Field = old.fields() orelse &.{};
+        const nf: []const zon.Field = new.fields() orelse &.{};
+        for (nf) |f| {
+            const same = if (old.field(f.name)) |o| o.eql(f.value) else false;
+            if (same) continue;
+            if (found != null) return null;
+            found = f.name;
+        }
+        for (of) |f| {
+            if (new.field(f.name) != null) continue;
+            if (found != null) return null;
+            found = f.name;
+        }
+        return found;
     }
 
     pub fn setId(self: *Editor, uid: u32, id: []const u8) Error!void {
@@ -312,7 +336,14 @@ test "record edits coalesce until the run is broken" {
     _ = try e.undo();
     try testing.expectEqualStrings("abc", n.props.field("text").?.string);
 
-    // Different record, or a different command in between, starts a new step.
+    // A different field, a different record, or another command in between
+    // starts a new step.
+    try e.setRecord(n.uid, .props, try rec(&e, ".{ .text = \"abc\", .size = 3 }"));
+    try e.setRecord(n.uid, .props, try rec(&e, ".{ .text = \"abc\", .size = 30 }"));
+    _ = try e.undo();
+    try testing.expect(n.props.field("size") == null);
+    try testing.expectEqualStrings("abc", n.props.field("text").?.string);
+
     try e.setRecord(n.uid, .style, try rec(&e, ".{ .grow = 1 }"));
     try e.setRecord(n.uid, .props, try rec(&e, ".{ .text = \"z\" }"));
     _ = try e.undo();

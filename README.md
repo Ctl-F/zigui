@@ -14,10 +14,11 @@ doc, and what to do next).
 Working and tested: node tree, flex layout, events and focus, text (shaping,
 atlas, fields), commands and scoped shortcuts, a piece-table editor core with
 undo/redo and multi-cursor, a code editor widget with incremental syntax
-highlighting, a software renderer, and an SDL3 platform shim. About 345 tests.
+highlighting, a software renderer, an SDL3 platform shim, a runtime widget
+schema and registry, generated forms and wizards, ZON UI documents, and a visual
+builder. About 415 tests.
 
-Not built yet (largest first): the builder-friendly layer (ZON loader, forms,
-the builder itself), a renderer backend interface and GPU path, canvas
+Not built yet (largest first): a renderer backend interface and GPU path, canvas
 and frame scheduling, damage tracking, list/tree widgets and a model interface,
 docking and multi-window, accessibility. See "Next steps".
 
@@ -28,6 +29,7 @@ zig build test                 # all tests; no SDL needed
 zig build check-boundary       # also part of `test`: no C-convention code in the core
 zig build demo                 # IDE-style demo window (needs SDL3 dev files, pkg-config sdl3)
 zig build dedit                # a minimal demo editor window
+zig build builder              # the UI builder, editing ./ui.zon (or zig-out/bin/builder FILE)
 ```
 
 `zig build test` prints `ui_check` warnings and a "failed command" line from the
@@ -174,6 +176,17 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   Widgets whose text is content (text fields, code editors) take `.text` in
   `.props` through the registry's `set_text`. `@embedFile` text loads the same way
   at startup; comptime validation and declarative wizards are not built.
+- Builder (`builder/builder.zig`, run with `zig build builder`): palette, outline,
+  live preview, and a generated inspector, all in the toolkit. Edits go through
+  `uidoc/edit.zig`, an undo/redo command editor (consecutive edits to the same
+  field of a record merge into one step; structural edits and selection changes
+  end the run). The inspector is `Form(Dynamic)` over the runtime schema of the
+  selected widget's live props and style, so the preview responds as you type;
+  `uidoc/diff.zig` turns the live value back into the document's sparse ZON record.
+  Inspector edits do not rebuild the preview or inspector (that would drop focus);
+  structural edits, undo, and redo do. Limits: no scroll container yet, so the
+  inspector shows Props, Style, or Events one at a time; no drag-and-drop or
+  clicking in the preview to select; enums are cycle buttons.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.
@@ -294,9 +307,8 @@ authority for rationale, and a few items are recommendations, not requirements.
 5. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
    focus scopes (modal traps), tab indices, IME preedit.
 6. Memory-mapped document open and an off-thread newline-index scan.
-7. The builder (document editing with undo, outline, inspector, palette).
-8. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
-9. The C facade (`src/capi/`), once the core Zig library is done.
+7. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
+8. The C facade (`src/capi/`), once the core Zig library is done.
 
 Smaller gaps: theme metrics (padding, min sizes) and a painter measure override; layout follow-ups (width-constrained text measure, stack/absolute,
 split and scroll containers, wrap, grid, calc `Length`); draw commands for
