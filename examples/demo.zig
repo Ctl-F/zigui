@@ -603,6 +603,7 @@ pub fn main(init: std.process.Init) !void {
                 .mouse_button => |m| ui.pointerButtonEx(m.x, m.y, @backingInt(m.button), m.down, m.clicks),
                 .mouse_wheel => |m| ui.wheel(0, 0, m.x, m.y),
                 .text_input => |t| ui.textInput(t.bytes[0..t.len]),
+                .text_editing => |t| ui.textEditing(t.bytes[0..t.len], t.cursor),
                 .key => |k| {
                     const used = ui.keyHandled(k.key, k.mods, k.down, k.repeat);
                     // Escape that nothing used: leave a focused widget, else quit.

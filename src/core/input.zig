@@ -37,7 +37,20 @@ pub const KeyHook = struct {
     run: *const fn (ctx: *anyopaque, tree: *Tree, k: keys.Key, mods: keys.Mods, down: bool, repeat: bool) bool,
 };
 
+pub const max_scopes = 8;
+
+/// A focus scope: while it is the innermost one, keyboard focus and Tab stay
+/// inside `root`'s subtree. A modal scope also blocks pointer input outside it.
+pub const Scope = struct {
+    root: Handle,
+    /// Focus before the scope was entered, restored when it is left.
+    restore: Handle,
+    modal: bool,
+};
+
 pub const Input = struct {
+    scopes: [max_scopes]Scope = undefined,
+    scope_n: u8 = 0,
     hover: Handle = Handle.invalid,
     pressed: Handle = Handle.invalid,
     pressed_button: u32 = 0,
@@ -99,9 +112,62 @@ pub const Input = struct {
 
     /// The node pointer events are aimed at: the grabbing node while one holds
     /// the grab, otherwise whatever is under the pointer.
-    fn pointerTarget(self: *const Input, tree: *Tree, x: f32, y: f32) ?Handle {
+    fn pointerTarget(self: *Input, tree: *Tree, x: f32, y: f32) ?Handle {
         if (tree.isValid(self.grab)) return self.grab;
-        return tree.hitTest(x, y);
+        const hit = tree.hitTest(x, y) orelse return null;
+        if (self.activeScope(tree)) |sc| {
+            if (sc.modal and !inScope(tree, sc.root, hit)) return null;
+        }
+        return hit;
+    }
+
+    fn inScope(tree: *Tree, root: Handle, h: Handle) bool {
+        return Handle.eql(root, h) or tree.isAncestor(root, h);
+    }
+
+    /// The innermost scope whose root still exists (dead ones are left, with
+    /// focus restored).
+    pub fn activeScope(self: *Input, tree: *Tree) ?*Scope {
+        while (self.scope_n > 0 and !tree.isValid(self.scopes[self.scope_n - 1].root)) {
+            self.scope_n -= 1;
+            const restore = self.scopes[self.scope_n].restore;
+            if (self.scope_n == 0 and tree.isFocusable(restore)) tree.focused = restore;
+        }
+        return if (self.scope_n > 0) &self.scopes[self.scope_n - 1] else null;
+    }
+
+    /// Trap keyboard focus (and, if `modal`, pointer input) inside `root`'s
+    /// subtree until `popScope`. Focus moves to the scope's remembered node or
+    /// its first focusable. False if too many scopes are open.
+    pub fn pushScope(self: *Input, tree: *Tree, root: Handle, modal: bool) bool {
+        if (self.scope_n == max_scopes or !tree.isValid(root)) return false;
+        self.scopes[self.scope_n] = .{ .root = root, .restore = tree.focused, .modal = modal };
+        self.scope_n += 1;
+        const mem = tree.get(root).?.focus_memory;
+        const target: ?Handle = if (tree.isValid(mem) and inScope(tree, root, mem) and tree.isFocusable(mem))
+            mem
+        else if (tree.isValid(tree.focused) and inScope(tree, root, tree.focused))
+            tree.focused
+        else
+            tree.nextFocusableIn(root, Handle.invalid, true);
+        self.setFocus(tree, target);
+        return true;
+    }
+
+    /// Leave the innermost scope; focus returns to where it was before.
+    pub fn popScope(self: *Input, tree: *Tree) void {
+        const sc = self.activeScope(tree) orelse return;
+        const root = sc.root;
+        const restore = sc.restore;
+        if (tree.isValid(tree.focused) and inScope(tree, root, tree.focused)) {
+            tree.get(root).?.focus_memory = tree.focused;
+        }
+        self.scope_n -= 1;
+        if (tree.isValid(restore) and tree.isFocusable(restore)) {
+            self.setFocus(tree, restore);
+        } else {
+            self.setFocus(tree, null);
+        }
     }
 
     pub fn pointerMove(self: *Input, tree: *Tree, x: f32, y: f32) void {
@@ -137,7 +203,9 @@ pub const Input = struct {
                 dispatch.dispatch(tree, &ev);
                 handled = ev.handled;
             }
-            if (!handled) self.setFocus(tree, if (hit) |h| tree.focusableAtOrAbove(h) else null);
+            // A click outside a modal scope leaves focus where it is.
+            const blocked = hit == null and if (self.activeScope(tree)) |sc| sc.modal else false;
+            if (!handled and !blocked) self.setFocus(tree, if (hit) |h| tree.focusableAtOrAbove(h) else null);
             return;
         }
 
@@ -167,6 +235,9 @@ pub const Input = struct {
     pub fn setFocus(self: *Input, tree: *Tree, h: ?Handle) void {
         if (h) |n| {
             if (!tree.isFocusable(n)) return;
+            if (self.activeScope(tree)) |sc| {
+                if (!inScope(tree, sc.root, n)) return;
+            }
             tree.focused = n;
         } else {
             tree.focused = Handle.invalid;
@@ -180,6 +251,14 @@ pub const Input = struct {
         // A focused node that became unfocusable (hidden, or lost its flag) loses focus.
         if (tree.isValid(tree.focused) and !tree.isFocusable(tree.focused)) {
             tree.focused = tree.focusableAtOrAbove(tree.get(tree.focused).?.parent) orelse Handle.invalid;
+        }
+        // Focus cannot sit outside the innermost scope (a destroyed focused node
+        // falls back to its ancestor, which may be outside).
+        if (self.activeScope(tree)) |sc| {
+            if (tree.isValid(tree.focused) and !inScope(tree, sc.root, tree.focused)) {
+                tree.focused = tree.nextFocusableIn(sc.root, Handle.invalid, true) orelse Handle.invalid;
+            }
+            if (tree.isValid(tree.focused)) tree.get(sc.root).?.focus_memory = tree.focused;
         }
         const new = if (tree.isValid(tree.focused)) tree.focused else Handle.invalid;
         const old = if (tree.isValid(self.focus_seen)) self.focus_seen else Handle.invalid;
@@ -225,7 +304,8 @@ pub const Input = struct {
         }
         if (down and k == .tab and !mods.any(.{ .ctrl = true, .alt = true, .gui = true })) {
             const forward = !mods.shift;
-            if (tree.nextFocusable(tree.focused, forward)) |n| {
+            const scope_root = if (self.activeScope(tree)) |sc| sc.root else tree.root;
+            if (tree.nextFocusableIn(scope_root, tree.focused, forward)) |n| {
                 self.setFocus(tree, n);
                 return true;
             }
@@ -239,6 +319,15 @@ pub const Input = struct {
         if (!tree.isValid(tree.focused) or text.len == 0) return;
         self.keyboard = true;
         var ev: Event = .{ .kind = .text_input, .target = tree.focused, .text = text };
+        dispatch.dispatch(tree, &ev);
+    }
+
+    /// Deliver an IME composition update to the focused node.
+    pub fn textEditing(self: *Input, tree: *Tree, text: []const u8, cursor: u32) void {
+        self.syncFocus(tree);
+        if (!tree.isValid(tree.focused)) return;
+        self.keyboard = true;
+        var ev: Event = .{ .kind = .text_editing, .target = tree.focused, .text = text, .preedit_cursor = cursor };
         dispatch.dispatch(tree, &ev);
     }
 

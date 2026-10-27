@@ -121,6 +121,8 @@ pub const Canvas = struct {
 
     pub const Options = struct {
         style: Style = .{},
+        /// Accessible name (for screen readers).
+        label: []const u8 = "Canvas",
         redraw_policy: RedrawPolicy = .on_demand,
         hz: f32 = 30,
         enabled: bool = true,
@@ -158,6 +160,7 @@ pub const Canvas = struct {
     }
 
     pub fn apply(self: *Canvas, o: Options) !void {
+        try self.ui.tree.setLabel(self.node, o.label);
         self.props.redraw_policy = o.redraw_policy;
         self.props.hz = o.hz;
         self.props.enabled = o.enabled;

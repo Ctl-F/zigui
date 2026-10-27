@@ -266,7 +266,7 @@ fn paintText(block: *const @import("../text/block.zig").TextBlock, padding: @imp
     const list = pc.list;
     const abs = pc.rect;
     const decor = block.decor;
-    if (block.glyphs.len == 0 and !decor.sel_on and !decor.caret_on) return;
+    if (block.glyphs.len == 0 and !decor.sel_on and !decor.caret_on and !decor.ul_on) return;
     const pad = layout_mod.resolveEdges(padding, null);
     const content: Rect = .{
         .x = abs.x + pad.l,
@@ -293,6 +293,9 @@ fn paintText(block: *const @import("../text/block.zig").TextBlock, padding: @imp
     }
     if (block.glyphs.len > 0) {
         try list.glyphRunAt(bounds, block.glyphs, .{ .x = origin_x, .y = baseline }, pc.text_color orelse block.color, block.font, block.size, block.subpixel);
+    }
+    if (decor.ul_on and decor.ul_x1 > decor.ul_x0) {
+        try list.fillRect(.{ .x = origin_x + decor.ul_x0, .y = baseline + 2, .w = decor.ul_x1 - decor.ul_x0, .h = 1 }, Paint.solid(pc.text_color orelse block.color));
     }
     if (decor.caret_on) {
         // Whole logical pixels keep the caret crisp at 1x.

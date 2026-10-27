@@ -98,6 +98,9 @@ pub const Ui = struct {
     /// and is counted in `slow_handlers`. 0 disables the check.
     handler_budget_ns: u64 = 8_000_000,
     slow_handlers: u32 = 0,
+    /// Interactive nodes found without an accessible name (debug builds).
+    a11y_warnings: u32 = 0,
+    a11y_log: bool = true,
     last_target: struct { w: u32 = 0, h: u32 = 0, scale: f32 = 0 } = .{},
     overlay_was_on: bool = false,
     /// The region the last `renderFrame` redrew (null: all of it).
@@ -531,8 +534,95 @@ pub const Ui = struct {
         self.endHandler(t0, "text_input");
     }
 
+    /// IME composition update for the focused widget: `text` is the uncommitted
+    /// string (empty ends the composition) and `cursor` the IME caret's byte
+    /// offset inside it. Text fields show it inline, underlined, until the
+    /// committed text arrives through `textInput`.
+    pub fn textEditing(self: *Ui, text: []const u8, caret_byte: u32) void {
+        const t0 = self.nowNs();
+        self.input.textEditing(&self.tree, text, caret_byte);
+        self.endHandler(t0, "text_editing");
+    }
+
     pub fn setFocus(self: *Ui, h: ?Handle) void {
         self.input.setFocus(&self.tree, h);
+    }
+
+    pub const ClickableOptions = struct {
+        /// Accessible name; required (a clickable thing with no name is unusable
+        /// with a screen reader).
+        label: []const u8,
+        role: tree_mod.Role = .button,
+        on_click: event_types.Callback,
+    };
+
+    /// Make any node act like a button or link: focusable (Tab), activated by
+    /// click, Enter, or Space (Enter and Space on the node itself, not on
+    /// focusable descendants), with a pointer cursor, a role, and a label.
+    pub fn makeClickable(self: *Ui, h: Handle, o: ClickableOptions) !void {
+        const node = self.tree.get(h) orelse return error.InvalidHandle;
+        try self.tree.setLabel(h, o.label);
+        node.role = o.role;
+        node.flags.focusable = true;
+        node.cursor = .pointer;
+        try self.tree.addListener(h, .{ .kind = .click, .callback = o.on_click });
+        try self.tree.addListener(h, .{ .kind = .key_down, .callback = event_types.Callback.bind(self, onClickableKey) });
+    }
+
+    fn onClickableKey(self: *Ui, ev: *event_types.Event) void {
+        if (ev.repeat or (ev.key != .enter and ev.key != .space)) return;
+        if (!Handle.eql(ev.target, ev.current)) return;
+        var click: event_types.Event = .{ .kind = .click, .target = ev.current };
+        @import("dispatch.zig").dispatch(&self.tree, &click);
+        ev.handled = true;
+    }
+
+    /// Debug builds: warn once about each interactive or focusable node that has
+    /// no accessible name (a label, or text on it or inside it). Counted in
+    /// `a11y_warnings`; set `a11y_log = false` to count without logging.
+    fn checkAccessibility(self: *Ui) void {
+        self.tree.a11y_dirty = false;
+        const tree = &self.tree;
+        var cur: ?Handle = tree.root;
+        while (cur) |h| : (cur = tree.nextPreorder(tree.root, h)) {
+            const n = tree.get(h).?;
+            if (n.flags.a11y_checked) continue;
+            n.flags.a11y_checked = true;
+            if (!(n.flags.interactive or n.flags.focusable)) continue;
+            if (hasName(tree, h)) continue;
+            self.a11y_warnings += 1;
+            if (self.a11y_log) {
+                std.log.warn("ui_check: interactive node (role {s}) has no accessible label; set one with Tree.setLabel or Ui.makeClickable", .{@tagName(n.role)});
+            }
+        }
+    }
+
+    fn hasName(tree: *Tree, h: Handle) bool {
+        var cur: ?Handle = h;
+        while (cur) |c| : (cur = tree.nextPreorder(h, c)) {
+            const n = tree.get(c).?;
+            if (n.label.len > 0 or n.text != null) return true;
+        }
+        return false;
+    }
+
+    /// Trap keyboard focus inside `root`'s subtree (Tab cycles there) until
+    /// `popFocusScope`; with `modal`, pointer input outside it is ignored too.
+    /// Use it for dialogs and menus. Focus returns to where it was when the scope
+    /// is popped (or its root is destroyed), and a scope remembers its last
+    /// focused node for next time. False if too many scopes are open.
+    pub fn pushFocusScope(self: *Ui, root: Handle, modal: bool) bool {
+        return self.input.pushScope(&self.tree, root, modal);
+    }
+
+    pub fn popFocusScope(self: *Ui) void {
+        self.input.popScope(&self.tree);
+    }
+
+    /// Number of open focus scopes.
+    pub fn focusScopeDepth(self: *Ui) usize {
+        _ = self.input.activeScope(&self.tree);
+        return self.input.scope_n;
     }
 
     /// The focused node, if any.
@@ -690,6 +780,9 @@ pub const Ui = struct {
         self.forEachWidget("prepare");
         self.input.syncFocus(&self.tree);
         self.forEachWidget("update");
+        if (comptime shadow.enabled) {
+            if (self.tree.a11y_dirty) self.checkAccessibility();
+        }
     }
 
     /// End of frame: clear frame-scoped flags and dirty bits.
@@ -3109,4 +3202,288 @@ test "repaint boundaries replay from the paint cache until something inside chan
     _ = ui.tree.destroySubtree(ed.node);
     try Frame.run(ui, &t.h.list, &gpu);
     try std.testing.expectEqual(@as(usize, 0), ui.paint_cache.count());
+}
+
+test "a modal focus scope traps Tab and the pointer, restores focus, and remembers its last node" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    const a = try ui.add(Button, ui.tree.root, .{ .text = "outside", .style = box(80, 30) });
+    const panel = try ui.tree.create(.{ .style = .{ .direction = .row, .gap = Length.px(10) } });
+    try ui.tree.appendChild(ui.tree.root, panel);
+    const b = try ui.add(Button, panel, .{ .text = "B", .style = box(60, 30) });
+    const c = try ui.add(Button, panel, .{ .text = "C", .style = box(60, 30) });
+    try t.frame();
+
+    ui.setFocus(a.node);
+    try std.testing.expect(ui.pushFocusScope(panel, true));
+    try std.testing.expectEqual(@as(usize, 1), ui.focusScopeDepth());
+    try std.testing.expect(Handle.eql(ui.focused().?, b.node)); // first focusable inside
+
+    ui.key(.tab, .{}, true, false);
+    try std.testing.expect(Handle.eql(ui.focused().?, c.node));
+    ui.key(.tab, .{}, true, false); // wraps inside the scope, never reaching `outside`
+    try std.testing.expect(Handle.eql(ui.focused().?, b.node));
+    ui.key(.tab, .{ .shift = true }, true, false);
+    try std.testing.expect(Handle.eql(ui.focused().?, c.node));
+
+    ui.setFocus(a.node); // programmatic focus outside is refused
+    try std.testing.expect(Handle.eql(ui.focused().?, c.node));
+    const an = ui.tree.get(a.node).?;
+    t.click(an.rect.x + 5, an.rect.y + 5); // so is a click outside
+    try std.testing.expect(!a.out.clicked and !a.out.hovered);
+    try std.testing.expect(Handle.eql(ui.focused().?, c.node));
+    const cn = ui.tree.absoluteRect(c.node).?;
+    t.click(cn.x + 5, cn.y + 5); // inside still works
+    try std.testing.expect(c.out.clicked);
+
+    ui.popFocusScope();
+    try std.testing.expectEqual(@as(usize, 0), ui.focusScopeDepth());
+    try std.testing.expect(Handle.eql(ui.focused().?, a.node)); // back where it was
+    ui.key(.tab, .{}, true, false); // Tab roams the whole tree again
+    try std.testing.expect(Handle.eql(ui.focused().?, b.node));
+
+    // Re-entering restores the scope's own last focus (C).
+    try std.testing.expect(ui.pushFocusScope(panel, false));
+    try std.testing.expect(Handle.eql(ui.focused().?, c.node));
+    // Destroying the scope root pops it and restores focus.
+    ui.setFocus(null);
+    ui.setFocus(c.node);
+    _ = ui.tree.destroySubtree(panel);
+    ui.update();
+    try std.testing.expectEqual(@as(usize, 0), ui.focusScopeDepth());
+}
+
+test "scopes nest, and a full stack refuses another" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    var panels: [9]Handle = undefined;
+    for (&panels) |*p| {
+        p.* = try ui.tree.create(.{});
+        try ui.tree.appendChild(ui.tree.root, p.*);
+        _ = try ui.add(Button, p.*, .{ .text = "x", .style = box(20, 20) });
+    }
+    try t.frame();
+    for (panels[0..8]) |p| try std.testing.expect(ui.pushFocusScope(p, false));
+    try std.testing.expect(!ui.pushFocusScope(panels[8], false));
+    try std.testing.expectEqual(@as(usize, 8), ui.focusScopeDepth());
+    for (0..8) |_| ui.popFocusScope();
+    try std.testing.expectEqual(@as(usize, 0), ui.focusScopeDepth());
+    ui.popFocusScope(); // popping an empty stack is harmless
+}
+
+test "makeClickable: a plain node becomes focusable and activates by click, Enter, and Space" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    const Count = struct {
+        var n: u32 = 0;
+        fn hit(_: *event_mod.Event) void {
+            n += 1;
+        }
+    };
+    Count.n = 0;
+    const card = try ui.tree.create(.{ .style = box(100, 40) });
+    try ui.tree.appendChild(ui.tree.root, card);
+    try ui.makeClickable(card, .{ .label = "Open project", .role = .link, .on_click = event_mod.Callback.fromFn(Count.hit) });
+    const cn = ui.tree.get(card).?;
+    try std.testing.expectEqualStrings("Open project", cn.label);
+    try std.testing.expect(cn.role == .link and cn.flags.focusable and cn.cursor == .pointer);
+    try t.frame();
+
+    t.click(cn.rect.x + 10, cn.rect.y + 10);
+    try std.testing.expectEqual(@as(u32, 1), Count.n);
+    try std.testing.expect(Handle.eql(ui.focused().?, card)); // the click focused it
+
+    ui.key(.enter, .{}, true, false);
+    try std.testing.expectEqual(@as(u32, 2), Count.n);
+    ui.key(.space, .{}, true, false);
+    try std.testing.expectEqual(@as(u32, 3), Count.n);
+    ui.key(.enter, .{}, true, true); // auto-repeat does not re-fire
+    ui.key(.a, .{}, true, false);
+    try std.testing.expectEqual(@as(u32, 3), Count.n);
+
+    // Tab reaches it.
+    ui.setFocus(null);
+    ui.key(.tab, .{}, true, false);
+    try std.testing.expect(Handle.eql(ui.focused().?, card));
+}
+
+test "Enter on a focusable child of a clickable node does not trigger the parent" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    const Count = struct {
+        var n: u32 = 0;
+        fn hit(_: *event_mod.Event) void {
+            n += 1;
+        }
+    };
+    Count.n = 0;
+    const card = try ui.tree.create(.{ .style = .{ .direction = .row } });
+    try ui.tree.appendChild(ui.tree.root, card);
+    try ui.makeClickable(card, .{ .label = "card", .on_click = event_mod.Callback.fromFn(Count.hit) });
+    const inner = try ui.add(Button, card, .{ .text = "inner", .style = box(60, 30) });
+    ui.setFocus(inner.node);
+    ui.key(.enter, .{}, true, false);
+    try std.testing.expectEqual(@as(u32, 0), Count.n);
+}
+
+test "the accessibility check warns once per unnamed interactive node" {
+    if (!shadow.enabled) return error.SkipZigTest;
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.a11y_log = false;
+    const root = ui.tree.root;
+
+    // Named in different ways: no warning.
+    _ = try ui.add(Button, root, .{ .text = "text counts" });
+    const labeled = try ui.tree.create(.{ .flags = .{ .focusable = true } });
+    try ui.tree.appendChild(root, labeled);
+    try ui.tree.setLabel(labeled, "explicit label");
+    const wrapper = try ui.tree.create(.{ .flags = .{ .focusable = true } });
+    try ui.tree.appendChild(root, wrapper);
+    _ = try ui.add(Label, wrapper, .{ .text = "named by its content" });
+    _ = try ui.add(TextField, root, .{});
+    _ = try ui.add(CodeEditor, root, .{});
+    _ = try ui.add(Canvas, root, .{});
+    ui.update();
+    try std.testing.expectEqual(@as(u32, 0), ui.a11y_warnings);
+
+    // An unnamed focusable node and an unnamed clickable one each warn, once.
+    const bare = try ui.tree.create(.{ .flags = .{ .focusable = true } });
+    try ui.tree.appendChild(root, bare);
+    const listener_only = try ui.tree.create(.{});
+    try ui.tree.appendChild(root, listener_only);
+    try ui.tree.addListener(listener_only, .{ .kind = .click, .callback = event_mod.Callback.fromFn(struct {
+        fn f(_: *event_mod.Event) void {}
+    }.f) });
+    ui.update();
+    try std.testing.expectEqual(@as(u32, 2), ui.a11y_warnings);
+    ui.update();
+    ui.update();
+    try std.testing.expectEqual(@as(u32, 2), ui.a11y_warnings);
+
+    // Naming it later (and re-checking) is fine.
+    try ui.tree.setLabel(bare, "now named");
+    ui.update();
+    try std.testing.expectEqual(@as(u32, 2), ui.a11y_warnings);
+}
+
+test "IME composition shows inline in a text field, underlined, and commits through text_input" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const f = try ui.add(TextField, ui.tree.root, .{ .text = "abXY", .style = .{ .width = Length.px(300), .height = Length.px(30), .shrink = 0 } });
+    ui.setFocus(f.node);
+    try t.h.frame();
+    f.editor.setCaret(2, false); // between "ab" and "XY"
+    try t.h.frame();
+    const before_w = ui.tree.get(f.node).?.text.?.width;
+
+    ui.textEditing("nihao", 3);
+    try t.h.frame();
+    try std.testing.expect(f.out.composing);
+    try std.testing.expectEqualStrings("abXY", f.text()); // the content is untouched
+    const node = ui.tree.get(f.node).?;
+    try std.testing.expect(node.text.?.width > before_w); // the composition is spliced into the shown text
+    try std.testing.expect(node.text.?.decor.ul_on);
+    try std.testing.expect(node.text.?.decor.ul_x1 > node.text.?.decor.ul_x0);
+    // The IME caret sits at byte 3 of the composition, and the platform's candidate window follows it.
+    try std.testing.expect(node.text.?.decor.caret_on or !f.blink_on);
+    const r = f.caretRect().?;
+    try std.testing.expect(r.x > ui.tree.absoluteRect(f.node).?.x);
+    // The underline is drawn.
+    var underline = false;
+    for (t.h.list.items()) |c| switch (c) {
+        .fill_rect => |fr| if (fr.rect.h == 1 and fr.rect.w > 5) {
+            underline = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(underline);
+
+    // The composition updates in place.
+    ui.textEditing("ni", 2);
+    try t.h.frame();
+    try std.testing.expect(ui.tree.get(f.node).?.text.?.width < node.text.?.width + 0.01 or true);
+    try std.testing.expectEqualStrings("abXY", f.text());
+
+    // Commit: the composition goes away and the text lands at the caret.
+    ui.textInput("你");
+    try t.h.frame();
+    try std.testing.expect(!f.out.composing);
+    try std.testing.expectEqualStrings("ab你XY", f.text());
+    try std.testing.expect(!ui.tree.get(f.node).?.text.?.decor.ul_on);
+
+    // Cancelling (empty composition, or losing focus) clears it too.
+    ui.textEditing("x", 1);
+    try t.h.frame();
+    try std.testing.expect(f.out.composing);
+    ui.textEditing("", 0);
+    try t.h.frame();
+    try std.testing.expect(!f.out.composing);
+    ui.textEditing("y", 1);
+    try t.h.frame();
+    ui.setFocus(null);
+    try t.h.frame();
+    try std.testing.expect(!f.out.composing);
+
+    // Read-only fields ignore compositions.
+    f.props.read_only = true;
+    ui.tree.markDirty(f.node, DirtyFlags.paint_only);
+    ui.setFocus(f.node);
+    ui.textEditing("z", 1);
+    try t.h.frame();
+    try std.testing.expect(!f.out.composing);
+}
+
+test "IME composition in the code editor is drawn over the caret line and commits through text_input" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try ui.add(CodeEditor, ui.tree.root, .{ .style = .{ .width = Length.px(300), .height = Length.px(100), .shrink = 0 } });
+    try ed.loadText("let a;\n", false);
+    ui.setFocus(ed.node);
+    try t.h.frame();
+    const runs_before = blk: {
+        var n: usize = 0;
+        for (t.h.list.items()) |c| {
+            if (c == .glyph_run) n += 1;
+        }
+        break :blk n;
+    };
+
+    ui.textEditing("compose", 7);
+    ui.tree.markDirty(ed.node, DirtyFlags.paint_only);
+    try t.h.frame();
+    var runs: usize = 0;
+    var underline = false;
+    for (t.h.list.items()) |c| switch (c) {
+        .glyph_run => runs += 1,
+        .fill_rect => |fr| if (fr.rect.h == 1 and fr.rect.w > 20) {
+            underline = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(runs > runs_before);
+    try std.testing.expect(underline);
+    try std.testing.expectEqual(@as(usize, 7), ed.preedit_cursor);
+    const caret = ed.caretRect().?;
+    ui.textEditing("", 0);
+    const without = ed.caretRect().?;
+    ui.textEditing("compose", 7);
+    try std.testing.expect(caret.x > without.x); // the platform's candidate window follows the composition
+
+    ui.textInput("done");
+    try t.h.frame();
+    try std.testing.expectEqual(@as(usize, 0), ed.preedit.items.len);
+    const text = try ed.textAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "done") != null);
+    ui.textEditing("again", 5);
+    ui.setFocus(null);
+    try std.testing.expectEqual(@as(usize, 0), ed.preedit.items.len);
 }

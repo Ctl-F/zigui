@@ -81,6 +81,9 @@ pub const CodeEditor = struct {
 
     // Scratch for building one line at a time.
     display: std.ArrayListUnmanaged(u8) = .empty,
+    /// IME composition (uncommitted text), drawn over the text at the primary caret.
+    preedit: std.ArrayListUnmanaged(u8) = .empty,
+    preedit_cursor: u32 = 0,
     map: std.ArrayListUnmanaged(u32) = .empty,
     stops: std.ArrayListUnmanaged(Stop) = .empty,
     glyphs: std.ArrayListUnmanaged(Glyph) = .empty,
@@ -95,6 +98,7 @@ pub const CodeEditor = struct {
         self.spans.deinit(self.ui.gpa);
         self.editor.deinit();
         self.display.deinit(self.ui.gpa);
+        self.preedit.deinit(self.ui.gpa);
         self.map.deinit(self.ui.gpa);
         self.stops.deinit(self.ui.gpa);
         self.glyphs.deinit(self.ui.gpa);
@@ -138,6 +142,8 @@ pub const CodeEditor = struct {
         /// Initial text, borrowed: it must outlive the editor (use `loadText`
         /// with `owned = true` to hand over an allocation instead).
         text: []const u8 = "",
+        /// Accessible name (for screen readers).
+        label: []const u8 = "Code editor",
         language: ?*const syntax.Language = null,
         font: Font = .mono,
         size: f32 = 0,
@@ -153,7 +159,7 @@ pub const CodeEditor = struct {
 
     pub const listened_kinds = [_]event.EventKind{
         .focus_in, .focus_out, .pointer_enter, .pointer_leave,
-        .pointer_down, .pointer_move, .pointer_up, .wheel, .key_down, .text_input,
+        .pointer_down, .pointer_move, .pointer_up, .wheel, .key_down, .text_input, .text_editing,
     };
 
     pub fn nodeTemplate(style: Style) Node {
@@ -166,6 +172,7 @@ pub const CodeEditor = struct {
     }
 
     pub fn apply(self: *CodeEditor, o: Options) !void {
+        try self.ui.tree.setLabel(self.node, o.label);
         self.props = .{
             .font = o.font,
             .size = o.size,
@@ -362,6 +369,26 @@ pub const CodeEditor = struct {
 
     // ---- frame sync -------------------------------------------------------------------
 
+    /// Show `composition` as an uncommitted IME string over the text at the
+    /// primary caret (empty clears it).
+    fn setPreedit(self: *CodeEditor, composition: []const u8, ime_caret: u32) void {
+        self.preedit.clearRetainingCapacity();
+        self.preedit_cursor = 0;
+        if (composition.len > 0) {
+            if (self.preedit.appendSlice(self.ui.gpa, composition)) {
+                self.preedit_cursor = @min(ime_caret, @as(u32, @intCast(composition.len)));
+            } else |_| {}
+        }
+        self.touch(true);
+    }
+
+    /// Width of `bytes` shaped in the editor's font.
+    fn shapedWidth(self: *CodeEditor, m: Metrics, bytes: []const u8) f32 {
+        self.glyphs.clearRetainingCapacity();
+        const r = self.ui.text.shape(m.font, m.size, bytes, &self.glyphs, self.ui.gpa) catch return 0;
+        return r.width;
+    }
+
     fn touch(self: *CodeEditor, visible: bool) void {
         self.blink_on = true;
         self.blink_at = self.ui.now_ms;
@@ -527,12 +554,26 @@ pub const CodeEditor = struct {
                 const baseline = row_y + (m.line_h - (m.ascent + m.descent)) / 2 + m.ascent;
                 try self.emitLine(list, m, origin_x, baseline, row_y, line);
 
-                if (show_caret) {
+                const composing = self.preedit.items.len > 0 and line == head_line and focused;
+                if (show_caret and !composing) {
                     for (ed.sel.items.items) |s| {
                         if (s.head < ls or s.head > le) continue;
                         const cx = self.xOfOffset(ls, s.head);
                         try list.fillRect(.{ .x = @round(origin_x + cx), .y = row_y, .w = 1, .h = m.line_h }, Paint.solid(colors.caret));
                     }
+                }
+                if (composing) {
+                    // The IME composition: drawn over the text at the caret, on an
+                    // opaque patch, underlined, with the IME's own caret inside it.
+                    const px = origin_x + self.xOfOffset(ls, ed.primaryHead());
+                    const inner = self.shapedWidth(m, self.preedit.items[0..self.preedit_cursor]);
+                    const pw = self.shapedWidth(m, self.preedit.items); // leaves the glyphs for drawing
+                    try list.fillRect(.{ .x = px, .y = row_y, .w = pw, .h = m.line_h }, Paint.solid(colors.background));
+                    if (self.glyphs.items.len > 0) {
+                        try list.glyphRunAt(.{ .x = px, .y = row_y, .w = pw, .h = m.line_h }, self.glyphs.items, .{ .x = px, .y = baseline }, colors.text, m.font, m.size, !self.ui.text.isMonospace(m.font));
+                    }
+                    try list.fillRect(.{ .x = px, .y = baseline + 2, .w = pw, .h = 1 }, Paint.solid(colors.text));
+                    if (show_caret) try list.fillRect(.{ .x = @round(px + inner), .y = row_y, .w = 1, .h = m.line_h }, Paint.solid(colors.caret));
                 }
             }
         }
@@ -636,8 +677,10 @@ pub const CodeEditor = struct {
             .focus_out => {
                 out.focused = false;
                 self.dragging = false;
+                if (self.preedit.items.len > 0) self.setPreedit("", 0);
                 self.touch(false);
             },
+            .text_editing => if (props.enabled and !props.read_only) self.setPreedit(ev.text, ev.preedit_cursor),
             .pointer_enter => out.hovered = true,
             .pointer_leave => out.hovered = false,
             .pointer_down => if (props.enabled and ev.button == 1) {
@@ -672,6 +715,7 @@ pub const CodeEditor = struct {
                 }
             },
             .text_input => if (props.enabled and !props.read_only) {
+                if (self.preedit.items.len > 0) self.setPreedit("", 0); // being committed
                 const changed = ed.typeText(ev.text, now) catch false;
                 self.afterEdit(ev, changed);
             },
@@ -809,7 +853,8 @@ pub const CodeEditor = struct {
         const head = self.editor.primaryHead();
         const line = self.editor.doc.lineOfOffset(head);
         self.buildLine(line, m) catch return null;
-        const x = abs.x + geo.pad.l + geo.gutter_w + self.xOfOffset(self.editor.doc.lineStart(line), head) - self.scroll_x;
+        var x = abs.x + geo.pad.l + geo.gutter_w + self.xOfOffset(self.editor.doc.lineStart(line), head) - self.scroll_x;
+        if (self.preedit.items.len > 0) x += self.shapedWidth(m, self.preedit.items[0..self.preedit_cursor]);
         const y = abs.y + geo.pad.t + @as(f32, @floatFromInt(line)) * m.line_h - self.scroll_y;
         return .{ .x = x, .y = y, .w = 1, .h = m.line_h };
     }

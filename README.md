@@ -16,7 +16,7 @@ atlas, fields), commands and scoped shortcuts, a piece-table editor core with
 undo/redo and multi-cursor, a code editor widget with incremental syntax
 highlighting, a software renderer, an SDL3 platform shim, a runtime widget
 schema and registry, generated forms and wizards, ZON UI documents, and a visual
-builder. About 445 tests.
+builder. About 455 tests.
 
 Not built yet (largest first): a renderer backend interface and GPU path, canvas
 and frame scheduling, damage tracking, list/tree widgets and a model interface,
@@ -235,6 +235,22 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   editors and canvases) are recorded in `Ui.paint_cache` and replayed (translated
   if the node moved) until something inside them is dirty; a pure move does not
   dirty the moved node (`Tree.markMoved`). The stats overlay counts replays.
+- Accessibility and focus: node labels are owned (`Tree.setLabel` copies);
+  `Ui.makeClickable(node, .{ .label, .role, .on_click })` makes any node focusable
+  and activatable by click, Enter, or Space; a debug-build check warns once about
+  each interactive or focusable node with no name (a label, or text on it or
+  inside it; `a11y_warnings` counts them, `a11y_log` silences the log); text
+  fields, code editors, and canvases get default labels. Tab order honors
+  `Node.tab_index` (positive first, ascending; then zero in tree order; negative
+  skipped). Focus scopes (`Ui.pushFocusScope(root, modal)` / `popFocusScope`,
+  up to 8 deep) trap Tab and programmatic focus inside a subtree, a modal scope
+  also ignores pointer input outside it, focus returns to where it was on pop (or
+  when the scope root is destroyed), and a scope remembers its last focused node.
+  IME: `Ui.textEditing(text, caret)` delivers a composition (`text_editing`
+  event; the SDL shim converts SDL's character caret to bytes); text fields splice
+  it in at the caret, underlined, and the code editor draws it over the caret
+  line; the committed text arrives through `textInput`, and losing focus cancels
+  it. Candidate-window placement uses the composition-aware `caretRect`.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.
@@ -346,11 +362,9 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
 Ordered by the spec-drift notes (`NOTES/spec-drift-notes.md`); the notes are the
 authority for rationale, and a few items are recommendations, not requirements.
 
-1. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
-   focus scopes (modal traps), tab indices, IME preedit.
-2. Memory-mapped document open and an off-thread newline-index scan.
-3. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
-4. The C facade (`src/capi/`), once the core Zig library is done.
+1. Memory-mapped document open and an off-thread newline-index scan.
+2. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
+3. The C facade (`src/capi/`), once the core Zig library is done.
 
 Smaller gaps: theme metrics (padding, min sizes) and a painter measure override; layout follow-ups (width-constrained text measure, stack/absolute,
 split and scroll containers, wrap, grid, calc `Length`); draw commands for

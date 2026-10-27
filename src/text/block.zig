@@ -15,9 +15,13 @@ pub const Decor = struct {
     sel_x1: f32 = 0,
     caret_on: bool = false,
     caret_x: f32 = 0,
+    /// An underline (IME composition) from `ul_x0` to `ul_x1`.
+    ul_on: bool = false,
+    ul_x0: f32 = 0,
+    ul_x1: f32 = 0,
 
     pub fn active(self: Decor) bool {
-        return self.sel_on or self.caret_on or self.scroll_x != 0;
+        return self.sel_on or self.caret_on or self.ul_on or self.scroll_x != 0;
     }
 };
 

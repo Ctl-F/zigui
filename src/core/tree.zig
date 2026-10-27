@@ -55,7 +55,9 @@ pub const NodeFlags = packed struct(u16) {
     /// A focused node with this set gets every key first and nothing falls
     /// through to shortcuts or Tab navigation (canvases); only Escape escapes.
     raw_keys: bool = false,
-    _reserved: u8 = 0,
+    /// The accessibility check already warned about this node (or found it fine).
+    a11y_checked: bool = false,
+    _reserved: u7 = 0,
 };
 
 pub const Style = @import("style.zig").Style;
@@ -72,8 +74,16 @@ pub const Node = struct {
     flags: NodeFlags = .{},
     role: Role = .none,
     cursor: Cursor = .default,
-    /// Accessibility label. Not owned: must outlive the node or be interned.
+    /// Accessibility label. Owned by the tree when `label_owned` (set it with
+    /// `Tree.setLabel`, which copies); node templates may point at a literal.
     label: []const u8 = "",
+    label_owned: bool = false,
+    /// Tab order: positive values come first (ascending), then zero in tree
+    /// order; negative values are focusable by click or code but skipped by Tab.
+    tab_index: i16 = 0,
+    /// For a focus scope root: the node that last had focus inside it, so
+    /// re-entering the scope restores it.
+    focus_memory: Handle = Handle.invalid,
     style: Style = .{},
     visual: Visual = .{},
     /// Layout result in the parent's coordinate space (logical pixels).
@@ -151,6 +161,8 @@ pub const Tree = struct {
     /// Window area that must be redrawn (see `damage.zig`); the renderer takes it
     /// each frame. Starts as everything.
     damage: DamageRegion = .{ .all = true },
+    /// Nodes or listeners were added since the accessibility check last ran.
+    a11y_dirty: bool = false,
     /// Top of the stack of relayout boundaries that need a layout pass. It is
     /// intrusive (links live in `Node`), so marking dirty never allocates or fails.
     layout_queue_head: Handle = Handle.invalid,
@@ -172,6 +184,7 @@ pub const Tree = struct {
         while (it.next()) |entry| {
             self.freeListeners(entry.ptr);
             self.freeText(entry.ptr);
+            self.freeLabel(entry.ptr);
         }
         self.deferred.deinit(self.allocator);
         self.pool.deinit();
@@ -346,6 +359,7 @@ pub const Tree = struct {
             if (node.layout_queued) self.unqueueBoundary(cur);
             self.freeListeners(node);
             self.freeText(node);
+            self.freeLabel(node);
             _ = self.pool.destroy(cur);
             destroyed += 1;
             if (is_top) break;
@@ -377,38 +391,74 @@ pub const Tree = struct {
         return null;
     }
 
-    /// Next focusable node after `from` in tree order (previous if `!forward`),
-    /// wrapping around; `from` itself is returned if it is the only candidate.
-    /// With an invalid `from`, the first (or last) focusable. Null if nothing
-    /// is focusable.
+    /// Next node Tab reaches after `from` (previous if `!forward`), wrapping
+    /// around; `from` itself is returned if it is the only candidate. Order: nodes
+    /// with a positive `tab_index` ascending (ties in tree order), then the rest
+    /// in tree order; negative indices are skipped. With an invalid `from`, the
+    /// first (or last). Null if nothing can take Tab focus.
     pub fn nextFocusable(self: *Tree, from: Handle, forward: bool) ?Handle {
-        const have_from = self.isValid(from);
-        if (forward) {
-            var cur: ?Handle = if (have_from) self.nextPreorder(self.root, from) else self.root;
-            while (cur) |c| : (cur = self.nextPreorder(self.root, c)) {
-                if (self.isFocusable(c)) return c;
-            }
-            if (!have_from) return null;
-            // Wrap: from the start up to and including `from`.
-            cur = self.root;
-            while (cur) |c| : (cur = self.nextPreorder(self.root, c)) {
-                if (self.isFocusable(c)) return c;
-                if (Handle.eql(c, from)) break;
-            }
-            return null;
+        return self.nextFocusableIn(self.root, from, forward);
+    }
+
+    const TabKey = struct {
+        group: u8,
+        index: i32,
+        order: u32,
+
+        fn less(a: TabKey, b: TabKey) bool {
+            if (a.group != b.group) return a.group < b.group;
+            if (a.index != b.index) return a.index < b.index;
+            return a.order < b.order;
         }
-        // Backward: the last focusable before `from`, else the last overall.
-        var before: ?Handle = null;
-        var overall: ?Handle = null;
-        var seen_from = !have_from;
-        var cur: ?Handle = self.root;
-        while (cur) |c| : (cur = self.nextPreorder(self.root, c)) {
-            if (have_from and Handle.eql(c, from)) seen_from = true;
-            if (!self.isFocusable(c)) continue;
-            overall = c;
-            if (!seen_from) before = c;
+    };
+
+    fn tabKey(n: *const Node, order: u32) TabKey {
+        return if (n.tab_index > 0)
+            .{ .group = 0, .index = n.tab_index, .order = order }
+        else
+            .{ .group = 1, .index = 0, .order = order };
+    }
+
+    /// Like `nextFocusable`, but only among `scope_root` and its descendants.
+    pub fn nextFocusableIn(self: *Tree, scope_root: Handle, from: Handle, forward: bool) ?Handle {
+        // Where `from` sits in tab order (even if it is not itself tabbable).
+        var from_key: ?TabKey = null;
+        if (self.isValid(from)) {
+            var order: u32 = 0;
+            var cur: ?Handle = scope_root;
+            while (cur) |c| : (cur = self.nextPreorder(scope_root, c)) {
+                if (Handle.eql(c, from)) {
+                    from_key = tabKey(self.get(c).?, order);
+                    break;
+                }
+                order += 1;
+            }
         }
-        return before orelse overall;
+
+        var first: ?struct { h: Handle, k: TabKey } = null;
+        var last: ?struct { h: Handle, k: TabKey } = null;
+        var after: ?struct { h: Handle, k: TabKey } = null; // smallest key above `from`
+        var before: ?struct { h: Handle, k: TabKey } = null; // largest key below `from`
+        var order: u32 = 0;
+        var cur: ?Handle = scope_root;
+        while (cur) |c| : ({
+            cur = self.nextPreorder(scope_root, c);
+            order += 1;
+        }) {
+            const n = self.get(c).?;
+            if (n.tab_index < 0 or !self.isFocusable(c)) continue;
+            const k = tabKey(n, order);
+            if (first == null or k.less(first.?.k)) first = .{ .h = c, .k = k };
+            if (last == null or last.?.k.less(k)) last = .{ .h = c, .k = k };
+            if (from_key) |fk| {
+                if (fk.less(k) and (after == null or k.less(after.?.k))) after = .{ .h = c, .k = k };
+                if (k.less(fk) and (before == null or before.?.k.less(k))) before = .{ .h = c, .k = k };
+            }
+        }
+        if (first == null) return null;
+        if (from_key == null) return if (forward) first.?.h else last.?.h;
+        if (forward) return if (after) |a| a.h else first.?.h;
+        return if (before) |b| b.h else last.?.h;
     }
 
     pub fn beginDispatch(self: *Tree) void {
@@ -420,6 +470,23 @@ pub const Tree = struct {
         self.dispatch_depth -= 1;
         if (self.dispatch_depth > 0) return;
         while (self.deferred.pop()) |h| _ = self.destroySubtree(h);
+    }
+
+    fn freeLabel(self: *Tree, node: *Node) void {
+        if (node.label_owned) self.allocator.free(node.label);
+        node.label = "";
+        node.label_owned = false;
+    }
+
+    /// Give the node an accessibility label (copied).
+    pub fn setLabel(self: *Tree, h: Handle, text: []const u8) TreeError!void {
+        const node = self.get(h) orelse return error.InvalidHandle;
+        const copy: []const u8 = if (text.len == 0) "" else try self.allocator.dupe(u8, text);
+        self.freeLabel(node);
+        node.label = copy;
+        node.label_owned = text.len > 0;
+        node.flags.a11y_checked = false;
+        self.a11y_dirty = true;
     }
 
     fn freeText(self: *Tree, node: *Node) void {
@@ -469,6 +536,8 @@ pub const Tree = struct {
         }
         try node.listeners.?.append(self.allocator, listener);
         if (listener.kind.isPointer()) node.flags.interactive = true;
+        node.flags.a11y_checked = false;
+        self.a11y_dirty = true;
     }
 
     /// Remove every listener matching `kind` and `callback` (function and context).
@@ -919,4 +988,73 @@ test "destroying a queued boundary unlinks it from the queue" {
     try std.testing.expect(Handle.eql(tree.popLayoutRoot().?, tree.root));
     try std.testing.expect(Handle.eql(tree.popLayoutRoot().?, b1));
     try std.testing.expect(tree.popLayoutRoot() == null);
+}
+
+fn focusableChild(tree: *Tree, parent: Handle, tab: i16) !Handle {
+    const h = try tree.create(.{ .flags = .{ .focusable = true }, .tab_index = tab });
+    try tree.appendChild(parent, h);
+    return h;
+}
+
+test "Tab order: positive indices first and ascending, then tree order; negative is skipped" {
+    var tree = try Tree.init(std.testing.allocator);
+    defer tree.deinit();
+    const a = try focusableChild(&tree, tree.root, 0);
+    const b = try focusableChild(&tree, tree.root, 2);
+    const c = try focusableChild(&tree, tree.root, 0);
+    const d = try focusableChild(&tree, tree.root, 1);
+    const skipped = try focusableChild(&tree, tree.root, -1);
+    const e = try focusableChild(&tree, tree.root, 2); // ties keep tree order
+
+    // d(1), b(2), e(2), a(0), c(0), then wraps to d.
+    var cur = tree.nextFocusable(Handle.invalid, true).?;
+    const expect_order = [_]Handle{ d, b, e, a, c, d };
+    try std.testing.expect(Handle.eql(cur, expect_order[0]));
+    for (expect_order[1..]) |want| {
+        cur = tree.nextFocusable(cur, true).?;
+        try std.testing.expect(Handle.eql(cur, want));
+    }
+    // Backward from the first goes to the last.
+    try std.testing.expect(Handle.eql(tree.nextFocusable(d, false).?, c));
+    try std.testing.expect(Handle.eql(tree.nextFocusable(Handle.invalid, false).?, c));
+    // A mouse-focused node with a negative index continues from its place in tree order.
+    try std.testing.expect(Handle.eql(tree.nextFocusable(skipped, true).?, e) or Handle.eql(tree.nextFocusable(skipped, true).?, d));
+}
+
+test "nextFocusableIn stays inside the scope and wraps there" {
+    var tree = try Tree.init(std.testing.allocator);
+    defer tree.deinit();
+    const outside = try focusableChild(&tree, tree.root, 0);
+    const scope = try tree.create(.{});
+    try tree.appendChild(tree.root, scope);
+    const x = try focusableChild(&tree, scope, 0);
+    const y = try focusableChild(&tree, scope, 0);
+    _ = outside;
+    try std.testing.expect(Handle.eql(tree.nextFocusableIn(scope, Handle.invalid, true).?, x));
+    try std.testing.expect(Handle.eql(tree.nextFocusableIn(scope, x, true).?, y));
+    try std.testing.expect(Handle.eql(tree.nextFocusableIn(scope, y, true).?, x));
+    try std.testing.expect(Handle.eql(tree.nextFocusableIn(scope, x, false).?, y));
+    const empty = try tree.create(.{});
+    try tree.appendChild(tree.root, empty);
+    try std.testing.expect(tree.nextFocusableIn(empty, Handle.invalid, true) == null);
+}
+
+test "labels are copied, replaced, and freed with the node" {
+    var tree = try Tree.init(std.testing.allocator);
+    defer tree.deinit();
+    const h = try tree.create(.{});
+    try tree.appendChild(tree.root, h);
+    var buf = [_]u8{ 'O', 'K' };
+    try tree.setLabel(h, &buf);
+    buf[0] = 'X'; // the caller's copy can change
+    try std.testing.expectEqualStrings("OK", tree.get(h).?.label);
+    try tree.setLabel(h, "Open file");
+    try std.testing.expectEqualStrings("Open file", tree.get(h).?.label);
+    try tree.setLabel(h, "");
+    try std.testing.expectEqualStrings("", tree.get(h).?.label);
+    try tree.setLabel(h, "again");
+    _ = tree.destroySubtree(h); // freed here (leak-checked)
+    const k = try tree.create(.{});
+    try tree.appendChild(tree.root, k);
+    try tree.setLabel(k, "freed by deinit");
 }

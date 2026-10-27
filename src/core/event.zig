@@ -25,6 +25,10 @@ pub const EventKind = enum {
     /// Committed text (typing, paste, IME). Separate from key events. `text`
     /// holds UTF-8 valid only during dispatch.
     text_input,
+    /// IME composition in progress: `text` is the uncommitted string (empty when
+    /// composition ends or is cancelled) and `preedit_cursor` the byte offset of
+    /// the IME's caret inside it. The final text arrives as `text_input`.
+    text_editing,
     /// A named command is being run (from a shortcut, a button, a menu, or code).
     /// `text` holds the command name. Delivered straight to the command's
     /// handler, not through the tree.
@@ -77,6 +81,8 @@ pub const Event = struct {
     /// UTF-8 for `text_input` events (and the name for `command` events); only
     /// valid while the event is being dispatched.
     text: []const u8 = "",
+    /// For `text_editing`: byte offset of the IME caret within `text`.
+    preedit_cursor: u32 = 0,
     repeat: bool = false,
     handled: bool = false,
     stopped: bool = false,

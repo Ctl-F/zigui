@@ -59,6 +59,11 @@ pub const TextField = struct {
     blink_on: bool = true,
     blink_at: u64 = 0,
     dragging: bool = false,
+    /// IME composition (uncommitted text) shown inline at the caret, and where the
+    /// IME's own caret sits inside it. `display` is the content with it spliced in.
+    preedit: std.ArrayListUnmanaged(u8) = .empty,
+    preedit_cursor: u32 = 0,
+    display: std.ArrayListUnmanaged(u8) = .empty,
 
     pub const Props = struct {
         /// Shown, dimmed, while the field is empty.
@@ -95,6 +100,8 @@ pub const TextField = struct {
         change_count: u32 = 0,
         submit_count: u32 = 0,
         /// Caret and selection as byte offsets into the text.
+        /// An IME composition is in progress.
+        composing: bool = false,
         caret: u32 = 0,
         sel_start: u32 = 0,
         sel_end: u32 = 0,
@@ -105,6 +112,8 @@ pub const TextField = struct {
         /// Initial content (not counted as an edit).
         text: []const u8 = "",
         placeholder: []const u8 = "",
+        /// Accessible name (for screen readers); defaults to the placeholder.
+        label: []const u8 = "",
         enabled: bool = true,
         read_only: bool = false,
         font: Font = .ui,
@@ -117,7 +126,7 @@ pub const TextField = struct {
 
     pub const listened_kinds = [_]event.EventKind{
         .focus_in, .focus_out, .pointer_enter, .pointer_leave,
-        .pointer_down, .pointer_move, .pointer_up, .key_down, .text_input,
+        .pointer_down, .pointer_move, .pointer_up, .key_down, .text_input, .text_editing,
     };
 
     pub fn nodeTemplate(style: Style) Node {
@@ -140,6 +149,8 @@ pub const TextField = struct {
         self.props.painter = o.painter;
         if (o.text.len > 0) try self.setText(o.text);
         if (o.placeholder.len > 0) try self.setPlaceholder(o.placeholder);
+        const name = if (o.label.len > 0) o.label else if (o.placeholder.len > 0) o.placeholder else "Text field";
+        try self.ui.tree.setLabel(self.node, name);
         self.checker.sync(&self.props);
     }
 
@@ -156,7 +167,23 @@ pub const TextField = struct {
     pub fn deinit(self: *TextField) void {
         self.ui.freeText(&self.props.placeholder);
         self.stops.deinit(self.ui.gpa);
+        self.preedit.deinit(self.ui.gpa);
+        self.display.deinit(self.ui.gpa);
         self.editor.deinit();
+    }
+
+    /// Show `text` as an uncommitted IME composition at the caret (empty clears it).
+    fn setPreedit(self: *TextField, composition: []const u8, ime_caret: u32) void {
+        self.preedit.clearRetainingCapacity();
+        self.preedit_cursor = 0;
+        if (composition.len > 0) {
+            if (self.preedit.appendSlice(self.ui.gpa, composition)) {
+                self.preedit_cursor = @min(ime_caret, @as(u32, @intCast(composition.len)));
+            } else |_| {}
+        }
+        self.text_dirty = true;
+        self.touchCaret();
+        self.ui.tree.markDirty(self.node, DirtyFlags.layout_and_paint);
     }
 
     // ---- API --------------------------------------------------------------
@@ -238,8 +265,10 @@ pub const TextField = struct {
             .focus_out => {
                 out.focused = false;
                 self.dragging = false;
+                if (self.preedit.items.len > 0) self.setPreedit("", 0);
                 self.touchCaret();
             },
+            .text_editing => if (props.enabled and !props.read_only) self.setPreedit(ev.text, ev.preedit_cursor),
             .pointer_enter => out.hovered = true,
             .pointer_leave => out.hovered = false,
             .pointer_down => if (props.enabled and ev.button == 1) {
@@ -265,6 +294,7 @@ pub const TextField = struct {
             },
             .pointer_up => self.dragging = false,
             .text_input => if (props.enabled and !props.read_only) {
+                if (self.preedit.items.len > 0) self.setPreedit("", 0); // the composition is being committed
                 const changed = ed.insert(ev.text) catch false;
                 if (changed) self.afterEdit(ev);
             },
@@ -365,7 +395,25 @@ pub const TextField = struct {
         const size = if (self.props.size > 0) self.props.size else ui.theme.font_size;
         if (f >= ui.text.fonts.items.len) return;
 
-        const content = self.editor.text();
+        const plain = self.editor.text();
+        // While composing, shape the content with the composition spliced in at the caret.
+        var content = plain;
+        var composing = false;
+        if (self.preedit.items.len > 0 and !self.props.read_only) {
+            self.display.clearRetainingCapacity();
+            const at = @min(self.editor.caret, plain.len);
+            const ok = blk: {
+                self.display.appendSlice(ui.gpa, plain[0..at]) catch break :blk false;
+                self.display.appendSlice(ui.gpa, self.preedit.items) catch break :blk false;
+                self.display.appendSlice(ui.gpa, plain[at..]) catch break :blk false;
+                break :blk true;
+            };
+            if (ok) {
+                content = self.display.items;
+                composing = true;
+            }
+        }
+        self.out.composing = composing;
         if (self.text_dirty or self.stops_font != f or self.stops_size != size) {
             self.stops.clearRetainingCapacity();
             _ = ui.text.boundaries(f, size, content, &self.stops, ui.gpa) catch {};
@@ -389,7 +437,8 @@ pub const TextField = struct {
         const text_node = node.text orelse return;
         const pad = layout_mod.resolveEdges(node.style.padding, null);
         const view_w = @max(node.rect.w - pad.l - pad.r, 0);
-        const caret_x = stopX(self.stops.items, self.editor.caret);
+        const caret_at = self.editor.caret + if (composing) self.preedit_cursor else 0;
+        const caret_x = stopX(self.stops.items, caret_at);
         const total = if (self.stops.items.len > 0) self.stops.items[self.stops.items.len - 1].x else 0;
         if (view_w > 0) {
             if (caret_x - self.scroll_x > view_w - 1) self.scroll_x = caret_x - view_w + 1;
@@ -397,7 +446,15 @@ pub const TextField = struct {
             self.scroll_x = std.math.clamp(self.scroll_x, 0, @max(total - view_w + 1, 0));
         }
         var decor: text_block.Decor = .{ .scroll_x = self.scroll_x };
-        if (is_focused) {
+        if (composing) {
+            decor.ul_on = true;
+            decor.ul_x0 = stopX(self.stops.items, self.editor.caret);
+            decor.ul_x1 = stopX(self.stops.items, self.editor.caret + self.preedit.items.len);
+            if (is_focused and self.blink_on) {
+                decor.caret_on = true;
+                decor.caret_x = caret_x;
+            }
+        } else if (is_focused) {
             if (self.editor.hasSelection()) {
                 decor.sel_on = true;
                 decor.sel_x0 = stopX(self.stops.items, sel.start);
@@ -442,7 +499,8 @@ pub const TextField = struct {
         const abs = self.ui.tree.absoluteRect(self.node) orelse return null;
         const node = self.ui.tree.get(self.node).?;
         const pad = layout_mod.resolveEdges(node.style.padding, null);
-        const x = abs.x + pad.l + stopX(self.stops.items, self.editor.caret) - self.scroll_x;
+        const at = self.editor.caret + if (self.out.composing) self.preedit_cursor else 0;
+        const x = abs.x + pad.l + stopX(self.stops.items, at) - self.scroll_x;
         return .{ .x = x, .y = abs.y, .w = 1, .h = abs.h };
     }
 };

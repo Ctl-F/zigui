@@ -41,6 +41,9 @@ pub const Event = struct {
         /// Committed text. Copied out of SDL's buffer, truncated to 63 bytes
         /// at a code point boundary.
         text_input: struct { bytes: [64]u8, len: u8 },
+        /// IME composition (uncommitted text), same truncation as `text_input`.
+        /// `cursor` is the IME caret as a byte offset into the text.
+        text_editing: struct { bytes: [64]u8, len: u8, cursor: u8 },
     };
 };
 
@@ -228,6 +231,24 @@ fn translate(ev: *const c.SDL_Event) ?Event {
             var out: Event.Data = .{ .text_input = .{ .bytes = undefined, .len = @intCast(n) } };
             @memcpy(out.text_input.bytes[0..n], src[0..n]);
             return .{ .window = ev.text.windowID, .data = out };
+        },
+        c.SDL_EVENT_TEXT_EDITING => {
+            const src = std.mem.span(ev.edit.text);
+            var n = @min(src.len, 63);
+            while (n > 0 and n < src.len and (src[n] & 0xC0) == 0x80) n -= 1;
+            // SDL reports the caret in characters; convert to a byte offset.
+            var cursor_bytes: usize = n;
+            if (ev.edit.start >= 0) {
+                var chars: i32 = 0;
+                var i: usize = 0;
+                while (i < n and chars < ev.edit.start) : (chars += 1) {
+                    i += std.unicode.utf8ByteSequenceLength(src[i]) catch 1;
+                }
+                cursor_bytes = @min(i, n);
+            }
+            var out: Event.Data = .{ .text_editing = .{ .bytes = undefined, .len = @intCast(n), .cursor = @intCast(cursor_bytes) } };
+            @memcpy(out.text_editing.bytes[0..n], src[0..n]);
+            return .{ .window = ev.edit.windowID, .data = out };
         },
         else => return null,
     }
