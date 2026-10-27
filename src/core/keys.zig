@@ -59,29 +59,65 @@ pub const Key = enum(u32) {
     }
 };
 
-/// Modifier bits for `Event.mods`.
-pub const mod_shift: u32 = 1 << 0;
-pub const mod_ctrl: u32 = 1 << 1;
-pub const mod_alt: u32 = 1 << 2;
-/// Windows/Command/Super key.
-pub const mod_gui: u32 = 1 << 3;
-pub const mod_all: u32 = mod_shift | mod_ctrl | mod_alt | mod_gui;
+/// Modifier keys held during an event.
+pub const Mods = packed struct(u4) {
+    shift: bool = false,
+    ctrl: bool = false,
+    alt: bool = false,
+    /// Windows/Command/Super key.
+    gui: bool = false,
 
-/// The "primary shortcut" modifier: Cmd on macOS, Ctrl elsewhere.
-pub const mod_primary: u32 = if (builtin.os.tag == .macos) mod_gui else mod_ctrl;
+    pub const none: Mods = .{};
+
+    /// The "primary shortcut" modifier: Cmd on macOS, Ctrl elsewhere.
+    pub const primary: Mods = if (builtin.os.tag == .macos) .{ .gui = true } else .{ .ctrl = true };
+
+    pub fn bits(self: Mods) u4 {
+        return @bitCast(self);
+    }
+
+    pub fn eql(a: Mods, b: Mods) bool {
+        return a.bits() == b.bits();
+    }
+
+    pub fn isEmpty(self: Mods) bool {
+        return self.bits() == 0;
+    }
+
+    /// True if any modifier set in `other` is also set here.
+    pub fn any(self: Mods, other: Mods) bool {
+        return self.bits() & other.bits() != 0;
+    }
+
+    pub fn merge(a: Mods, b: Mods) Mods {
+        return @bitCast(a.bits() | b.bits());
+    }
+
+    /// Command-style shortcuts: Ctrl, or Cmd on macOS.
+    pub fn command(self: Mods) bool {
+        return self.ctrl or self.gui;
+    }
+
+    /// Modifiers other than Shift (what distinguishes a shortcut from typing).
+    pub fn withoutShift(self: Mods) Mods {
+        var m = self;
+        m.shift = false;
+        return m;
+    }
+};
 
 pub const Chord = struct {
     key: Key,
-    mods: u32 = 0,
+    mods: Mods = .{},
 
     pub fn eql(a: Chord, b: Chord) bool {
-        return a.key == b.key and a.mods == b.mods;
+        return a.key == b.key and a.mods.eql(b.mods);
     }
 
     /// True for a chord that is just typing: a printable key with no modifier
     /// other than Shift.
     pub fn isTyping(self: Chord) bool {
-        return self.key.isPrintable() and self.mods & ~mod_shift == 0;
+        return self.key.isPrintable() and self.mods.withoutShift().isEmpty();
     }
 };
 
@@ -147,22 +183,22 @@ fn lookupName(name: []const u8) ?Key {
 /// Parse "ctrl+shift+p". Null if a token is unknown or the key is missing.
 pub fn parseChord(text: []const u8) ?Chord {
     if (text.len == 0) return null;
-    var mods: u32 = 0;
+    var mods: Mods = .{};
     var key: ?Key = null;
     // A trailing "+" is the plus key written as "ctrl++"; treat "+" alone as unsupported.
     var it = std.mem.splitScalar(u8, text, '+');
     while (it.next()) |tok| {
         if (key != null) return null; // nothing may follow the key
         if (std.ascii.eqlIgnoreCase(tok, "ctrl") or std.ascii.eqlIgnoreCase(tok, "control")) {
-            mods |= mod_ctrl;
+            mods.ctrl = true;
         } else if (std.ascii.eqlIgnoreCase(tok, "shift")) {
-            mods |= mod_shift;
+            mods.shift = true;
         } else if (std.ascii.eqlIgnoreCase(tok, "alt") or std.ascii.eqlIgnoreCase(tok, "option")) {
-            mods |= mod_alt;
+            mods.alt = true;
         } else if (std.ascii.eqlIgnoreCase(tok, "gui") or std.ascii.eqlIgnoreCase(tok, "cmd") or std.ascii.eqlIgnoreCase(tok, "super")) {
-            mods |= mod_gui;
+            mods.gui = true;
         } else if (std.ascii.eqlIgnoreCase(tok, "mod")) {
-            mods |= mod_primary;
+            mods = mods.merge(Mods.primary);
         } else {
             key = parseKey(tok) orelse return null;
         }
@@ -220,10 +256,10 @@ pub fn formatChord(c: Chord, buf: []u8) []const u8 {
             at.* += n;
         }
     }.f;
-    if (c.mods & mod_ctrl != 0) put(buf, &w, "Ctrl+");
-    if (c.mods & mod_alt != 0) put(buf, &w, "Alt+");
-    if (c.mods & mod_shift != 0) put(buf, &w, "Shift+");
-    if (c.mods & mod_gui != 0) put(buf, &w, if (builtin.os.tag == .macos) "Cmd+" else "Super+");
+    if (c.mods.ctrl) put(buf, &w, "Ctrl+");
+    if (c.mods.alt) put(buf, &w, "Alt+");
+    if (c.mods.shift) put(buf, &w, "Shift+");
+    if (c.mods.gui) put(buf, &w, if (builtin.os.tag == .macos) "Cmd+" else "Super+");
 
     const v = @intFromEnum(c.key);
     var one: [2]u8 = undefined;
@@ -275,11 +311,11 @@ test "parse keys: letters, digits, function keys, names, punctuation" {
 test "parse chords with modifiers in any order and case" {
     const c = parseChord("Ctrl+Shift+P").?;
     try testing.expectEqual(Key.p, c.key);
-    try testing.expectEqual(mod_ctrl | mod_shift, c.mods);
+    try testing.expect(c.mods.eql(.{ .ctrl = true, .shift = true }));
     try testing.expect(Chord.eql(parseChord("shift+ctrl+p").?, c));
-    try testing.expect(Chord.eql(parseChord("alt+left").?, .{ .key = .left, .mods = mod_alt }));
-    try testing.expect(Chord.eql(parseChord("cmd+s").?, .{ .key = .s, .mods = mod_gui }));
-    try testing.expect(Chord.eql(parseChord("mod+s").?, .{ .key = .s, .mods = mod_primary }));
+    try testing.expect(Chord.eql(parseChord("alt+left").?, .{ .key = .left, .mods = .{ .alt = true } }));
+    try testing.expect(Chord.eql(parseChord("cmd+s").?, .{ .key = .s, .mods = .{ .gui = true } }));
+    try testing.expect(Chord.eql(parseChord("mod+s").?, .{ .key = .s, .mods = Mods.primary }));
     try testing.expect(Chord.eql(parseChord("f5").?, .{ .key = .f5 }));
     try testing.expect(parseChord("ctrl+") == null); // no key
     try testing.expect(parseChord("ctrl") == null);
@@ -291,8 +327,8 @@ test "parse chords with modifiers in any order and case" {
 test "parse sequences" {
     var seq: [max_sequence]Chord = undefined;
     try testing.expectEqual(@as(usize, 2), parseSequence("ctrl+k ctrl+c", &seq).?);
-    try testing.expect(Chord.eql(seq[0], .{ .key = .k, .mods = mod_ctrl }));
-    try testing.expect(Chord.eql(seq[1], .{ .key = .c, .mods = mod_ctrl }));
+    try testing.expect(Chord.eql(seq[0], .{ .key = .k, .mods = .{ .ctrl = true } }));
+    try testing.expect(Chord.eql(seq[1], .{ .key = .c, .mods = .{ .ctrl = true } }));
     try testing.expectEqual(@as(usize, 1), parseSequence("  f2  ", &seq).?);
     try testing.expect(parseSequence("", &seq) == null);
     try testing.expect(parseSequence("a b c d e", &seq) == null); // too long
@@ -301,24 +337,24 @@ test "parse sequences" {
 
 test "format chords for display" {
     var buf: [32]u8 = undefined;
-    try testing.expectEqualStrings("Ctrl+Shift+P", formatChord(.{ .key = .p, .mods = mod_ctrl | mod_shift }, &buf));
-    try testing.expectEqualStrings("Alt+Left", formatChord(.{ .key = .left, .mods = mod_alt }, &buf));
+    try testing.expectEqualStrings("Ctrl+Shift+P", formatChord(.{ .key = .p, .mods = .{ .ctrl = true, .shift = true } }, &buf));
+    try testing.expectEqualStrings("Alt+Left", formatChord(.{ .key = .left, .mods = .{ .alt = true } }, &buf));
     try testing.expectEqualStrings("F5", formatChord(.{ .key = .f5 }, &buf));
-    try testing.expectEqualStrings("Ctrl+7", formatChord(.{ .key = .d7, .mods = mod_ctrl }, &buf));
-    try testing.expectEqualStrings("Ctrl+/", formatChord(.{ .key = .slash, .mods = mod_ctrl }, &buf));
+    try testing.expectEqualStrings("Ctrl+7", formatChord(.{ .key = .d7, .mods = .{ .ctrl = true } }, &buf));
+    try testing.expectEqualStrings("Ctrl+/", formatChord(.{ .key = .slash, .mods = .{ .ctrl = true } }, &buf));
     try testing.expectEqualStrings("Enter", formatChord(.{ .key = .enter }, &buf));
     var tiny: [4]u8 = undefined;
-    try testing.expectEqualStrings("Ctrl", formatChord(.{ .key = .p, .mods = mod_ctrl }, &tiny)); // truncates safely
+    try testing.expectEqualStrings("Ctrl", formatChord(.{ .key = .p, .mods = .{ .ctrl = true } }, &tiny)); // truncates safely
 }
 
 test "format and parse agree" {
     var buf: [32]u8 = undefined;
     const chords = [_]Chord{
-        .{ .key = .a, .mods = mod_ctrl },
-        .{ .key = .d3, .mods = mod_alt | mod_shift },
+        .{ .key = .a, .mods = .{ .ctrl = true } },
+        .{ .key = .d3, .mods = .{ .alt = true, .shift = true } },
         .{ .key = .f12 },
-        .{ .key = .tab, .mods = mod_shift },
-        .{ .key = .period, .mods = mod_ctrl },
+        .{ .key = .tab, .mods = .{ .shift = true } },
+        .{ .key = .period, .mods = .{ .ctrl = true } },
         .{ .key = .page_up },
     };
     for (chords) |c| {
@@ -329,9 +365,9 @@ test "format and parse agree" {
 
 test "typing chords and printable keys" {
     try testing.expect((Chord{ .key = .a }).isTyping());
-    try testing.expect((Chord{ .key = .a, .mods = mod_shift }).isTyping());
+    try testing.expect((Chord{ .key = .a, .mods = .{ .shift = true } }).isTyping());
     try testing.expect((Chord{ .key = .space }).isTyping());
-    try testing.expect(!(Chord{ .key = .a, .mods = mod_ctrl }).isTyping());
+    try testing.expect(!(Chord{ .key = .a, .mods = .{ .ctrl = true } }).isTyping());
     try testing.expect(!(Chord{ .key = .enter }).isTyping());
     try testing.expect(!(Chord{ .key = .left }).isTyping());
     try testing.expect(Key.slash.isPrintable() and Key.d5.isPrintable());

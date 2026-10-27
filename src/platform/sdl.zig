@@ -37,7 +37,7 @@ pub const Event = struct {
         mouse_move: struct { x: f32, y: f32 },
         mouse_button: struct { x: f32, y: f32, button: MouseButton, down: bool, clicks: u32 },
         mouse_wheel: struct { x: f32, y: f32 },
-        key: struct { key: Key, mods: u32, scancode: u32, keycode: u32, down: bool, repeat: bool },
+        key: struct { key: Key, mods: zigui.keys.Mods, scancode: u32, keycode: u32, down: bool, repeat: bool },
         /// Committed text. Copied out of SDL's buffer, truncated to 63 bytes
         /// at a code point boundary.
         text_input: struct { bytes: [64]u8, len: u8 },
@@ -171,13 +171,13 @@ fn mapKey(scancode: u32) Key {
     };
 }
 
-fn mapMods(mod: u32) u32 {
-    var out: u32 = 0;
-    if (mod & sc(c.SDL_KMOD_SHIFT) != 0) out |= zigui.keys.mod_shift;
-    if (mod & sc(c.SDL_KMOD_CTRL) != 0) out |= zigui.keys.mod_ctrl;
-    if (mod & sc(c.SDL_KMOD_ALT) != 0) out |= zigui.keys.mod_alt;
-    if (mod & sc(c.SDL_KMOD_GUI) != 0) out |= zigui.keys.mod_gui;
-    return out;
+fn mapMods(mod: u32) zigui.keys.Mods {
+    return .{
+        .shift = mod & sc(c.SDL_KMOD_SHIFT) != 0,
+        .ctrl = mod & sc(c.SDL_KMOD_CTRL) != 0,
+        .alt = mod & sc(c.SDL_KMOD_ALT) != 0,
+        .gui = mod & sc(c.SDL_KMOD_GUI) != 0,
+    };
 }
 
 fn translate(ev: *const c.SDL_Event) ?Event {

@@ -34,7 +34,7 @@ pub const primary_button: u32 = 1;
 /// handled, before the default actions such as Tab navigation run.
 pub const KeyHook = struct {
     ctx: *anyopaque,
-    run: *const fn (ctx: *anyopaque, tree: *Tree, k: keys.Key, mods: u32, down: bool, repeat: bool) bool,
+    run: *const fn (ctx: *anyopaque, tree: *Tree, k: keys.Key, mods: keys.Mods, down: bool, repeat: bool) bool,
 };
 
 pub const Input = struct {
@@ -46,7 +46,7 @@ pub const Input = struct {
     /// True if the most recent input was from the keyboard.
     keyboard: bool = false,
     /// Modifier bits as of the last key event; stamped on pointer events.
-    mods: u32 = 0,
+    mods: keys.Mods = .{},
     /// Last known pointer position (window coordinates), for wheel events.
     pointer_x: f32 = 0,
     pointer_y: f32 = 0,
@@ -184,13 +184,13 @@ pub const Input = struct {
     }
 
     /// Route a key press or release. Unhandled Tab / Shift+Tab move focus.
-    pub fn key(self: *Input, tree: *Tree, k: keys.Key, mods: u32, down: bool, repeat: bool, scancode: u32, keycode: u32) void {
+    pub fn key(self: *Input, tree: *Tree, k: keys.Key, mods: keys.Mods, down: bool, repeat: bool, scancode: u32, keycode: u32) void {
         _ = self.keyEx(tree, k, mods, down, repeat, scancode, keycode, null);
     }
 
     /// Like `key`, with an optional hook that gets the key if no node handled
     /// it. Returns true if a node, the hook, or Tab navigation used the key.
-    pub fn keyEx(self: *Input, tree: *Tree, k: keys.Key, mods: u32, down: bool, repeat: bool, scancode: u32, keycode: u32, hook: ?KeyHook) bool {
+    pub fn keyEx(self: *Input, tree: *Tree, k: keys.Key, mods: keys.Mods, down: bool, repeat: bool, scancode: u32, keycode: u32, hook: ?KeyHook) bool {
         self.syncFocus(tree);
         self.mods = mods;
         if (down) self.keyboard = true;
@@ -209,8 +209,8 @@ pub const Input = struct {
         if (hook) |h| {
             if (h.run(h.ctx, tree, k, mods, down, repeat)) return true;
         }
-        if (down and k == .tab and mods & (keys.mod_ctrl | keys.mod_alt | keys.mod_gui) == 0) {
-            const forward = mods & keys.mod_shift == 0;
+        if (down and k == .tab and !mods.any(.{ .ctrl = true, .alt = true, .gui = true })) {
+            const forward = !mods.shift;
             if (tree.nextFocusable(tree.focused, forward)) |n| {
                 self.setFocus(tree, n);
                 return true;
@@ -224,7 +224,7 @@ pub const Input = struct {
         self.syncFocus(tree);
         if (!tree.isValid(tree.focused) or text.len == 0) return;
         self.keyboard = true;
-        var ev: Event = .{ .kind = .text_input, .target = tree.focused, .text = text.ptr, .text_len = text.len };
+        var ev: Event = .{ .kind = .text_input, .target = tree.focused, .text = text };
         dispatch.dispatch(tree, &ev);
     }
 
@@ -441,22 +441,22 @@ test "keys go to the focused node, and unhandled Tab moves focus" {
     }
 
     var input: Input = .{};
-    input.key(&tree, .a, 0, true, false, 0, 0); // nothing focused: goes to the root, no listeners
+    input.key(&tree, .a, .{}, true, false, 0, 0); // nothing focused: goes to the root, no listeners
     try std.testing.expectEqualStrings("", log.str());
 
-    input.key(&tree, .tab, 0, true, false, 0, 0); // none -> first
+    input.key(&tree, .tab, .{}, true, false, 0, 0); // none -> first
     try std.testing.expect(Handle.eql(tree.focused, n[0]));
-    input.key(&tree, .tab, 0, true, false, 0, 0);
-    input.key(&tree, .tab, 0, true, false, 0, 0);
+    input.key(&tree, .tab, .{}, true, false, 0, 0);
+    input.key(&tree, .tab, .{}, true, false, 0, 0);
     try std.testing.expect(Handle.eql(tree.focused, n[2]));
-    input.key(&tree, .tab, 0, true, false, 0, 0); // wraps
+    input.key(&tree, .tab, .{}, true, false, 0, 0); // wraps
     try std.testing.expect(Handle.eql(tree.focused, n[0]));
-    input.key(&tree, .tab, keys.mod_shift, true, false, 0, 0); // backwards wraps to the last
+    input.key(&tree, .tab, .{ .shift = true }, true, false, 0, 0); // backwards wraps to the last
     try std.testing.expect(Handle.eql(tree.focused, n[2]));
     try std.testing.expect(input.keyboard);
 
     log.len = 0;
-    input.key(&tree, .a, 0, true, false, 0, 0);
+    input.key(&tree, .a, .{}, true, false, 0, 0);
     try std.testing.expectEqualStrings("Ck", log.str()); // the focused node only (plus tab keys earlier)
 }
 
@@ -472,7 +472,7 @@ test "a handler that handles Tab keeps focus where it is" {
     try tree.addListener(n[0], .{ .kind = .key_down, .callback = .{ .call = Eat.h } });
     var input: Input = .{};
     input.setFocus(&tree, n[0]);
-    input.key(&tree, .tab, 0, true, false, 0, 0);
+    input.key(&tree, .tab, .{}, true, false, 0, 0);
     try std.testing.expect(Handle.eql(tree.focused, n[0]));
 }
 

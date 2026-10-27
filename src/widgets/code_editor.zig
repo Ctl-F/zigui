@@ -566,10 +566,10 @@ pub const Slot = struct {
                     ed.selectLineAt(off);
                 } else if (ev.clicks == 2) {
                     ed.selectWordAt(off) catch {};
-                } else if (ev.hasMod(keys.mod_alt)) {
+                } else if (ev.mods.alt) {
                     ed.addCaret(off);
                 } else {
-                    ed.setCaret(off, ev.hasMod(keys.mod_shift));
+                    ed.setCaret(off, ev.mods.shift);
                 }
                 self.dragging = true;
                 self.touch(true);
@@ -581,7 +581,7 @@ pub const Slot = struct {
             .pointer_up => self.dragging = false,
             .wheel => {
                 if (self.metrics()) |m| {
-                    if (ev.hasMod(keys.mod_shift)) {
+                    if (ev.mods.shift) {
                         self.scroll_x = @max(self.scroll_x - (ev.dy + ev.dx) * m.line_h * 3, 0);
                     } else {
                         self.scroll_y -= ev.dy * m.line_h * 3;
@@ -592,7 +592,7 @@ pub const Slot = struct {
                 }
             },
             .text_input => if (props.enabled and !props.read_only) {
-                const changed = ed.typeText(ev.textSlice(), now) catch false;
+                const changed = ed.typeText(ev.text, now) catch false;
                 self.afterEdit(ev, changed);
             },
             .key_down => self.key(ev),
@@ -605,10 +605,10 @@ pub const Slot = struct {
         if (!props.enabled) return;
         const ed = &self.editor;
         const now = self.env.now_ms.*;
-        const shift = ev.hasMod(keys.mod_shift);
-        const ctrl = ev.hasMod(keys.mod_ctrl);
-        const alt = ev.hasMod(keys.mod_alt);
-        const cmd = ev.hasMod(keys.mod_ctrl | keys.mod_gui);
+        const shift = ev.mods.shift;
+        const ctrl = ev.mods.ctrl;
+        const alt = ev.mods.alt;
+        const cmd = ev.mods.any(.{ .ctrl = true, .gui = true });
         const word = ctrl or alt;
         const writable = !props.read_only;
         const page: isize = if (self.metrics()) |m| blk: {

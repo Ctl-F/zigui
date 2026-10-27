@@ -327,7 +327,7 @@ pub const Ui = struct {
                 } else if (ev.clicks == 2) {
                     ed.selectWordAt(byte);
                 } else {
-                    ed.setCaret(byte, ev.hasMod(keys.mod_shift));
+                    ed.setCaret(byte, ev.mods.shift);
                 }
                 slot.dragging = true;
                 self.touchCaret(slot);
@@ -340,7 +340,7 @@ pub const Ui = struct {
             },
             .pointer_up => slot.dragging = false,
             .text_input => if (props.enabled and !props.read_only) {
-                const changed = ed.insert(ev.textSlice()) catch false;
+                const changed = ed.insert(ev.text) catch false;
                 if (changed) self.afterEdit(slot, ev);
             },
             .key_down => self.fieldKey(slot, ev),
@@ -352,9 +352,9 @@ pub const Ui = struct {
         const props = &slot.block.props;
         if (!props.enabled) return;
         const ed = &slot.editor;
-        const shift = ev.hasMod(keys.mod_shift);
-        const cmd = ev.hasMod(keys.mod_ctrl | keys.mod_gui);
-        const word = ev.hasMod(keys.mod_ctrl | keys.mod_alt);
+        const shift = ev.mods.shift;
+        const cmd = ev.mods.any(.{ .ctrl = true, .gui = true });
+        const word = ev.mods.any(.{ .ctrl = true, .alt = true });
         const writable = !props.read_only;
         var edited = false;
 
@@ -790,21 +790,21 @@ pub const Ui = struct {
         self.input.wheel(&self.tree, self.input.pointer_x, self.input.pointer_y, dx, dy);
     }
 
-    /// Route a key press/release (`mods` are `keys.mod_*` bits). Order: the
+    /// Route a key press/release (`mods` are the held modifier keys). Order: the
     /// focused node (capture, target, bubble), then shortcuts, then Tab focus
     /// movement. Returns true if anything used the key.
-    pub fn keyHandled(self: *Ui, k: keys.Key, mods: u32, down: bool, repeat: bool) bool {
+    pub fn keyHandled(self: *Ui, k: keys.Key, mods: keys.Mods, down: bool, repeat: bool) bool {
         return self.input.keyEx(&self.tree, k, mods, down, repeat, 0, 0, .{ .ctx = self, .run = shortcutHook });
     }
 
-    pub fn key(self: *Ui, k: keys.Key, mods: u32, down: bool, repeat: bool) void {
+    pub fn key(self: *Ui, k: keys.Key, mods: keys.Mods, down: bool, repeat: bool) void {
         _ = self.keyHandled(k, mods, down, repeat);
     }
 
-    fn shortcutHook(ctx: *anyopaque, tree: *Tree, k: keys.Key, mods: u32, down: bool, repeat: bool) bool {
+    fn shortcutHook(ctx: *anyopaque, tree: *Tree, k: keys.Key, mods: keys.Mods, down: bool, repeat: bool) bool {
         const self: *Ui = @ptrCast(@alignCast(ctx));
         if (!down or k == .unknown) return false;
-        const chord: keys.Chord = .{ .key = k, .mods = mods & keys.mod_all };
+        const chord: keys.Chord = .{ .key = k, .mods = mods };
         // Plain typing belongs to the focused text widget, not to shortcuts.
         if (!self.shortcuts.hasPending() and chord.isTyping()) {
             if (tree.get(tree.focused)) |n| {
@@ -1404,16 +1404,16 @@ test "Tab walks buttons, Enter and Space activate, and the ring shows after keyb
     b.props.on_click = .{ .call = Count.cb };
     try t.frame();
 
-    ui.key(.tab, 0, true, false);
-    ui.key(.tab, 0, true, false);
+    ui.key(.tab, .{}, true, false);
+    ui.key(.tab, .{}, true, false);
     try t.frame();
     try std.testing.expect(!a.out.focused);
     try std.testing.expect(b.out.focused and b.out.focus_visible);
     try std.testing.expectEqual(ui.theme.focus_ring, ui.tree.get(b.node).?.visual.border_color);
 
-    ui.key(.enter, 0, true, false);
-    ui.key(.space, 0, true, false);
-    ui.key(.space, 0, true, true); // auto-repeat does not re-activate
+    ui.key(.enter, .{}, true, false);
+    ui.key(.space, .{}, true, false);
+    ui.key(.space, .{}, true, true); // auto-repeat does not re-activate
     try std.testing.expectEqual(@as(u32, 2), b.out.click_count);
     try std.testing.expectEqual(@as(u32, 2), Count.n);
     try std.testing.expect(b.out.clicked);
@@ -1437,10 +1437,10 @@ test "disabled buttons are skipped by Tab and cannot be activated by key" {
     ui.setButtonEnabled(dis, false);
     try t.frame();
 
-    ui.key(.tab, 0, true, false);
+    ui.key(.tab, .{}, true, false);
     try t.frame();
     try std.testing.expect(a.out.focused);
-    ui.key(.tab, 0, true, false);
+    ui.key(.tab, .{}, true, false);
     try t.frame();
     try std.testing.expect(c.out.focused and !dis.out.focused);
 
@@ -1457,7 +1457,7 @@ test "removing the focused button falls back and never leaves a stale focus" {
     const ui = &t.ui;
     const a = try ui.createButton(ui.tree.root, box(80, 30));
     try t.frame();
-    ui.key(.tab, 0, true, false);
+    ui.key(.tab, .{}, true, false);
     try t.frame();
     try std.testing.expect(a.out.focused);
     _ = ui.tree.destroySubtree(a.node);
@@ -1523,7 +1523,7 @@ fn type_(t: *TextHarness, text: []const u8) !void {
     try t.h.frame();
 }
 
-fn press(t: *TextHarness, k: keys.Key, mods: u32) !void {
+fn press(t: *TextHarness, k: keys.Key, mods: keys.Mods) !void {
     t.h.ui.key(k, mods, true, false);
     try t.h.frame();
 }
@@ -1544,7 +1544,7 @@ test "typing edits the field, sets flags, and calls on_change" {
 
     try type_(t, " \u{e9}");
     try std.testing.expectEqualStrings("hello \u{e9}", ui.textFieldText(tf));
-    try press(t, .backspace, 0); // removes the whole two-byte character
+    try press(t, .backspace, .{}); // removes the whole two-byte character
     try std.testing.expectEqualStrings("hello ", ui.textFieldText(tf));
     try std.testing.expectEqual(@as(u32, 3), tf.out.change_count);
 }
@@ -1556,19 +1556,19 @@ test "navigation, selection, and replacement" {
     const tf = try focusedField(t);
     try type_(t, "one two three");
 
-    try press(t, .home, 0);
-    try press(t, .right, keys.mod_ctrl); // word right: past "one "
+    try press(t, .home, .{});
+    try press(t, .right, .{ .ctrl = true }); // word right: past "one "
     try std.testing.expectEqual(@as(u32, 4), tf.out.caret);
-    try press(t, .right, keys.mod_ctrl | keys.mod_shift);
+    try press(t, .right, .{ .ctrl = true, .shift = true });
     try std.testing.expectEqual(@as(u32, 4), tf.out.sel_start);
     try std.testing.expectEqual(@as(u32, 8), tf.out.sel_end);
     try type_(t, "2");
     try std.testing.expectEqualStrings("one 2three", ui.textFieldText(tf));
-    try press(t, .end, 0);
-    try press(t, .backspace, keys.mod_ctrl); // "2three" is one word
+    try press(t, .end, .{});
+    try press(t, .backspace, .{ .ctrl = true }); // "2three" is one word
     try std.testing.expectEqualStrings("one ", ui.textFieldText(tf));
-    try press(t, .left, 0);
-    try press(t, .delete, 0);
+    try press(t, .left, .{});
+    try press(t, .delete, .{});
     try std.testing.expectEqualStrings("one", ui.textFieldText(tf));
 }
 
@@ -1579,21 +1579,21 @@ test "clipboard: select all, copy, cut, paste (newlines become spaces)" {
     const tf = try focusedField(t);
     try type_(t, "abc");
 
-    try press(t, .a, keys.mod_ctrl);
+    try press(t, .a, .{ .ctrl = true });
     try std.testing.expectEqual(@as(u32, 0), tf.out.sel_start);
     try std.testing.expectEqual(@as(u32, 3), tf.out.sel_end);
-    try press(t, .c, keys.mod_ctrl);
+    try press(t, .c, .{ .ctrl = true });
     try std.testing.expectEqualStrings("abc", FakeClip.contents());
     try std.testing.expectEqualStrings("abc", ui.textFieldText(tf));
 
-    try press(t, .x, keys.mod_ctrl);
+    try press(t, .x, .{ .ctrl = true });
     try std.testing.expectEqualStrings("", ui.textFieldText(tf));
     FakeClip.put("x\ny\r\nz");
-    try press(t, .v, keys.mod_ctrl);
+    try press(t, .v, .{ .ctrl = true });
     try std.testing.expectEqualStrings("x y  z", ui.textFieldText(tf));
 
     // A plain 'a' (no modifier) is not consumed: text arrives via text_input only.
-    ui.key(.a, 0, true, false);
+    ui.key(.a, .{}, true, false);
     try std.testing.expectEqualStrings("x y  z", ui.textFieldText(tf));
 }
 
@@ -1601,7 +1601,7 @@ test "enter submits; submit flags are frame-scoped" {
     const t = try TextHarness.init();
     defer t.deinit();
     const tf = try focusedField(t);
-    t.h.ui.key(.enter, 0, true, false);
+    t.h.ui.key(.enter, .{}, true, false);
     try std.testing.expect(tf.out.submitted);
     try std.testing.expectEqual(@as(u32, 1), tf.out.submit_count);
     try std.testing.expectEqual(@as(u32, 1), FieldCounts.submits);
@@ -1619,10 +1619,10 @@ test "read-only fields copy but do not edit; disabled fields ignore everything" 
     try t.h.frame();
 
     try type_(t, "x");
-    try press(t, .backspace, 0);
-    try press(t, .a, keys.mod_ctrl);
-    try press(t, .c, keys.mod_ctrl);
-    try press(t, .x, keys.mod_ctrl);
+    try press(t, .backspace, .{});
+    try press(t, .a, .{ .ctrl = true });
+    try press(t, .c, .{ .ctrl = true });
+    try press(t, .x, .{ .ctrl = true });
     try std.testing.expectEqualStrings("keep", ui.textFieldText(tf));
     try std.testing.expectEqualStrings("keep", FakeClip.contents());
 
@@ -1644,7 +1644,7 @@ test "text only reaches the focused field" {
     try type_(t, "to a");
     try std.testing.expectEqualStrings("to a", ui.textFieldText(a));
     try std.testing.expectEqualStrings("", ui.textFieldText(b));
-    try press(t, .tab, 0);
+    try press(t, .tab, .{});
     try type_(t, "to b");
     try std.testing.expectEqualStrings("to b", ui.textFieldText(b));
     try std.testing.expectEqualStrings("to a", ui.textFieldText(a));
@@ -1758,7 +1758,7 @@ test "selection is drawn as a highlight and the caret as a thin rect" {
     }
     try std.testing.expectEqual(@as(usize, 1), carets);
 
-    try press(t, .a, keys.mod_ctrl);
+    try press(t, .a, .{ .ctrl = true });
     var highlight: ?draw_list.Command = null;
     for (t.h.list.items()) |c| {
         if (c.kind == .fill_rect and std.meta.eql(c.paint.color, ui.theme.field.selection)) highlight = c;
@@ -1779,7 +1779,7 @@ test "long text scrolls to keep the caret visible, and Home scrolls back" {
     const decor = ui.tree.get(tf.node).?.text.?.decor;
     try std.testing.expectApproxEqAbs(@as(f32, 274 - 188 + 1), decor.scroll_x, 0.01);
     try std.testing.expect(decor.caret_x - decor.scroll_x <= 188);
-    try press(t, .home, 0);
+    try press(t, .home, .{});
     try std.testing.expectEqual(@as(f32, 0), ui.tree.get(tf.node).?.text.?.decor.scroll_x);
 }
 
@@ -1848,7 +1848,7 @@ const CmdLog = struct {
 
     /// Logs the last character of the command name.
     fn handler(_: ?*anyopaque, ev: *event_mod.Event) void {
-        const name = ev.textSlice();
+        const name = ev.text;
         if (len < buf.len) {
             buf[len] = name[name.len - 1];
             len += 1;
@@ -1871,14 +1871,14 @@ test "a bound shortcut runs its command with the focused node as target" {
     const b = try ui.createButton(ui.tree.root, box(80, 30));
     try t.frame();
 
-    try std.testing.expect(ui.keyHandled(.s, keys.mod_ctrl, true, false));
+    try std.testing.expect(ui.keyHandled(.s, .{ .ctrl = true }, true, false));
     try std.testing.expectEqualStrings("s", CmdLog.str());
     try std.testing.expect(Handle.eql(CmdLog.last_target, ui.tree.root)); // nothing focused
     ui.setFocus(b.node);
-    _ = ui.keyHandled(.s, keys.mod_ctrl, true, false);
+    _ = ui.keyHandled(.s, .{ .ctrl = true }, true, false);
     try std.testing.expect(Handle.eql(CmdLog.last_target, b.node));
-    try std.testing.expect(!ui.keyHandled(.x, keys.mod_ctrl, true, false)); // unbound
-    try std.testing.expect(!ui.keyHandled(.s, keys.mod_ctrl, false, false)); // key-up never triggers
+    try std.testing.expect(!ui.keyHandled(.x, .{ .ctrl = true }, true, false)); // unbound
+    try std.testing.expect(!ui.keyHandled(.s, .{ .ctrl = true }, false, false)); // key-up never triggers
     try std.testing.expect(ui.invokeCommand("file.s"));
     try std.testing.expect(!ui.invokeCommand("nope"));
 }
@@ -1894,11 +1894,11 @@ test "widgets get the key first: a button's Enter beats an Enter shortcut" {
     try t.frame();
 
     // Nothing focused: the shortcut fires.
-    _ = ui.keyHandled(.enter, 0, true, false);
+    _ = ui.keyHandled(.enter, .{}, true, false);
     try std.testing.expectEqualStrings("e", CmdLog.str());
     // A focused button claims Enter for itself.
     ui.setFocus(b.node);
-    _ = ui.keyHandled(.enter, 0, true, false);
+    _ = ui.keyHandled(.enter, .{}, true, false);
     try std.testing.expectEqualStrings("e", CmdLog.str());
     try std.testing.expectEqual(@as(u32, 1), b.out.click_count);
 }
@@ -1911,12 +1911,12 @@ test "a Tab shortcut beats focus movement; unbound Tab still moves focus" {
     try regCmd(ui, "x.t");
     const b = try ui.createButton(ui.tree.root, box(80, 30));
     try t.frame();
-    _ = ui.keyHandled(.tab, 0, true, false);
+    _ = ui.keyHandled(.tab, .{}, true, false);
     try std.testing.expect(Handle.eql(ui.focused().?, b.node));
     ui.setFocus(null);
 
     try ui.bindShortcut("tab", "x.t", .app, null);
-    _ = ui.keyHandled(.tab, 0, true, false);
+    _ = ui.keyHandled(.tab, .{}, true, false);
     try std.testing.expectEqualStrings("t", CmdLog.str());
     try std.testing.expect(ui.focused() == null);
 }
@@ -1934,21 +1934,21 @@ test "typing in a text field is not stolen by plain-key shortcuts, but modified 
     try ui.bindShortcut("ctrl+a", "x.q", .app, null);
     const tf = try focusedField(t);
 
-    _ = ui.keyHandled(.a, 0, true, false);
+    _ = ui.keyHandled(.a, .{}, true, false);
     ui.textInput("a");
     try t.h.frame();
     try std.testing.expectEqualStrings("a", ui.textFieldText(tf));
     try std.testing.expectEqualStrings("", CmdLog.str()); // the shortcut did not fire
 
-    _ = ui.keyHandled(.a, keys.mod_ctrl, true, false); // the field takes select-all
+    _ = ui.keyHandled(.a, .{ .ctrl = true }, true, false); // the field takes select-all
     try std.testing.expectEqual(@as(u32, 1), tf.out.sel_end);
     try std.testing.expectEqualStrings("", CmdLog.str());
-    _ = ui.keyHandled(.s, keys.mod_ctrl, true, false); // not claimed by the field
+    _ = ui.keyHandled(.s, .{ .ctrl = true }, true, false); // not claimed by the field
     try std.testing.expectEqualStrings("s", CmdLog.str());
 
     // Leave the field and the bare shortcut works again.
     ui.setFocus(null);
-    _ = ui.keyHandled(.a, 0, true, false);
+    _ = ui.keyHandled(.a, .{}, true, false);
     try std.testing.expectEqualStrings("sa", CmdLog.str());
 }
 
@@ -1970,9 +1970,9 @@ test "panel and widget scopes follow focus" {
     try t.frame();
 
     ui.setFocus(inside.node);
-    _ = ui.keyHandled(.f2, 0, true, false); // widget
+    _ = ui.keyHandled(.f2, .{}, true, false); // widget
     ui.setFocus(outside.node);
-    _ = ui.keyHandled(.f2, 0, true, false); // outside the panel: global
+    _ = ui.keyHandled(.f2, .{}, true, false); // outside the panel: global
     try std.testing.expectEqualStrings("wg", CmdLog.str());
     try std.testing.expectError(error.InvalidScope, ui.bindShortcut("f3", "x.p", .panel, null));
     try std.testing.expectError(error.UnknownCommand, ui.bindShortcut("f3", "x.nope", .app, null));
@@ -2002,22 +2002,22 @@ test "chords work through the Ui and a click cancels a pending chord" {
     try regCmd(ui, "edit.c");
     try ui.bindShortcut("ctrl+k ctrl+c", "edit.c", .app, null);
     _ = ui.tick(0);
-    try std.testing.expect(ui.keyHandled(.k, keys.mod_ctrl, true, false));
+    try std.testing.expect(ui.keyHandled(.k, .{ .ctrl = true }, true, false));
     try std.testing.expect(ui.shortcuts.hasPending());
-    try std.testing.expect(ui.keyHandled(.c, keys.mod_ctrl, true, false));
+    try std.testing.expect(ui.keyHandled(.c, .{ .ctrl = true }, true, false));
     try std.testing.expectEqualStrings("c", CmdLog.str());
 
-    _ = ui.keyHandled(.k, keys.mod_ctrl, true, false);
+    _ = ui.keyHandled(.k, .{ .ctrl = true }, true, false);
     ui.pointerButtonEx(300, 90, 1, true, 1);
     try std.testing.expect(!ui.shortcuts.hasPending());
-    try std.testing.expect(!ui.keyHandled(.c, keys.mod_ctrl, true, false));
+    try std.testing.expect(!ui.keyHandled(.c, .{ .ctrl = true }, true, false));
     try std.testing.expectEqualStrings("c", CmdLog.str());
 
     // The timeout uses the time given to tick.
     _ = ui.tick(1000);
-    _ = ui.keyHandled(.k, keys.mod_ctrl, true, false);
+    _ = ui.keyHandled(.k, .{ .ctrl = true }, true, false);
     _ = ui.tick(1000 + 2000);
-    try std.testing.expect(!ui.keyHandled(.c, keys.mod_ctrl, true, false));
+    try std.testing.expect(!ui.keyHandled(.c, .{ .ctrl = true }, true, false));
 }
 
 test "a command-linked button runs the command, mirrors its enabled state, and frees its link" {
@@ -2071,7 +2071,7 @@ test "keymaps load through the Ui, and shortcut text feeds menus and tooltips" {
 
     // Remapping: rebind replaces.
     try ui.rebindShortcut("ctrl+s", "file.o", .app, null);
-    _ = ui.keyHandled(.s, keys.mod_ctrl, true, false);
+    _ = ui.keyHandled(.s, .{ .ctrl = true }, true, false);
     try std.testing.expectEqualStrings("o", CmdLog.str());
     try std.testing.expectError(error.Conflict, ui.bindShortcut("ctrl+s", "file.s", .app, null));
 }
@@ -2086,10 +2086,10 @@ test "repeatable commands re-run on auto-repeat; others do not" {
     try ui.bindShortcut("down", "nav.d", .app, null);
     try ui.bindShortcut("ctrl+s", "nav.s", .app, null);
     try std.testing.expect(ui.setCommandRepeat("nav.d", true));
-    _ = ui.keyHandled(.down, 0, true, false);
-    _ = ui.keyHandled(.down, 0, true, true);
-    _ = ui.keyHandled(.s, keys.mod_ctrl, true, false);
-    _ = ui.keyHandled(.s, keys.mod_ctrl, true, true);
+    _ = ui.keyHandled(.down, .{}, true, false);
+    _ = ui.keyHandled(.down, .{}, true, true);
+    _ = ui.keyHandled(.s, .{ .ctrl = true }, true, false);
+    _ = ui.keyHandled(.s, .{ .ctrl = true }, true, true);
     try std.testing.expectEqualStrings("dds", CmdLog.str());
 }
 
@@ -2144,7 +2144,7 @@ test "typing, Enter, Backspace, and undo/redo through events update text and out
     const ed = try editorBox(t);
 
     try type_(t, "hi");
-    try press(t, .enter, 0);
+    try press(t, .enter, .{});
     try type_(t, "x");
     try expectEdText(ui, ed, "hi\nx");
     try std.testing.expectEqual(@as(u32, 2), ed.out.line_count);
@@ -2153,14 +2153,14 @@ test "typing, Enter, Backspace, and undo/redo through events update text and out
     try std.testing.expect(ed.out.modified);
     try std.testing.expectEqual(@as(u32, 3), FieldCounts.changes);
 
-    try press(t, .backspace, 0);
-    try press(t, .backspace, 0);
+    try press(t, .backspace, .{});
+    try press(t, .backspace, .{});
     try expectEdText(ui, ed, "hi");
-    try press(t, .z, keys.mod_ctrl); // undo the backspaces
+    try press(t, .z, .{ .ctrl = true }); // undo the backspaces
     try expectEdText(ui, ed, "hi\nx");
-    try press(t, .z, keys.mod_ctrl | keys.mod_shift); // redo
+    try press(t, .z, .{ .ctrl = true, .shift = true }); // redo
     try expectEdText(ui, ed, "hi");
-    try press(t, .y, keys.mod_ctrl); // nothing left to redo
+    try press(t, .y, .{ .ctrl = true }); // nothing left to redo
     try expectEdText(ui, ed, "hi");
     ui.markCodeEditorSaved(ed);
     try t.h.frame();
@@ -2217,22 +2217,22 @@ test "alt-click adds a cursor and typing goes to every cursor" {
     ui.pointerMove(gutter_px, 5);
     ui.pointerButtonEx(gutter_px, 5, 1, true, 1);
     ui.pointerButtonEx(gutter_px, 5, 1, false, 1);
-    ui.key(.unknown, keys.mod_alt, true, false); // Alt is held
+    ui.key(.unknown, .{ .alt = true }, true, false); // Alt is held
     ui.pointerMove(gutter_px, line_px + 5);
     ui.pointerButtonEx(gutter_px, line_px + 5, 1, true, 1);
     ui.pointerButtonEx(gutter_px, line_px + 5, 1, false, 1);
-    ui.key(.unknown, 0, false, false);
+    ui.key(.unknown, .{}, false, false);
     try t.h.frame();
     try std.testing.expectEqual(@as(u32, 2), ed.out.selection_count);
     try type_(t, ">");
     try expectEdText(ui, ed, ">one\n>two");
 
-    try press(t, .escape, 0); // drop the extra cursor
+    try press(t, .escape, .{}); // drop the extra cursor
     try std.testing.expectEqual(@as(u32, 1), ed.out.selection_count);
-    try std.testing.expect(!ui.keyHandled(.escape, 0, true, false)); // nothing left to cancel: the key passes through
+    try std.testing.expect(!ui.keyHandled(.escape, .{}, true, false)); // nothing left to cancel: the key passes through
 
-    try press(t, .up, keys.mod_ctrl | keys.mod_alt); // no line above the first: no-op
-    try press(t, .down, keys.mod_ctrl | keys.mod_alt);
+    try press(t, .up, .{ .ctrl = true, .alt = true }); // no line above the first: no-op
+    try press(t, .down, .{ .ctrl = true, .alt = true });
     try std.testing.expectEqual(@as(u32, 2), ed.out.selection_count);
 }
 
@@ -2247,14 +2247,14 @@ test "the caret scrolls into view, page keys move by a screenful, and the wheel 
     const slot = Ui.editorSlot(ed);
     try std.testing.expectEqual(@as(f32, 0), slot.scroll_y);
 
-    try press(t, .end, keys.mod_ctrl); // end of the document
+    try press(t, .end, .{ .ctrl = true }); // end of the document
     try std.testing.expectEqual(@as(u32, 100), ed.out.caret_line);
     const max_scroll = 101 * line_px - 100;
     try std.testing.expectApproxEqAbs(max_scroll, slot.scroll_y, 0.01);
 
-    try press(t, .home, keys.mod_ctrl);
+    try press(t, .home, .{ .ctrl = true });
     try std.testing.expectEqual(@as(f32, 0), slot.scroll_y);
-    try press(t, .page_down, 0); // view is 100px = 4 lines: moves 3
+    try press(t, .page_down, .{}); // view is 100px = 4 lines: moves 3
     try std.testing.expectEqual(@as(u32, 3), ed.out.caret_line);
 
     ui.pointerMove(100, 50);
@@ -2308,9 +2308,9 @@ test "selections, the current line, and carets are drawn; the caret blinks" {
     try t.h.frame();
     try std.testing.expectEqual(@as(usize, 0), Counts.of(&t.h.list, colors.caret));
 
-    try press(t, .right, keys.mod_shift);
-    try press(t, .right, keys.mod_shift);
-    try press(t, .down, keys.mod_shift);
+    try press(t, .right, .{ .shift = true });
+    try press(t, .right, .{ .shift = true });
+    try press(t, .down, .{ .shift = true });
     // Two rows of selection: first row from column 2 to the end plus the line break.
     try std.testing.expectEqual(@as(usize, 2), Counts.of(&t.h.list, colors.selection));
     try std.testing.expectEqual(@as(usize, 0), Counts.of(&t.h.list, colors.current_line)); // hidden while selecting
@@ -2327,11 +2327,11 @@ test "tabs expand for display, so caret positions follow the visual columns" {
     const ed = try editorBox(t);
     try ui.loadCodeEditorText(ed, "\tx\n  \ty", false);
     try t.h.frame();
-    try press(t, .end, 0); // end of line 0: after a tab (4 cells) and "x"
+    try press(t, .end, .{}); // end of line 0: after a tab (4 cells) and "x"
     const r = ui.textInputRect().?;
     try std.testing.expectApproxEqAbs(gutter_px + 5 * cell_px, r.x, 0.01);
-    try press(t, .down, 0);
-    try press(t, .end, 0); // "  \ty": two spaces, a tab to column 4, then "y"
+    try press(t, .down, .{});
+    try press(t, .end, .{}); // "  \ty": two spaces, a tab to column 4, then "y"
     try std.testing.expectApproxEqAbs(gutter_px + 5 * cell_px, ui.textInputRect().?.x, 0.01);
     // Clicking in the tab's span lands on the nearest edge of the tab character.
     ui.pointerMove(gutter_px + 1 * cell_px, 5);
@@ -2351,11 +2351,11 @@ test "read-only editors navigate and copy but do not edit; disabled ones are ine
     try t.h.frame();
 
     try type_(t, "x");
-    try press(t, .backspace, 0);
-    try std.testing.expect(!ui.keyHandled(.enter, 0, true, false)); // not claimed: passes on
-    try press(t, .a, keys.mod_ctrl);
-    try press(t, .c, keys.mod_ctrl);
-    try press(t, .x, keys.mod_ctrl);
+    try press(t, .backspace, .{});
+    try std.testing.expect(!ui.keyHandled(.enter, .{}, true, false)); // not claimed: passes on
+    try press(t, .a, .{ .ctrl = true });
+    try press(t, .c, .{ .ctrl = true });
+    try press(t, .x, .{ .ctrl = true });
     try expectEdText(ui, ed, "keep this");
     try std.testing.expectEqualStrings("keep this", FakeClip.contents());
     try std.testing.expectEqual(@as(u32, 0), FieldCounts.changes);
@@ -2375,16 +2375,16 @@ test "cut, paste, and tab handling through the clipboard and keys" {
     const ed = try editorBox(t);
     try ui.loadCodeEditorText(ed, "one two", false);
     try t.h.frame();
-    try press(t, .a, keys.mod_ctrl);
-    try press(t, .x, keys.mod_ctrl);
+    try press(t, .a, .{ .ctrl = true });
+    try press(t, .x, .{ .ctrl = true });
     try expectEdText(ui, ed, "");
     try std.testing.expectEqualStrings("one two", FakeClip.contents());
-    try press(t, .v, keys.mod_ctrl);
-    try press(t, .v, keys.mod_ctrl);
+    try press(t, .v, .{ .ctrl = true });
+    try press(t, .v, .{ .ctrl = true });
     try expectEdText(ui, ed, "one twoone two");
-    try press(t, .tab, 0);
+    try press(t, .tab, .{});
     try std.testing.expectEqual(@as(u32, 16), ed.out.caret_column); // padded to the next multiple of 4
-    try press(t, .tab, keys.mod_shift); // outdent has nothing to remove at a non-indented line start... caret stays
+    try press(t, .tab, .{ .shift = true }); // outdent has nothing to remove at a non-indented line start... caret stays
     try std.testing.expect(ui.focused() != null); // Tab was consumed, focus did not move
 }
 
@@ -2396,8 +2396,8 @@ test "removing an editor frees its document, history, and scratch" {
     const text = try manyLines(500);
     try ui.loadCodeEditorText(ed, text, true);
     try type_(t, "typed text");
-    try press(t, .enter, 0);
-    try press(t, .z, keys.mod_ctrl);
+    try press(t, .enter, .{});
+    try press(t, .z, .{ .ctrl = true });
     _ = ui.tree.destroySubtree(ed.node);
     try t.h.frame();
     try std.testing.expectEqual(@as(u32, 0), ui.editors.count());
@@ -2415,9 +2415,9 @@ test "a larger document keeps its caret stops, line numbers, and mouse mapping i
     const core = ui.codeEditorCore(ed);
 
     // Insert lines above, then click on what is now line 7 (0-based 6).
-    try press(t, .home, keys.mod_ctrl);
-    try press(t, .enter, 0);
-    try press(t, .enter, 0);
+    try press(t, .home, .{ .ctrl = true });
+    try press(t, .enter, .{});
+    try press(t, .enter, .{});
     try type_(t, "new");
     const ypos = 3 * line_px + 5; // viewport row 3 -> line 3 (scroll is 0 at the top)
     ui.pointerMove(gutter_px, ypos);
@@ -2548,11 +2548,11 @@ test "a large file is lexed lazily: only to the viewport, then up to the caret w
     const hl = &Ui.editorSlot(ed).highlighter.?;
     try std.testing.expect(hl.lexed <= 10); // just the lines above the visible ones (none) plus a few
 
-    try press(t, .end, keys.mod_ctrl); // jump to the bottom: lex everything above it, once
+    try press(t, .end, .{ .ctrl = true }); // jump to the bottom: lex everything above it, once
     try std.testing.expect(hl.lexed >= 19990);
     const after_jump = hl.lexed;
-    try press(t, .up, 0);
-    try press(t, .down, 0);
+    try press(t, .up, .{});
+    try press(t, .down, .{});
     try std.testing.expectEqual(after_jump, hl.lexed); // cached
 
     // Typing on the last line only relexes the changed line.

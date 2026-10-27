@@ -372,7 +372,7 @@ const Log = struct {
     /// Handler that appends the first letter after the last dot of the command
     /// name (so "x.a" logs 'a'), making the order of runs easy to assert.
     fn handler(_: ?*anyopaque, ev: *event.Event) void {
-        const name = ev.textSlice();
+        const name = ev.text;
         if (len < buf.len) {
             buf[len] = name[name.len - 1];
             len += 1;

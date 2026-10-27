@@ -344,16 +344,16 @@ const Script = struct {
             if (std.mem.eql(u8, verb, "type")) {
                 ui.textInput(rest);
             } else if (std.mem.eql(u8, verb, "key")) {
-                var mods: u32 = 0;
+                var mods: zigui.keys.Mods = .{};
                 var parts = std.mem.splitScalar(u8, rest, '+');
                 var last: []const u8 = "";
                 while (parts.next()) |p| {
                     if (std.mem.eql(u8, p, "ctrl")) {
-                        mods |= zigui.keys.mod_ctrl;
+                        mods.ctrl = true;
                     } else if (std.mem.eql(u8, p, "shift")) {
-                        mods |= zigui.keys.mod_shift;
+                        mods.shift = true;
                     } else if (std.mem.eql(u8, p, "alt")) {
-                        mods |= zigui.keys.mod_alt;
+                        mods.alt = true;
                     } else {
                         last = p;
                     }

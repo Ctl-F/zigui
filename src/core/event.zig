@@ -8,8 +8,8 @@
 const Handle = @import("handle.zig").Handle;
 const keys = @import("keys.zig");
 
-pub const EventKind = enum(u32) {
-    pointer_down = 0,
+pub const EventKind = enum {
+    pointer_down,
     pointer_up,
     pointer_move,
     /// Pointer entered the node or one of its descendants. Does not bubble.
@@ -24,13 +24,12 @@ pub const EventKind = enum(u32) {
     focus_in,
     focus_out,
     /// Committed text (typing, paste, IME). Separate from key events. `text`
-    /// and `text_len` hold UTF-8 valid only during dispatch.
+    /// holds UTF-8 valid only during dispatch.
     text_input,
     /// A named command is being run (from a shortcut, a button, a menu, or code).
     /// `text` holds the command name. Delivered straight to the command's
     /// handler, not through the tree.
     command,
-    _,
 
     pub fn bubbles(self: EventKind) bool {
         return switch (self) {
@@ -48,9 +47,9 @@ pub const EventKind = enum(u32) {
     }
 };
 
-pub const Phase = enum(u32) { capture = 0, target, bubble };
+pub const Phase = enum { capture, target, bubble };
 
-pub const Event = extern struct {
+pub const Event = struct {
     kind: EventKind,
     phase: Phase = .target,
     /// Node the event was aimed at.
@@ -72,24 +71,16 @@ pub const Event = extern struct {
     keycode: u32 = 0,
     /// Toolkit key for key events (`.unknown` if unmapped).
     key: keys.Key = .unknown,
-    /// `keys.mod_*` bits held during the event.
-    mods: u32 = 0,
+    /// Modifier keys held during the event.
+    mods: keys.Mods = .{},
     /// Consecutive press count for pointer_down (2 = double click).
     clicks: u32 = 0,
-    text: ?[*]const u8 = null,
-    text_len: usize = 0,
+    /// UTF-8 for `text_input` events (and the name for `command` events); only
+    /// valid while the event is being dispatched.
+    text: []const u8 = "",
     repeat: bool = false,
     handled: bool = false,
     stopped: bool = false,
-
-    pub fn hasMod(self: *const Event, mod: u32) bool {
-        return self.mods & mod != 0;
-    }
-
-    pub fn textSlice(self: *const Event) []const u8 {
-        const p = self.text orelse return "";
-        return p[0..self.text_len];
-    }
 
     pub fn stopPropagation(self: *Event) void {
         self.stopped = true;

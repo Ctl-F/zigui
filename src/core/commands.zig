@@ -113,8 +113,7 @@ pub const Commands = struct {
         var ev: event.Event = .{
             .kind = .command,
             .target = target,
-            .text = c.name.ptr,
-            .text_len = c.name.len,
+            .text = c.name,
         };
         run.invoke(&ev);
         return true;
@@ -144,7 +143,7 @@ const Probe = struct {
 
     fn handler(user: ?*anyopaque, ev: *event.Event) void {
         calls += 1;
-        const got = ev.textSlice();
+        const got = ev.text;
         @memcpy(last_name[0..got.len], got);
         last_len = got.len;
         last_user = user;
