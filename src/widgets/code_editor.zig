@@ -38,6 +38,7 @@ const TextSystem = text_sys.TextSystem;
 const Stop = text_sys.Stop;
 const Glyph = text_sys.Glyph;
 const Theme = @import("theme.zig").Theme;
+const Ui = @import("../core/ui.zig").Ui;
 const label = @import("label.zig");
 const Editor = @import("../editor/editor.zig").Editor;
 const Selection = @import("../editor/selection.zig").Selection;
@@ -46,67 +47,17 @@ const Highlighter = @import("../editor/highlighter.zig").Highlighter;
 
 pub const Font = label.Font;
 
-pub const CodeEditor = struct {
-    props: Props = .{},
-    out: Out = .{},
-    node: Handle = Handle.invalid,
-
-    pub const Props = struct {
-        font: Font = .mono,
-        /// Em size in logical pixels; 0 uses the theme's size.
-        size: f32 = 0,
-        tab_width: u32 = 4,
-        enabled: bool = true,
-        read_only: bool = false,
-        line_numbers: bool = true,
-        auto_indent: bool = true,
-        /// Called after each user edit (typing, deleting, paste, undo/redo).
-        on_change: ?event.Callback = null,
-
-        pub const dirty_map = .{
-            .font = shadow.Category.paint,
-            .size = shadow.Category.paint,
-            .tab_width = shadow.Category.paint,
-            .enabled = shadow.Category.paint,
-            .read_only = shadow.Category.paint,
-            .line_numbers = shadow.Category.paint,
-        };
-    };
-
-    pub const Out = struct {
-        /// The user changed the text this frame.
-        changed: bool = false,
-        focused: bool = false,
-        hovered: bool = false,
-        /// Text differs from the last save point (see `Ui.markCodeEditorSaved`).
-        modified: bool = false,
-        change_count: u32 = 0,
-        line_count: u32 = 1,
-        /// 0-based line and column (code points) of the primary caret.
-        caret_line: u32 = 0,
-        caret_column: u32 = 0,
-        selection_count: u32 = 1,
-    };
-};
-
-/// Things the widget needs from the `Ui` that owns it. Pointers stay valid as
-/// long as the `Ui` is not moved.
-pub const Env = struct {
-    tree: *Tree,
-    text: *TextSystem,
-    theme: *const Theme,
-    clipboard: *const ?Clipboard,
-    now_ms: *const u64,
-};
-
 const blink_ms: u64 = 530;
 const gutter_pad: f32 = 8;
 
-pub const Slot = struct {
-    gpa: std.mem.Allocator,
-    env: Env,
-    block: CodeEditor,
-    checker: shadow.Checker(CodeEditor.Props),
+pub const CodeEditor = struct {
+    props: Props = .{},
+    out: Out = .{},
+    node: Handle,
+    ui: *Ui,
+
+    // Internal state (not part of the app-facing API).
+    checker: shadow.Checker(Props),
     editor: Editor,
 
     scroll_y: f32 = 0,
@@ -130,23 +81,23 @@ pub const Slot = struct {
     /// Syntax highlighting, if a language is set.
     highlighter: ?Highlighter = null,
 
-    pub fn deinit(self: *Slot) void {
+    pub fn deinit(self: *CodeEditor) void {
         if (self.highlighter) |*h| h.deinit();
-        self.spans.deinit(self.gpa);
+        self.spans.deinit(self.ui.gpa);
         self.editor.deinit();
-        self.display.deinit(self.gpa);
-        self.map.deinit(self.gpa);
-        self.stops.deinit(self.gpa);
-        self.glyphs.deinit(self.gpa);
+        self.display.deinit(self.ui.gpa);
+        self.map.deinit(self.ui.gpa);
+        self.stops.deinit(self.ui.gpa);
+        self.glyphs.deinit(self.ui.gpa);
     }
 
     /// Choose the syntax highlighting language (null for none).
-    pub fn setLanguage(self: *Slot, lang: ?*const syntax.Language) !void {
+    pub fn setLanguage(self: *CodeEditor, lang: ?*const syntax.Language) !void {
         if (lang) |l| {
             if (self.highlighter) |*h| {
                 h.setLanguage(l);
             } else {
-                var h = Highlighter.init(self.gpa, l);
+                var h = Highlighter.init(self.ui.gpa, l);
                 errdefer h.deinit();
                 try h.reset(self.editor.doc.lineCount());
                 self.highlighter = h;
@@ -159,8 +110,61 @@ pub const Slot = struct {
     }
 
     /// Call after the editor core was replaced.
-    pub fn resetHighlighting(self: *Slot) void {
+    pub fn resetHighlighting(self: *CodeEditor) void {
         if (self.highlighter) |*h| h.reset(self.editor.doc.lineCount()) catch {};
+    }
+
+    pub fn init(ui: *Ui, node: Handle) CodeEditor {
+        const props: Props = .{};
+        return .{
+            .node = node,
+            .ui = ui,
+            .checker = shadow.Checker(Props).init(&props),
+            .editor = Editor.init(ui.gpa),
+        };
+    }
+
+    pub const listened_kinds = [_]event.EventKind{
+        .focus_in, .focus_out, .pointer_enter, .pointer_leave,
+        .pointer_down, .pointer_move, .pointer_up, .wheel, .key_down, .text_input,
+    };
+
+    // ---- API ------------------------------------------------------------------
+
+    /// The editor core (document, selections, history). Edits made through it
+    /// directly should be followed by `invalidate`.
+    pub fn core(self: *CodeEditor) *Editor {
+        return &self.editor;
+    }
+
+    /// Ask the widget to repaint (and keep the caret in view) after changing
+    /// its core directly.
+    pub fn invalidate(self: *CodeEditor) void {
+        self.repaint = true;
+        self.want_visible = true;
+    }
+
+    /// Replace the content with `bytes` as the opened file. If `owned`, the
+    /// editor frees it (with the Ui's allocator); otherwise it must outlive the
+    /// editor. History is cleared and the text counts as saved.
+    pub fn loadText(self: *CodeEditor, bytes: []const u8, owned: bool) !void {
+        const fresh = try Editor.initWithText(self.ui.gpa, bytes, owned);
+        self.editor.deinit();
+        self.editor = fresh;
+        self.scroll_x = 0;
+        self.scroll_y = 0;
+        self.last_version = 0;
+        self.repaint = true;
+        self.resetHighlighting();
+    }
+
+    pub fn markSaved(self: *CodeEditor) void {
+        self.editor.markSaved();
+    }
+
+    /// The whole text, allocated with `gpa`.
+    pub fn textAlloc(self: *CodeEditor, gpa: std.mem.Allocator) ![]u8 {
+        return self.editor.doc.textAlloc(gpa, 0, self.editor.doc.len());
     }
 
     // ---- metrics -------------------------------------------------------------------
@@ -175,15 +179,15 @@ pub const Slot = struct {
         cell_w: f32,
     };
 
-    fn metrics(self: *Slot) ?Metrics {
-        const theme = self.env.theme;
-        const f = switch (self.block.props.font) {
+    fn metrics(self: *CodeEditor) ?Metrics {
+        const theme = &self.ui.theme;
+        const f = switch (self.props.font) {
             .ui => theme.ui_font,
             .mono => theme.mono_font,
         };
-        const ts = self.env.text;
+        const ts = &self.ui.text;
         if (f >= ts.fonts.items.len) return null;
-        const size = if (self.block.props.size > 0) self.block.props.size else theme.font_size;
+        const size = if (self.props.size > 0) self.props.size else theme.font_size;
         const m = ts.metrics(f, size);
         return .{
             .font = f,
@@ -205,11 +209,11 @@ pub const Slot = struct {
         view_h: f32,
     };
 
-    fn geometry(self: *Slot, m: Metrics) Geo {
-        const node = self.env.tree.get(self.block.node).?;
+    fn geometry(self: *CodeEditor, m: Metrics) Geo {
+        const node = self.ui.tree.get(self.node).?;
         const pad = layout_mod.resolveEdges(node.style.padding, null);
         var gutter: f32 = 0;
-        if (self.block.props.line_numbers) {
+        if (self.props.line_numbers) {
             var digits: usize = 3;
             var n = self.editor.doc.lineCount();
             var d: usize = 0;
@@ -229,31 +233,31 @@ pub const Slot = struct {
 
     /// Expand tabs, build the source-to-display map, and compute caret stops for
     /// one line. Afterwards `display`, `map`, and `stops` describe that line.
-    fn buildLine(self: *Slot, line: usize, m: Metrics) !void {
+    fn buildLine(self: *CodeEditor, line: usize, m: Metrics) !void {
         const ed = &self.editor;
         const src = try ed.doc.range(ed.doc.lineStart(line), ed.doc.lineEnd(line));
         self.display.clearRetainingCapacity();
         self.map.clearRetainingCapacity();
-        const tab_w: usize = @max(self.block.props.tab_width, 1);
+        const tab_w: usize = @max(self.props.tab_width, 1);
         var col: usize = 0;
         for (src) |b| {
-            try self.map.append(self.gpa, @intCast(self.display.items.len));
+            try self.map.append(self.ui.gpa, @intCast(self.display.items.len));
             if (b == '\t') {
                 const n = tab_w - col % tab_w;
-                try self.display.appendNTimes(self.gpa, ' ', n);
+                try self.display.appendNTimes(self.ui.gpa, ' ', n);
                 col += n;
             } else {
-                try self.display.append(self.gpa, b);
+                try self.display.append(self.ui.gpa, b);
                 if (b & 0xC0 != 0x80) col += 1;
             }
         }
-        try self.map.append(self.gpa, @intCast(self.display.items.len));
+        try self.map.append(self.ui.gpa, @intCast(self.display.items.len));
         self.stops.clearRetainingCapacity();
-        _ = try self.env.text.boundaries(m.font, m.size, self.display.items, &self.stops, self.gpa);
+        _ = try self.ui.text.boundaries(m.font, m.size, self.display.items, &self.stops, self.ui.gpa);
     }
 
     /// x of the first caret stop at or after `display_byte` (stops are sorted).
-    fn stopX(self: *const Slot, display_byte: usize) f32 {
+    fn stopX(self: *const CodeEditor, display_byte: usize) f32 {
         const items = self.stops.items;
         if (items.len == 0) return 0;
         var lo: usize = 0;
@@ -266,7 +270,7 @@ pub const Slot = struct {
     }
 
     /// x of a document offset within the line built by `buildLine`.
-    fn xOfOffset(self: *const Slot, line_start: usize, offset: usize) f32 {
+    fn xOfOffset(self: *const CodeEditor, line_start: usize, offset: usize) f32 {
         const rel = @min(offset - line_start, self.map.items.len - 1);
         return self.stopX(self.map.items[rel]);
     }
@@ -274,7 +278,7 @@ pub const Slot = struct {
     /// The valid cursor position (a character boundary in the source) whose x
     /// is nearest to `x` within the built line. A tab is one character, so
     /// clicking inside its span lands on whichever edge is closer.
-    fn offsetAtX(self: *const Slot, line_start: usize, x: f32) usize {
+    fn offsetAtX(self: *const CodeEditor, line_start: usize, x: f32) usize {
         var best: usize = 0;
         var best_d: f32 = std.math.inf(f32);
         for (self.map.items, 0..) |disp, rel| {
@@ -290,7 +294,7 @@ pub const Slot = struct {
     }
 
     /// Document offset under a point given relative to the node's top-left.
-    fn offsetAtPoint(self: *Slot, local_x: f32, local_y: f32) usize {
+    fn offsetAtPoint(self: *CodeEditor, local_x: f32, local_y: f32) usize {
         const m = self.metrics() orelse return 0;
         const geo = self.geometry(m);
         const ed = &self.editor;
@@ -304,27 +308,27 @@ pub const Slot = struct {
 
     // ---- frame sync -------------------------------------------------------------------
 
-    fn touch(self: *Slot, visible: bool) void {
+    fn touch(self: *CodeEditor, visible: bool) void {
         self.blink_on = true;
-        self.blink_at = self.env.now_ms.*;
+        self.blink_at = self.ui.now_ms;
         self.repaint = true;
         if (visible) self.want_visible = true;
     }
 
-    fn afterEdit(self: *Slot, ev: *event.Event, changed: bool) void {
+    fn afterEdit(self: *CodeEditor, ev: *event.Event, changed: bool) void {
         if (!changed) return;
-        self.block.out.changed = true;
-        self.block.out.change_count +%= 1;
+        self.out.changed = true;
+        self.out.change_count +%= 1;
         self.touch(true);
-        if (self.block.props.on_change) |cb| cb.invoke(ev);
+        if (self.props.on_change) |cb| cb.invoke(ev);
     }
 
-    fn maxScrollY(self: *Slot, m: Metrics, geo: Geo) f32 {
+    fn maxScrollY(self: *CodeEditor, m: Metrics, geo: Geo) f32 {
         const content = @as(f32, @floatFromInt(self.editor.doc.lineCount())) * m.line_h;
         return @max(content - geo.view_h, 0);
     }
 
-    fn ensureCaretVisible(self: *Slot, m: Metrics, geo: Geo) void {
+    fn ensureCaretVisible(self: *CodeEditor, m: Metrics, geo: Geo) void {
         const ed = &self.editor;
         const head = ed.primaryHead();
         const line = ed.doc.lineOfOffset(head);
@@ -339,16 +343,26 @@ pub const Slot = struct {
         } else |_| {}
     }
 
+    /// Disabled editors leave the tab order.
+    pub fn prepare(self: *CodeEditor) void {
+        self.ui.tree.get(self.node).?.flags.focusable = self.props.enabled;
+    }
+
+    pub fn endFrame(self: *CodeEditor) void {
+        self.out.changed = false;
+    }
+
     /// Per-frame sync: apply props, notice document changes, keep the caret in
     /// view, refresh `out`, and mark the node dirty if anything needs repainting.
-    pub fn update(self: *Slot) void {
-        const tree = self.env.tree;
-        const node = tree.get(self.block.node).?;
-        self.editor.tab_width = @max(self.block.props.tab_width, 1);
-        self.editor.auto_indent = self.block.props.auto_indent;
-        node.flags.focusable = self.block.props.enabled;
+    pub fn update(self: *CodeEditor) void {
+        self.ui.verifyProps(self.node, &self.checker, &self.props, "code_editor");
+        const tree = &self.ui.tree;
+        const node = tree.get(self.node).?;
+        self.editor.tab_width = @max(self.props.tab_width, 1);
+        self.editor.auto_indent = self.props.auto_indent;
+        node.flags.focusable = self.props.enabled;
 
-        const colors = self.env.theme.editor;
+        const colors = self.ui.theme.editor;
         const look: tree_mod.Visual = .{ .background = colors.background };
         if (!std.mem.eql(u8, std.mem.asBytes(&look), std.mem.asBytes(&node.visual))) {
             node.visual = look;
@@ -381,7 +395,7 @@ pub const Slot = struct {
             self.scroll_x = @max(self.scroll_x, 0);
         }
 
-        const out = &self.block.out;
+        const out = &self.out;
         const head = self.editor.primaryHead();
         out.line_count = @intCast(self.editor.doc.lineCount());
         out.caret_line = @intCast(self.editor.doc.lineOfOffset(head));
@@ -391,19 +405,19 @@ pub const Slot = struct {
 
         if (self.repaint) {
             self.repaint = false;
-            tree.markDirty(self.block.node, DirtyFlags.paint_only);
+            tree.markDirty(self.node, DirtyFlags.paint_only);
         }
     }
 
     // ---- painting ------------------------------------------------------------------------
 
     pub fn paintHook(ctx: *anyopaque, abs: Rect, list: *DrawList) draw_list.Error!void {
-        const self: *Slot = @ptrCast(@alignCast(ctx));
+        const self: *CodeEditor = @ptrCast(@alignCast(ctx));
         const m = self.metrics() orelse return;
         const geo = self.geometry(m);
-        const colors = self.env.theme.editor;
+        const colors = self.ui.theme.editor;
         const ed = &self.editor;
-        const focused = self.block.out.focused and self.block.props.enabled;
+        const focused = self.out.focused and self.props.enabled;
         const last_line = ed.doc.lineCount() - 1;
         const first = @min(@as(usize, @intFromFloat(@max(self.scroll_y, 0) / m.line_h)), last_line);
         const count = @as(usize, @intFromFloat(@ceil(geo.view_h / m.line_h))) + 2;
@@ -412,7 +426,7 @@ pub const Slot = struct {
         const text_area: Rect = .{ .x = abs.x + geo.pad.l + geo.gutter_w, .y = abs.y + geo.pad.t, .w = geo.view_w, .h = geo.view_h };
         const origin_x = text_area.x - self.scroll_x;
         const head_line = ed.doc.lineOfOffset(ed.primaryHead());
-        const show_caret = focused and self.blink_on and !self.block.props.read_only;
+        const show_caret = focused and self.blink_on and !self.props.read_only;
         const sel_color = if (focused) colors.selection else colors.selection_unfocused;
 
         {
@@ -443,7 +457,7 @@ pub const Slot = struct {
 
                 // Text: shape the expanded line, then draw it in colored runs.
                 self.glyphs.clearRetainingCapacity();
-                _ = self.env.text.shape(m.font, m.size, self.display.items, &self.glyphs, self.gpa) catch break;
+                _ = self.ui.text.shape(m.font, m.size, self.display.items, &self.glyphs, self.ui.gpa) catch break;
                 const baseline = row_y + (m.line_h - (m.ascent + m.descent)) / 2 + m.ascent;
                 try self.emitLine(list, m, origin_x, baseline, row_y, line);
 
@@ -457,7 +471,7 @@ pub const Slot = struct {
             }
         }
 
-        if (self.block.props.line_numbers and geo.gutter_w > 0) {
+        if (self.props.line_numbers and geo.gutter_w > 0) {
             const gutter: Rect = .{ .x = abs.x + geo.pad.l, .y = abs.y + geo.pad.t, .w = geo.gutter_w, .h = geo.view_h };
             try list.pushClip(gutter);
             defer _ = list.popClip() catch {};
@@ -467,12 +481,12 @@ pub const Slot = struct {
                 const row_y = gutter.y + @as(f32, @floatFromInt(line)) * m.line_h - self.scroll_y;
                 const s = std.fmt.bufPrint(&self.number_buf, "{d}", .{line + 1}) catch continue;
                 self.glyphs.clearRetainingCapacity();
-                const r = self.env.text.shape(m.font, m.size, s, &self.glyphs, self.gpa) catch continue;
+                const r = self.ui.text.shape(m.font, m.size, s, &self.glyphs, self.ui.gpa) catch continue;
                 if (self.glyphs.items.len == 0) continue;
                 const baseline = row_y + (m.line_h - (m.ascent + m.descent)) / 2 + m.ascent;
                 const x = gutter.x + gutter.w - gutter_pad - r.width;
                 const color = if (line == head_line and focused) colors.gutter_text_active else colors.gutter_text;
-                try list.glyphRunAt(.{ .x = x, .y = row_y, .w = r.width, .h = m.line_h }, self.glyphs.items, .{ .x = x, .y = baseline }, color, m.font, m.size, !self.env.text.isMonospace(m.font));
+                try list.glyphRunAt(.{ .x = x, .y = row_y, .w = r.width, .h = m.line_h }, self.glyphs.items, .{ .x = x, .y = baseline }, color, m.font, m.size, !self.ui.text.isMonospace(m.font));
             }
         }
 
@@ -488,17 +502,17 @@ pub const Slot = struct {
     }
 
     /// x of a source byte within the line built by `buildLine`.
-    fn spanX(self: *const Slot, src_byte: u32) f32 {
+    fn spanX(self: *const CodeEditor, src_byte: u32) f32 {
         const idx = @min(@as(usize, src_byte), self.map.items.len - 1);
         return self.stopX(self.map.items[idx]);
     }
 
     /// Draw the shaped glyphs of the built line, split into runs by token color.
-    fn emitLine(self: *Slot, list: *DrawList, m: Metrics, origin_x: f32, baseline: f32, row_y: f32, line: usize) draw_list.Error!void {
+    fn emitLine(self: *CodeEditor, list: *DrawList, m: Metrics, origin_x: f32, baseline: f32, row_y: f32, line: usize) draw_list.Error!void {
         const glyphs = self.glyphs.items;
         if (glyphs.len == 0) return;
-        const colors = self.env.theme.editor;
-        const subpixel = !self.env.text.isMonospace(m.font);
+        const colors = self.ui.theme.editor;
+        const subpixel = !self.ui.text.isMonospace(m.font);
         const bounds: Rect = .{ .x = origin_x, .y = row_y, .w = self.stopX(std.math.maxInt(usize)), .h = m.line_h };
         const plain = colors.tokenColor(.plain);
 
@@ -534,19 +548,19 @@ pub const Slot = struct {
 
     // ---- events ----------------------------------------------------------------------------
 
-    fn copy(self: *Slot) void {
-        const cb = self.env.clipboard.* orelse return;
+    fn copy(self: *CodeEditor) void {
+        const cb = self.ui.clipboard orelse return;
         if (!self.editor.hasSelectedText()) return;
-        const text = self.editor.selectedText(self.gpa) catch return;
-        defer self.gpa.free(text);
+        const text = self.editor.selectedText(self.ui.gpa) catch return;
+        defer self.ui.gpa.free(text);
         cb.set(cb.ctx, text);
     }
 
-    pub fn handleEvent(self: *Slot, ev: *event.Event) void {
-        const props = &self.block.props;
-        const out = &self.block.out;
+    pub fn handleEvent(self: *CodeEditor, ev: *event.Event) void {
+        const props = &self.props;
+        const out = &self.out;
         const ed = &self.editor;
-        const now = self.env.now_ms.*;
+        const now = self.ui.now_ms;
 
         switch (ev.kind) {
             .focus_in => {
@@ -600,11 +614,11 @@ pub const Slot = struct {
         }
     }
 
-    fn key(self: *Slot, ev: *event.Event) void {
-        const props = &self.block.props;
+    fn key(self: *CodeEditor, ev: *event.Event) void {
+        const props = &self.props;
         if (!props.enabled) return;
         const ed = &self.editor;
-        const now = self.env.now_ms.*;
+        const now = self.ui.now_ms;
         const shift = ev.mods.shift;
         const ctrl = ev.mods.ctrl;
         const alt = ev.mods.alt;
@@ -675,9 +689,9 @@ pub const Slot = struct {
                     if (writable) edited = ed.deleteSelections(now) catch false;
                 } else break :blk false,
                 .v => if (cmd and writable) {
-                    if (self.env.clipboard.*) |cb| {
-                        if (cb.get(cb.ctx, self.gpa)) |bytes| {
-                            defer self.gpa.free(bytes);
+                    if (self.ui.clipboard) |cb| {
+                        if (cb.get(cb.ctx, self.ui.gpa)) |bytes| {
+                            defer self.ui.gpa.free(bytes);
                             edited = ed.paste(bytes, now) catch false;
                         }
                     }
@@ -704,8 +718,8 @@ pub const Slot = struct {
     // ---- timing --------------------------------------------------------------------------------
 
     /// Blink the caret. Returns true if the blink phase changed.
-    pub fn tick(self: *Slot, now: u64) bool {
-        if (!self.block.out.focused or !self.block.props.enabled) return false;
+    pub fn tick(self: *CodeEditor, now: u64) bool {
+        if (!self.out.focused or !self.props.enabled) return false;
         if (now -% self.blink_at >= blink_ms) {
             self.blink_on = !self.blink_on;
             self.blink_at = now;
@@ -715,17 +729,17 @@ pub const Slot = struct {
         return false;
     }
 
-    pub fn msUntilBlink(self: *const Slot, now: u64) ?u64 {
-        if (!self.block.out.focused or !self.block.props.enabled) return null;
+    pub fn msUntilBlink(self: *const CodeEditor, now: u64) ?u64 {
+        if (!self.out.focused or !self.props.enabled) return null;
         const elapsed = now -% self.blink_at;
         return if (elapsed >= blink_ms) 1 else blink_ms - elapsed;
     }
 
     /// Caret rectangle in window coordinates, for IME placement.
-    pub fn caretRect(self: *Slot) ?Rect {
+    pub fn caretRect(self: *CodeEditor) ?Rect {
         const m = self.metrics() orelse return null;
         const geo = self.geometry(m);
-        const abs = self.env.tree.absoluteRect(self.block.node) orelse return null;
+        const abs = self.ui.tree.absoluteRect(self.node) orelse return null;
         const head = self.editor.primaryHead();
         const line = self.editor.doc.lineOfOffset(head);
         self.buildLine(line, m) catch return null;
@@ -733,4 +747,41 @@ pub const Slot = struct {
         const y = abs.y + geo.pad.t + @as(f32, @floatFromInt(line)) * m.line_h - self.scroll_y;
         return .{ .x = x, .y = y, .w = 1, .h = m.line_h };
     }
+
+    pub const Props = struct {
+        font: Font = .mono,
+        /// Em size in logical pixels; 0 uses the theme's size.
+        size: f32 = 0,
+        tab_width: u32 = 4,
+        enabled: bool = true,
+        read_only: bool = false,
+        line_numbers: bool = true,
+        auto_indent: bool = true,
+        /// Called after each user edit (typing, deleting, paste, undo/redo).
+        on_change: ?event.Callback = null,
+
+        pub const dirty_map = .{
+            .font = shadow.Category.paint,
+            .size = shadow.Category.paint,
+            .tab_width = shadow.Category.paint,
+            .enabled = shadow.Category.paint,
+            .read_only = shadow.Category.paint,
+            .line_numbers = shadow.Category.paint,
+        };
+    };
+
+    pub const Out = struct {
+        /// The user changed the text this frame.
+        changed: bool = false,
+        focused: bool = false,
+        hovered: bool = false,
+        /// Text differs from the last save point (see `markSaved`).
+        modified: bool = false,
+        change_count: u32 = 0,
+        line_count: u32 = 1,
+        /// 0-based line and column (code points) of the primary caret.
+        caret_line: u32 = 0,
+        caret_column: u32 = 0,
+        selection_count: u32 = 1,
+    };
 };

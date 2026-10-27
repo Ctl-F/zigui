@@ -92,20 +92,20 @@ fn openFile(a: *App, index: usize) void {
         std.log.warn("could not open {s}: {s}", .{ a.paths[index], @errorName(err) });
         return;
     };
-    a.ui.loadCodeEditorText(ed, bytes, true) catch {
+    ed.loadText(bytes, true) catch {
         a.gpa.free(bytes);
         return;
     };
     a.language = zigui.syntax.languageForPath(a.paths[index]);
-    a.ui.setCodeEditorLanguage(ed, a.language) catch {};
+    ed.setLanguage(a.language) catch {};
 }
 
 fn onSelectItem(ctx: *SidebarItem, _: *zigui.Event) void {
     const a = ctx.app;
     a.clicks += 1;
-    a.ui.setButtonVariant(a.items[a.selected], .flat);
+    a.items[a.selected].setVariant(.flat);
     a.selected = ctx.index;
-    a.ui.setButtonVariant(a.items[a.selected], .primary);
+    a.items[a.selected].setVariant(.primary);
     openFile(a, a.selected);
 }
 
@@ -144,11 +144,11 @@ fn cmdFocusFilter(a: *App, _: *zigui.Event) void {
 /// Esc in the filter: clear it, or leave it if it is already empty.
 fn cmdClearFilter(a: *App, _: *zigui.Event) void {
     const f = a.filter orelse return;
-    if (a.ui.textFieldText(f).len == 0) {
+    if (f.text().len == 0) {
         a.ui.setFocus(null);
         return;
     }
-    a.ui.setTextFieldText(f, "") catch return;
+    f.setText("") catch return;
     applyFilter(a);
 }
 
@@ -160,9 +160,9 @@ fn moveSelection(a: *App, step: isize) void {
         if (i < 0 or i >= n) return;
         if (!a.ui.tree.get(a.items[@intCast(i)].node).?.flags.hidden) break;
     }
-    a.ui.setButtonVariant(a.items[a.selected], .flat);
+    a.items[a.selected].setVariant(.flat);
     a.selected = @intCast(i);
-    a.ui.setButtonVariant(a.items[a.selected], .primary);
+    a.items[a.selected].setVariant(.primary);
     a.ui.setFocus(a.items[a.selected].node);
     a.clicks += 1;
     openFile(a, a.selected);
@@ -208,7 +208,7 @@ fn setupCommands(a: *App) !void {
     // Header buttons run the same commands, so they stay in sync with shortcuts.
     const linked = [_][]const u8{ "cards.add", "cards.remove", "view.sidebar" };
     for (a.buttons, linked) |b, name| {
-        try ui.setButtonCommand(b, name);
+        try b.setCommand(name);
         var buf: [48]u8 = undefined;
         const title = ui.commands.get(ui.commands.find(name).?).?.title;
         var label_buf: [96]u8 = undefined;
@@ -216,7 +216,7 @@ fn setupCommands(a: *App) !void {
             std.fmt.bufPrint(&label_buf, "{s}   {s}", .{ title, sc }) catch title
         else
             title;
-        try ui.setButtonText(b, text);
+        try b.setText(text);
     }
 }
 
@@ -226,7 +226,7 @@ fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
 
 fn applyFilter(a: *App) void {
     const f = a.filter orelse return;
-    const needle = a.ui.textFieldText(f);
+    const needle = f.text();
     for (a.items, a.names) |b, name| a.ui.setHidden(b.node, !containsIgnoreCase(name, needle));
 }
 
@@ -239,9 +239,9 @@ fn onFilterSubmit(a: *App, _: *zigui.Event) void {
     a.clicks += 1;
     for (a.items, 0..) |b, i| {
         if (a.ui.tree.get(b.node).?.flags.hidden) continue;
-        a.ui.setButtonVariant(a.items[a.selected], .flat);
+        a.items[a.selected].setVariant(.flat);
         a.selected = i;
-        a.ui.setButtonVariant(b, .primary);
+        b.setVariant(.primary);
         openFile(a, i);
         return;
     }
@@ -264,18 +264,18 @@ fn buildUi(a: *App) !void {
     const variants = [_]zigui.button.Variant{ .primary, .normal, .normal };
     for (&a.buttons, variants) |*slot, variant| {
         const b = try ui.createButton(header, .{ .padding = Edges.xy(14, 0), .shrink = 0 });
-        ui.setButtonVariant(b, variant);
+        b.setVariant(variant);
         slot.* = b;
     }
     _ = try a.addNode(header, .{ .grow = 1 }, .{});
     const filter = try ui.createTextField(header, .{ .width = Length.px(220), .padding = Edges.xy(8, 0), .shrink = 0 });
-    try ui.setTextFieldPlaceholder(filter, "Filter files...");
+    try filter.setPlaceholder("Filter files...");
     filter.props.on_change = .bind(a, onFilterChanged);
     filter.props.on_submit = .bind(a, onFilterSubmit);
     a.filter = filter;
     const disabled = try ui.createButton(header, .{ .padding = Edges.xy(14, 0), .shrink = 0 });
-    try ui.setButtonText(disabled, "Disabled");
-    ui.setButtonEnabled(disabled, false);
+    try disabled.setText("Disabled");
+    disabled.setEnabled(false);
 
     // Body.
     a.body = try a.addNode(tree.root, .{
@@ -303,11 +303,11 @@ fn buildUi(a: *App) !void {
             .padding = Edges.xy(10, 0),
             .margin = .{ .left = Length.px(indent) },
         });
-        try ui.setButtonText(b, names[i]);
+        try b.setText(names[i]);
         a.names[i] = names[i];
         a.paths[i] = paths[i];
         b.props.text_align = .start;
-        ui.setButtonVariant(b, if (i == a.selected) .primary else .flat);
+        b.setVariant(if (i == a.selected) .primary else .flat);
         a.items[i] = b;
         a.item_ctx[i] = .{ .app = a, .index = i };
         b.props.on_click = .bind(&a.item_ctx[i], onSelectItem);
@@ -476,7 +476,7 @@ pub fn main(init: std.process.Init) !void {
             if (!std.mem.eql(u8, msg, state.last_status[0..state.last_status_len])) {
                 @memcpy(state.last_status[0..msg.len], msg);
                 state.last_status_len = msg.len;
-                try ui.setLabelText(st, msg);
+                try st.setText(msg);
                 var tbuf: [96]u8 = undefined;
                 const title = std.mem.printSentinel(&tbuf, "zigui demo - {s}{s}", .{ state.names[state.selected], if (ed.out.modified) " *" else "" }, 0) catch "zigui demo";
                 window.setTitle(title);

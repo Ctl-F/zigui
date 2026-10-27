@@ -1,12 +1,14 @@
 //! Types shared by several widgets.
 
-/// Toolkit-owned string: set it through the `Ui` setters, which copy.
-pub const Text = extern struct {
-    ptr: ?[*]const u8 = null,
-    len: usize = 0,
+/// Toolkit-owned widget text. Do not construct one yourself: set text through
+/// the widget's setter (`button.setText(...)`), which copies the bytes into
+/// storage the toolkit owns and frees. A literal assigned here directly would
+/// be freed later by the toolkit, which is why this is a wrapper and not a bare
+/// `[]const u8`.
+pub const Text = struct {
+    bytes: []const u8 = "",
 
     pub fn slice(self: Text) []const u8 {
-        const p = self.ptr orelse return "";
-        return p[0..self.len];
+        return self.bytes;
     }
 };

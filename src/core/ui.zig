@@ -23,71 +23,29 @@ const keys = @import("keys.zig");
 const paint = @import("paint.zig");
 const DrawList = @import("draw_list.zig").DrawList;
 const shadow = @import("shadow.zig");
-const button = @import("../widgets/button.zig");
-const Theme = @import("../widgets/theme.zig").Theme;
-const label = @import("../widgets/label.zig");
-const Text = @import("../widgets/common.zig").Text;
+const event_types = @import("event.zig");
+const commands_mod = @import("commands.zig");
+const shortcuts_mod = @import("shortcuts.zig");
 const font = @import("../text/font.zig");
 const TextSystem = @import("../text/system.zig").TextSystem;
 const text_block = @import("../text/block.zig");
 const Color = geometry.Color;
+const Theme = @import("../widgets/theme.zig").Theme;
+const Text = @import("../widgets/common.zig").Text;
+const button = @import("../widgets/button.zig");
+const label = @import("../widgets/label.zig");
 const text_field = @import("../widgets/text_field.zig");
 const code_editor = @import("../widgets/code_editor.zig");
-const EditorCore = @import("../editor/editor.zig").Editor;
-const style_mod = @import("style.zig");
-const LineEditor = @import("../text/line_editor.zig").LineEditor;
-const Stop = @import("../text/system.zig").Stop;
-const layout_mod = @import("layout.zig");
-const event_types = @import("event.zig");
-const commands_mod = @import("commands.zig");
-const shortcuts_mod = @import("shortcuts.zig");
 
 pub const Scope = shortcuts_mod.Scope;
 pub const BindError = shortcuts_mod.BindError;
 pub const LoadReport = shortcuts_mod.LoadReport;
-
-/// A button's link to a command: clicking the button runs the command.
-const CommandLink = struct {
-    ui: *Ui,
-    name: []u8,
-};
-
-const Button = button.Button;
-const Label = label.Label;
-const TextField = text_field.TextField;
-const CodeEditor = code_editor.CodeEditor;
-
-/// How long the caret stays on or off, in milliseconds.
-const blink_ms: u64 = 530;
-
 pub const Clipboard = @import("clipboard.zig").Clipboard;
 
-const FieldSlot = struct {
-    block: TextField,
-    checker: shadow.Checker(TextField.Props),
-    editor: LineEditor,
-    stops: std.ArrayListUnmanaged(Stop) = .empty,
-    ui: *Ui,
-    /// Content changed: reshape and recompute caret stops.
-    text_dirty: bool = true,
-    stops_font: u32 = std.math.maxInt(u32),
-    stops_size: f32 = 0,
-    scroll_x: f32 = 0,
-    blink_on: bool = true,
-    blink_at: u64 = 0,
-    dragging: bool = false,
-};
-
-const ButtonSlot = struct {
-    block: Button,
-    checker: shadow.Checker(Button.Props),
-    link: ?*CommandLink = null,
-};
-
-const LabelSlot = struct {
-    block: Label,
-    checker: shadow.Checker(Label.Props),
-};
+pub const Button = button.Button;
+pub const Label = label.Label;
+pub const TextField = text_field.TextField;
+pub const CodeEditor = code_editor.CodeEditor;
 
 pub const Ui = struct {
     gpa: std.mem.Allocator,
@@ -96,10 +54,10 @@ pub const Ui = struct {
     layout: Layout,
     input: Input = .{},
     theme: Theme = .{},
-    buttons: Pool(ButtonSlot, 64),
-    labels: Pool(LabelSlot, 64),
-    fields: Pool(FieldSlot, 64),
-    editors: Pool(code_editor.Slot, 16),
+    buttons: Pool(Button, 64),
+    labels: Pool(Label, 64),
+    fields: Pool(TextField, 64),
+    editors: Pool(CodeEditor, 16),
     clipboard: ?Clipboard = null,
     /// Last time passed to `tick`, in milliseconds.
     now_ms: u64 = 0,
@@ -114,409 +72,123 @@ pub const Ui = struct {
             .text = TextSystem.init(gpa),
             .tree = tree,
             .layout = Layout.init(gpa),
-            .buttons = Pool(ButtonSlot, 64).init(gpa),
-            .labels = Pool(LabelSlot, 64).init(gpa),
-            .fields = Pool(FieldSlot, 64).init(gpa),
-            .editors = Pool(code_editor.Slot, 16).init(gpa),
+            .buttons = Pool(Button, 64).init(gpa),
+            .labels = Pool(Label, 64).init(gpa),
+            .fields = Pool(TextField, 64).init(gpa),
+            .editors = Pool(CodeEditor, 16).init(gpa),
             .commands = commands_mod.Commands.init(gpa),
             .shortcuts = shortcuts_mod.Shortcuts.init(gpa),
         };
     }
 
     pub fn deinit(self: *Ui) void {
-        var it = self.buttons.iterator();
-        while (it.next()) |e| {
-            self.freeText(&e.ptr.block.props.text);
-            self.freeLink(e.ptr);
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors }) |pool| {
+            var it = pool.iterator();
+            while (it.next()) |e| e.ptr.deinit();
+            pool.deinit();
         }
-        self.buttons.deinit();
         self.shortcuts.deinit();
         self.commands.deinit();
-        var lit = self.labels.iterator();
-        while (lit.next()) |e| self.freeText(&e.ptr.block.props.text);
-        self.labels.deinit();
-        var fit = self.fields.iterator();
-        while (fit.next()) |e| self.freeField(e.ptr);
-        self.fields.deinit();
-        var eit = self.editors.iterator();
-        while (eit.next()) |e| e.ptr.deinit();
-        self.editors.deinit();
         self.text.deinit();
         self.layout.deinit();
         self.tree.deinit();
         self.* = undefined;
     }
 
-    // ---- buttons ----------------------------------------------------------
+    // ---- creating widgets --------------------------------------------------------
 
-    /// Create a button node under `parent`. The returned pointer is stable
-    /// until the button's node is destroyed (the block is reclaimed in `update`).
-    pub fn createButton(self: *Ui, parent: Handle, style: Style) !*Button {
-        const node_h = try self.tree.create(.{ .role = .button, .flags = .{ .focusable = true }, .style = style });
+    /// Create a widget of type `W` (any of `Button`, `Label`, `TextField`,
+    /// `CodeEditor`): its node, its state, and its event listeners. The
+    /// returned pointer is stable until the widget's node is destroyed (the
+    /// state is reclaimed in `update`).
+    fn createWidget(self: *Ui, comptime W: type, pool: anytype, parent: Handle, node: tree_mod.Node) !*W {
+        const node_h = try self.tree.create(node);
         errdefer _ = self.tree.destroySubtree(node_h);
         try self.tree.appendChild(parent, node_h);
 
-        var block: Button = .{ .node = node_h };
-        const slot_h = try self.buttons.create(.{ .block = block, .checker = shadow.Checker(Button.Props).init(&block.props) });
-        const slot = self.buttons.get(slot_h).?;
-        errdefer _ = self.buttons.destroy(slot_h);
-        for (button.listened_kinds) |kind| {
-            try self.tree.addListener(node_h, .{ .kind = kind, .callback = event_types.Callback.bind(&slot.block, button.handleEvent) });
+        const h = try pool.create(W.init(self, node_h));
+        errdefer _ = pool.destroy(h);
+        const w = pool.get(h).?;
+        errdefer w.deinit();
+        for (W.listened_kinds) |kind| {
+            try self.tree.addListener(node_h, .{ .kind = kind, .callback = event_types.Callback.bind(w, W.handleEvent) });
         }
-        return &slot.block;
+        return w;
     }
 
-    fn freeText(self: *Ui, t: *Text) void {
-        if (t.ptr) |p| self.gpa.free(p[0..t.len]);
-        t.* = .{};
+    pub fn createButton(self: *Ui, parent: Handle, style: Style) !*Button {
+        return self.createWidget(Button, &self.buttons, parent, .{ .role = .button, .flags = .{ .focusable = true }, .style = style });
     }
-
-    /// Replace a widget's text with a toolkit-owned copy of `text`.
-    fn replaceText(self: *Ui, t: *Text, text: []const u8) !void {
-        const copy = try self.gpa.dupe(u8, text);
-        self.freeText(t);
-        t.* = .{ .ptr = copy.ptr, .len = copy.len };
-    }
-
-    /// Copy `text` into toolkit-owned storage; the caller may free its own copy.
-    pub fn setButtonText(self: *Ui, b: *Button, text: []const u8) !void {
-        try self.replaceText(&b.props.text, text);
-        self.tree.markDirty(b.node, DirtyFlags.layout_and_paint);
-    }
-
-    // ---- labels -----------------------------------------------------------
 
     pub fn createLabel(self: *Ui, parent: Handle, style: Style, text: []const u8) !*Label {
         const node_h = try self.tree.create(.{ .role = .label, .style = style });
         errdefer _ = self.tree.destroySubtree(node_h);
         try self.tree.appendChild(parent, node_h);
-
-        var blk: Label = .{ .node = node_h };
-        const slot_h = try self.labels.create(.{ .block = blk, .checker = shadow.Checker(Label.Props).init(&blk.props) });
-        errdefer _ = self.labels.destroy(slot_h);
-        const slot = self.labels.get(slot_h).?;
-        try self.replaceText(&slot.block.props.text, text);
-        slot.checker.sync(&slot.block.props);
-        return &slot.block;
+        const h = try self.labels.create(Label.init(self, node_h));
+        errdefer _ = self.labels.destroy(h);
+        const l = self.labels.get(h).?;
+        errdefer l.deinit();
+        try l.setText(text);
+        l.checker.sync(&l.props);
+        return l;
     }
 
-    pub fn setLabelText(self: *Ui, l: *Label, text: []const u8) !void {
-        try self.replaceText(&l.props.text, text);
-        self.tree.markDirty(l.node, DirtyFlags.layout_and_paint);
-    }
-
-    // ---- text fields ------------------------------------------------------
-
-    /// Create a single-line text field. The `Ui` must not be moved afterwards
-    /// (the field's handlers keep a pointer to it).
+    /// Create a single-line text field.
     pub fn createTextField(self: *Ui, parent: Handle, style: Style) !*TextField {
-        const node_h = try self.tree.create(.{
+        return self.createWidget(TextField, &self.fields, parent, .{
             .role = .text_field,
             .cursor = .text,
             .flags = .{ .focusable = true, .clip_children = true, .accepts_text = true },
             .style = style,
         });
-        errdefer _ = self.tree.destroySubtree(node_h);
-        try self.tree.appendChild(parent, node_h);
+    }
 
-        var blk: TextField = .{ .node = node_h };
-        const slot_h = try self.fields.create(.{
-            .block = blk,
-            .checker = shadow.Checker(TextField.Props).init(&blk.props),
-            .editor = LineEditor.init(self.gpa),
-            .ui = self,
+    /// Create a multi-line code editor. It fills the style's size.
+    pub fn createCodeEditor(self: *Ui, parent: Handle, style: Style) !*CodeEditor {
+        const ed = try self.createWidget(CodeEditor, &self.editors, parent, .{
+            .role = .text_field,
+            .cursor = .text,
+            .flags = .{ .focusable = true, .clip_children = true, .accepts_text = true },
+            .style = style,
         });
-        const slot = self.fields.get(slot_h).?;
-        errdefer {
-            self.freeField(slot);
-            _ = self.fields.destroy(slot_h);
-        }
-        for (field_kinds) |kind| {
-            try self.tree.addListener(node_h, .{ .kind = kind, .callback = event_types.Callback.bind(slot, fieldEvent) });
-        }
-        return &slot.block;
+        self.tree.get(ed.node).?.paint_hook = .{ .ctx = ed, .run = CodeEditor.paintHook };
+        return ed;
     }
 
-    fn slotOf(tf: *TextField) *FieldSlot {
-        return @fieldParentPtr("block", tf);
+    // ---- shared widget helpers (used by widget implementations) ---------------------
+
+    pub fn freeText(self: *Ui, t: *Text) void {
+        if (t.bytes.len > 0) self.gpa.free(t.bytes);
+        t.* = .{};
     }
 
-    fn freeField(self: *Ui, slot: *FieldSlot) void {
-        self.freeText(&slot.block.props.placeholder);
-        slot.stops.deinit(self.gpa);
-        slot.editor.deinit();
+    /// Replace a widget's text with a toolkit-owned copy of `text`.
+    pub fn replaceText(self: *Ui, t: *Text, text: []const u8) !void {
+        const copy = try self.gpa.dupe(u8, text);
+        self.freeText(t);
+        t.* = .{ .bytes = copy };
     }
 
-    /// The field's current text. Valid until the next edit or `setTextFieldText`.
-    pub fn textFieldText(self: *Ui, tf: *TextField) []const u8 {
-        _ = self;
-        return slotOf(tf).editor.text();
+    /// Shadow-check raw prop writes; fold any missing dirty bits into the tree.
+    pub fn verifyProps(self: *Ui, h: Handle, checker: anytype, props: anytype, name: []const u8) void {
+        const node = self.tree.get(h).?;
+        var flags = node.dirty;
+        checker.verify(props, &flags, name);
+        const added = DirtyFlags.fromBits(flags.bits() & ~node.dirty.bits());
+        if (!added.isClean()) self.tree.markDirty(h, added);
     }
 
-    /// Replace the content (caret to the end). This is not a user edit: it does
-    /// not set `out.changed` or call `on_change`.
-    pub fn setTextFieldText(self: *Ui, tf: *TextField, text: []const u8) !void {
-        const slot = slotOf(tf);
-        try slot.editor.setText(text);
-        self.touchField(slot);
-    }
-
-    pub fn setTextFieldPlaceholder(self: *Ui, tf: *TextField, text: []const u8) !void {
-        try self.replaceText(&tf.props.placeholder, text);
-        self.tree.markDirty(tf.node, DirtyFlags.layout_and_paint);
-    }
-
-    fn touchField(self: *Ui, slot: *FieldSlot) void {
-        slot.text_dirty = true;
-        slot.blink_on = true;
-        slot.blink_at = self.now_ms;
-        self.tree.markDirty(slot.block.node, DirtyFlags.layout_and_paint);
-    }
-
-    /// Caret movement or selection change: repaint, keep the caret visible.
-    fn touchCaret(self: *Ui, slot: *FieldSlot) void {
-        slot.blink_on = true;
-        slot.blink_at = self.now_ms;
-        self.tree.markDirty(slot.block.node, DirtyFlags.paint_only);
-    }
-
-    const field_kinds = [_]event_types.EventKind{
-        .focus_in, .focus_out, .pointer_enter, .pointer_leave,
-        .pointer_down, .pointer_move, .pointer_up, .key_down, .text_input,
-    };
-
-    /// Byte offset of the caret stop nearest to `x` (relative to the text origin).
-    fn byteAtX(stops: []const Stop, x: f32) usize {
-        var best: usize = 0;
-        var best_d: f32 = std.math.inf(f32);
-        for (stops) |st| {
-            const d = @abs(st.x - x);
-            if (d < best_d) {
-                best_d = d;
-                best = st.byte;
-            }
-        }
-        return best;
-    }
-
-    fn fieldEvent(slot: *FieldSlot, ev: *event_types.Event) void {
-        const self = slot.ui;
-        const props = &slot.block.props;
-        const out = &slot.block.out;
-        const ed = &slot.editor;
-
-        switch (ev.kind) {
-            .focus_in => {
-                out.focused = true;
-                self.touchCaret(slot);
-            },
-            .focus_out => {
-                out.focused = false;
-                slot.dragging = false;
-                self.touchCaret(slot);
-            },
-            .pointer_enter => out.hovered = true,
-            .pointer_leave => out.hovered = false,
-            .pointer_down => if (props.enabled and ev.button == 1) {
-                // Not marked handled: the default action focuses the field.
-                const node = self.tree.get(slot.block.node).?;
-                const pad = layout_mod.resolveEdges(node.style.padding, null);
-                const byte = byteAtX(slot.stops.items, ev.local_x - pad.l + slot.scroll_x);
-                if (ev.clicks >= 3) {
-                    ed.selectAll();
-                } else if (ev.clicks == 2) {
-                    ed.selectWordAt(byte);
-                } else {
-                    ed.setCaret(byte, ev.mods.shift);
-                }
-                slot.dragging = true;
-                self.touchCaret(slot);
-            },
-            .pointer_move => if (slot.dragging) {
-                const node = self.tree.get(slot.block.node).?;
-                const pad = layout_mod.resolveEdges(node.style.padding, null);
-                ed.setCaret(byteAtX(slot.stops.items, ev.local_x - pad.l + slot.scroll_x), true);
-                self.touchCaret(slot);
-            },
-            .pointer_up => slot.dragging = false,
-            .text_input => if (props.enabled and !props.read_only) {
-                const changed = ed.insert(ev.text) catch false;
-                if (changed) self.afterEdit(slot, ev);
-            },
-            .key_down => self.fieldKey(slot, ev),
-            else => {},
-        }
-    }
-
-    fn fieldKey(self: *Ui, slot: *FieldSlot, ev: *event_types.Event) void {
-        const props = &slot.block.props;
-        if (!props.enabled) return;
-        const ed = &slot.editor;
-        const shift = ev.mods.shift;
-        const cmd = ev.mods.any(.{ .ctrl = true, .gui = true });
-        const word = ev.mods.any(.{ .ctrl = true, .alt = true });
-        const writable = !props.read_only;
-        var edited = false;
-
-        switch (ev.key) {
-            .left => ed.moveLeft(shift, word),
-            .right => ed.moveRight(shift, word),
-            .home => ed.home(shift),
-            .end => ed.end(shift),
-            .backspace => if (writable) {
-                edited = ed.deleteBackward(word);
-            },
-            .delete => if (writable) {
-                edited = ed.deleteForward(word);
-            },
-            .a => if (cmd) ed.selectAll() else return,
-            .c => if (cmd) self.copySelection(slot) else return,
-            .x => if (cmd) {
-                self.copySelection(slot);
-                if (writable) edited = ed.deleteSelection();
-            } else return,
-            .v => if (cmd) {
-                if (writable) edited = self.pasteInto(slot);
-            } else return,
-            .enter => {
-                slot.block.out.submitted = true;
-                slot.block.out.submit_count +%= 1;
-                if (props.on_submit) |cb| cb.invoke(ev);
-            },
-            else => return,
-        }
-        ev.markHandled();
-        if (edited) self.afterEdit(slot, ev) else self.touchCaret(slot);
-    }
-
-    fn afterEdit(self: *Ui, slot: *FieldSlot, ev: *event_types.Event) void {
-        self.touchField(slot);
-        slot.block.out.changed = true;
-        slot.block.out.change_count +%= 1;
-        if (slot.block.props.on_change) |cb| cb.invoke(ev);
-    }
-
-    fn copySelection(self: *Ui, slot: *FieldSlot) void {
-        const cb = self.clipboard orelse return;
-        if (!slot.editor.hasSelection()) return;
-        cb.set(cb.ctx, slot.editor.selectedText());
-    }
-
-    /// Paste the clipboard (newlines and tabs become spaces). True if text changed.
-    fn pasteInto(self: *Ui, slot: *FieldSlot) bool {
-        const cb = self.clipboard orelse return false;
-        const bytes = cb.get(cb.ctx, self.gpa) orelse return false;
-        defer self.gpa.free(bytes);
-        for (bytes) |*b| {
-            if (b.* == '\n' or b.* == '\r' or b.* == '\t') b.* = ' ';
-        }
-        return slot.editor.insert(bytes) catch false;
-    }
-
-    /// Per-frame sync for one field: reshape if needed, scroll the caret into
-    /// view, and publish selection and caret as paint decorations.
-    fn updateField(self: *Ui, slot: *FieldSlot) void {
-        const blk = &slot.block;
-        const node = self.tree.get(blk.node).?;
-        self.verifyProps(blk.node, &slot.checker, &blk.props, "text_field");
-        node.flags.focusable = blk.props.enabled;
-
-        const colors = self.theme.field;
-        const f = switch (blk.props.font) {
-            .ui => self.theme.ui_font,
-            .mono => self.theme.mono_font,
-        };
-        const size = if (blk.props.size > 0) blk.props.size else self.theme.font_size;
-        if (f >= self.text.fonts.items.len) return;
-
-        const content = slot.editor.text();
-        if (slot.text_dirty or slot.stops_font != f or slot.stops_size != size) {
-            slot.stops.clearRetainingCapacity();
-            _ = self.text.boundaries(f, size, content, &slot.stops, self.gpa) catch {};
-            slot.stops_font = f;
-            slot.stops_size = size;
-        }
-        const empty = content.len == 0;
-        const shown: Text = if (empty)
-            blk.props.placeholder
-        else
-            .{ .ptr = content.ptr, .len = content.len };
-        const color = if (!blk.props.enabled) colors.text_disabled else if (empty) colors.placeholder else colors.text;
-        self.syncTextEx(blk.node, shown, f, size, color, .start, .{ .force = slot.text_dirty, .keep_empty = true });
-        slot.text_dirty = false;
-
-        // Look.
-        const is_focused = blk.out.focused and blk.props.enabled;
-        const look: style_mod.Visual = .{
-            .background = if (blk.props.enabled) colors.background else colors.background_disabled,
-            .border_color = if (is_focused) colors.border_focus else colors.border,
-            .border_width = 1,
-            .radius = self.theme.corner_radius,
-        };
-        if (!std.mem.eql(u8, std.mem.asBytes(&look), std.mem.asBytes(&node.visual))) {
-            node.visual = look;
-            self.tree.markDirty(blk.node, DirtyFlags.paint_only);
-        }
-
-        // Out block.
-        const sel = slot.editor.selection();
-        blk.out.caret = @intCast(slot.editor.caret);
-        blk.out.sel_start = @intCast(sel.start);
-        blk.out.sel_end = @intCast(sel.end);
-
-        // Decorations and horizontal scroll.
-        const text_node = node.text orelse return;
-        const pad = layout_mod.resolveEdges(node.style.padding, null);
-        const view_w = @max(node.rect.w - pad.l - pad.r, 0);
-        const caret_x = stopX(slot.stops.items, slot.editor.caret);
-        const total = if (slot.stops.items.len > 0) slot.stops.items[slot.stops.items.len - 1].x else 0;
-        if (view_w > 0) {
-            if (caret_x - slot.scroll_x > view_w - 1) slot.scroll_x = caret_x - view_w + 1;
-            if (caret_x - slot.scroll_x < 0) slot.scroll_x = caret_x;
-            slot.scroll_x = std.math.clamp(slot.scroll_x, 0, @max(total - view_w + 1, 0));
-        }
-        var decor: text_block.Decor = .{ .scroll_x = slot.scroll_x };
-        if (is_focused) {
-            if (slot.editor.hasSelection()) {
-                decor.sel_on = true;
-                decor.sel_x0 = stopX(slot.stops.items, sel.start);
-                decor.sel_x1 = stopX(slot.stops.items, sel.end);
-                decor.sel_color = colors.selection;
-            } else if (slot.blink_on and !blk.props.read_only) {
-                decor.caret_on = true;
-                decor.caret_x = caret_x;
-                decor.caret_color = colors.caret;
-            }
-        }
-        if (!std.mem.eql(u8, std.mem.asBytes(&decor), std.mem.asBytes(&text_node.decor))) {
-            text_node.decor = decor;
-            self.tree.markDirty(blk.node, DirtyFlags.paint_only);
-        }
-    }
-
-    /// x of the caret stop at byte offset `byte` (stops are sorted by byte).
-    fn stopX(stops: []const Stop, byte: usize) f32 {
-        for (stops) |st| if (st.byte >= byte) return st.x;
-        return if (stops.len > 0) stops[stops.len - 1].x else 0;
-    }
+    // ---- timing, IME, cursor ---------------------------------------------------------
 
     /// Advance time-based state (caret blink). Returns true if something that
-    /// affects painting changed; `update` then marks the field dirty.
+    /// affects painting changed; `update` then marks the widget dirty.
     pub fn tick(self: *Ui, now_ms: u64) bool {
         self.now_ms = now_ms;
         var changed = false;
-        var it = self.fields.iterator();
-        while (it.next()) |e| {
-            const slot = e.ptr;
-            if (!slot.block.out.focused or !slot.block.props.enabled) continue;
-            if (now_ms -% slot.blink_at >= blink_ms) {
-                slot.blink_on = !slot.blink_on;
-                slot.blink_at = now_ms;
-                changed = true;
-            }
+        inline for (.{ &self.fields, &self.editors }) |pool| {
+            var it = pool.iterator();
+            while (it.next()) |e| changed = e.ptr.tick(now_ms) or changed;
         }
-        var eit = self.editors.iterator();
-        while (eit.next()) |e| changed = e.ptr.tick(now_ms) or changed;
         return changed;
     }
 
@@ -524,41 +196,27 @@ pub const Ui = struct {
     /// nothing needs one. Use as the event-wait timeout.
     pub fn nextWakeMs(self: *Ui) ?u32 {
         var best: ?u64 = null;
-        var it = self.fields.iterator();
-        while (it.next()) |e| {
-            const slot = e.ptr;
-            if (!slot.block.out.focused or !slot.block.props.enabled) continue;
-            const elapsed = self.now_ms -% slot.blink_at;
-            const left = if (elapsed >= blink_ms) 1 else blink_ms - elapsed;
-            if (best == null or left < best.?) best = left;
-        }
-        var eit = self.editors.iterator();
-        while (eit.next()) |e| {
-            if (e.ptr.msUntilBlink(self.now_ms)) |left| {
-                if (best == null or left < best.?) best = left;
+        inline for (.{ &self.fields, &self.editors }) |pool| {
+            var it = pool.iterator();
+            while (it.next()) |e| {
+                if (e.ptr.msUntilBlink(self.now_ms)) |left| {
+                    if (best == null or left < best.?) best = left;
+                }
             }
         }
         return if (best) |b| @intCast(b) else null;
     }
 
-    /// Where the text caret is, in window coordinates, if a text field has
+    /// Where the text caret is, in window coordinates, if a text widget has
     /// focus. The platform uses this to enable text input and place IME popups;
     /// null means text input is not wanted.
     pub fn textInputRect(self: *Ui) ?geometry.Rect {
         const h = self.focused() orelse return null;
-        var eit = self.editors.iterator();
-        while (eit.next()) |e| {
-            if (Handle.eql(e.ptr.block.node, h) and e.ptr.block.props.enabled) return e.ptr.caretRect();
-        }
-        var it = self.fields.iterator();
-        while (it.next()) |e| {
-            const slot = e.ptr;
-            if (!Handle.eql(slot.block.node, h) or !slot.block.props.enabled) continue;
-            const abs = self.tree.absoluteRect(h) orelse return null;
-            const node = self.tree.get(h).?;
-            const pad = layout_mod.resolveEdges(node.style.padding, null);
-            const x = abs.x + pad.l + stopX(slot.stops.items, slot.editor.caret) - slot.scroll_x;
-            return .{ .x = x, .y = abs.y, .w = 1, .h = abs.h };
+        inline for (.{ &self.editors, &self.fields }) |pool| {
+            var it = pool.iterator();
+            while (it.next()) |e| {
+                if (Handle.eql(e.ptr.node, h) and e.ptr.props.enabled) return e.ptr.caretRect();
+            }
         }
         return null;
     }
@@ -572,106 +230,7 @@ pub const Ui = struct {
         return .default;
     }
 
-    // ---- code editor -------------------------------------------------------------
-
-    const editor_kinds = [_]event_types.EventKind{
-        .focus_in, .focus_out, .pointer_enter, .pointer_leave,
-        .pointer_down, .pointer_move, .pointer_up, .wheel, .key_down, .text_input,
-    };
-
-    /// Create a multi-line code editor. It fills the style's size; the `Ui` must
-    /// not be moved afterwards (the widget keeps pointers into it).
-    pub fn createCodeEditor(self: *Ui, parent: Handle, style: Style) !*CodeEditor {
-        const node_h = try self.tree.create(.{
-            .role = .text_field,
-            .cursor = .text,
-            .flags = .{ .focusable = true, .clip_children = true, .accepts_text = true },
-            .style = style,
-        });
-        errdefer _ = self.tree.destroySubtree(node_h);
-        try self.tree.appendChild(parent, node_h);
-
-        var blk: CodeEditor = .{ .node = node_h };
-        const slot_h = try self.editors.create(.{
-            .gpa = self.gpa,
-            .env = .{
-                .tree = &self.tree,
-                .text = &self.text,
-                .theme = &self.theme,
-                .clipboard = &self.clipboard,
-                .now_ms = &self.now_ms,
-            },
-            .block = blk,
-            .checker = shadow.Checker(CodeEditor.Props).init(&blk.props),
-            .editor = EditorCore.init(self.gpa),
-        });
-        const slot = self.editors.get(slot_h).?;
-        errdefer {
-            slot.deinit();
-            _ = self.editors.destroy(slot_h);
-        }
-        self.tree.get(node_h).?.paint_hook = .{ .ctx = slot, .run = code_editor.Slot.paintHook };
-        for (editor_kinds) |kind| {
-            try self.tree.addListener(node_h, .{ .kind = kind, .callback = event_types.Callback.bind(slot, code_editor.Slot.handleEvent) });
-        }
-        return &slot.block;
-    }
-
-    fn editorSlot(ed: *CodeEditor) *code_editor.Slot {
-        return @fieldParentPtr("block", ed);
-    }
-
-    /// The editor core (document, selections, history) behind a code editor.
-    /// Edits made through it directly should be followed by `touchCodeEditor`.
-    pub fn codeEditorCore(self: *Ui, ed: *CodeEditor) *EditorCore {
-        _ = self;
-        return &editorSlot(ed).editor;
-    }
-
-    /// Ask the widget to repaint (and keep the caret in view) after changing
-    /// its core directly.
-    pub fn touchCodeEditor(self: *Ui, ed: *CodeEditor) void {
-        _ = self;
-        const slot = editorSlot(ed);
-        slot.repaint = true;
-        slot.want_visible = true;
-    }
-
-    /// Replace the content with `bytes` as the opened file. If `owned`, the
-    /// editor frees it (with the Ui's allocator); otherwise it must outlive the
-    /// editor. History is cleared and the text counts as saved.
-    pub fn loadCodeEditorText(self: *Ui, ed: *CodeEditor, bytes: []const u8, owned: bool) !void {
-        const slot = editorSlot(ed);
-        const fresh = try EditorCore.initWithText(self.gpa, bytes, owned);
-        slot.editor.deinit();
-        slot.editor = fresh;
-        slot.scroll_x = 0;
-        slot.scroll_y = 0;
-        slot.last_version = 0;
-        slot.repaint = true;
-        slot.resetHighlighting();
-    }
-
-    /// Choose the syntax highlighting language for an editor (null for none).
-    /// Use `syntax.languageForPath` to pick one from a file name.
-    pub fn setCodeEditorLanguage(self: *Ui, ed: *CodeEditor, lang: ?*const @import("../editor/syntax.zig").Language) !void {
-        _ = self;
-        try editorSlot(ed).setLanguage(lang);
-    }
-
-    pub fn markCodeEditorSaved(self: *Ui, ed: *CodeEditor) void {
-        _ = self;
-        editorSlot(ed).editor.markSaved();
-    }
-
-    /// The whole text, allocated with `gpa`.
-    pub fn codeEditorText(self: *Ui, ed: *CodeEditor, gpa: std.mem.Allocator) ![]u8 {
-        _ = self;
-        const core = &editorSlot(ed).editor;
-        return core.doc.textAlloc(gpa, 0, core.doc.len());
-    }
-
-    // ---- fonts ------------------------------------------------------------
+    // ---- fonts and text ---------------------------------------------------------
 
     /// Register a font backend. The first font added becomes both theme fonts.
     pub fn addFont(self: *Ui, backend: font.Backend) !u32 {
@@ -685,18 +244,18 @@ pub const Ui = struct {
 
     /// Shape `text` for the node and set its intrinsic size, if it changed.
     /// Silently keeps the old text if allocation fails or no font exists.
-    fn syncText(self: *Ui, h: Handle, text: Text, f: u32, size: f32, color: Color, al: text_block.Align) void {
+    pub fn syncText(self: *Ui, h: Handle, text: Text, f: u32, size: f32, color: Color, al: text_block.Align) void {
         self.syncTextEx(h, text, f, size, color, al, .{});
     }
 
-    const SyncOpts = struct {
+    pub const SyncOpts = struct {
         /// Reshape even if the source slice looks unchanged (it was edited in place).
         force: bool = false,
         /// Keep a (glyph-less) block for empty text, so decorations have metrics.
         keep_empty: bool = false,
     };
 
-    fn syncTextEx(self: *Ui, h: Handle, text: Text, f: u32, size: f32, color: Color, al: text_block.Align, opts: SyncOpts) void {
+    pub fn syncTextEx(self: *Ui, h: Handle, text: Text, f: u32, size: f32, color: Color, al: text_block.Align, opts: SyncOpts) void {
         if (f >= self.text.fonts.items.len) return;
         const node = self.tree.get(h) orelse return;
         const src = text.slice();
@@ -743,18 +302,6 @@ pub const Ui = struct {
         self.tree.markDirty(h, DirtyFlags.layout_and_paint);
     }
 
-    pub fn setButtonEnabled(self: *Ui, b: *Button, enabled: bool) void {
-        if (b.props.enabled == enabled) return;
-        b.props.enabled = enabled;
-        self.tree.markDirty(b.node, DirtyFlags.paint_only);
-    }
-
-    pub fn setButtonVariant(self: *Ui, b: *Button, variant: button.Variant) void {
-        if (b.props.variant == variant) return;
-        b.props.variant = variant;
-        self.tree.markDirty(b.node, DirtyFlags.paint_only);
-    }
-
     /// Show or hide a subtree. Hidden nodes take no space and are not painted or hit.
     pub fn setHidden(self: *Ui, h: Handle, hidden: bool) void {
         const node = self.tree.get(h) orelse return;
@@ -764,7 +311,7 @@ pub const Ui = struct {
         self.tree.markDirty(node.parent, .{ .children = true });
     }
 
-    // ---- input ------------------------------------------------------------
+    // ---- input ---------------------------------------------------------------------
 
     pub fn pointerMove(self: *Ui, x: f32, y: f32) void {
         self.input.pointerMove(&self.tree, x, y);
@@ -814,7 +361,7 @@ pub const Ui = struct {
         return self.shortcuts.handleKey(tree, &self.commands, self.now_ms, chord, repeat).consumed;
     }
 
-    // ---- commands and shortcuts -----------------------------------------------
+    // ---- commands and shortcuts -----------------------------------------------------
 
     /// Register a named command. `handler` receives a `command` event whose
     /// text is the command name; it may be null for commands that only exist to
@@ -868,32 +415,6 @@ pub const Ui = struct {
         return self.shortcuts.shortcutText(h, buf);
     }
 
-    fn linkHandler(link: *CommandLink, ev: *event_types.Event) void {
-        _ = ev;
-        _ = link.ui.invokeCommand(link.name);
-    }
-
-    fn freeLink(self: *Ui, slot: *ButtonSlot) void {
-        const link = slot.link orelse return;
-        self.gpa.free(link.name);
-        self.gpa.destroy(link);
-        slot.link = null;
-    }
-
-    /// Make clicking the button run `command`. The button is enabled only while
-    /// the command is (this overrides `props.enabled`), and the command need not
-    /// exist yet. Pass the same command to keep a button, menu item, and
-    /// shortcut in sync.
-    pub fn setButtonCommand(self: *Ui, b: *Button, command: []const u8) !void {
-        const slot: *ButtonSlot = @fieldParentPtr("block", b);
-        const link = try self.gpa.create(CommandLink);
-        errdefer self.gpa.destroy(link);
-        link.* = .{ .ui = self, .name = try self.gpa.dupe(u8, command) };
-        self.freeLink(slot);
-        slot.link = link;
-        b.props.on_click = event_types.Callback.bind(link, linkHandler);
-    }
-
     /// Deliver committed text (typing, paste, IME) to the focused widget.
     pub fn textInput(self: *Ui, text: []const u8) void {
         self.input.textInput(&self.tree, text);
@@ -908,113 +429,7 @@ pub const Ui = struct {
         return if (self.tree.isValid(self.tree.focused)) self.tree.focused else null;
     }
 
-    // ---- frame ------------------------------------------------------------
-
-    /// Reclaim blocks of destroyed buttons, check raw prop writes against the
-    /// shadow copies (debug builds), and resolve each widget's look through
-    /// the theme's painter.
-    pub fn update(self: *Ui) void {
-        self.sweep(&self.buttons);
-        self.sweep(&self.labels);
-        self.sweep(&self.fields);
-        self.sweep(&self.editors);
-
-        if (self.shortcuts.count() > 0) self.shortcuts.prune(&self.tree, &self.commands);
-
-        // Buttons linked to a command mirror its enabled state.
-        var lit0 = self.buttons.iterator();
-        while (lit0.next()) |e| {
-            const link = e.ptr.link orelse continue;
-            const enabled = if (self.commands.find(link.name)) |h| self.commands.isEnabled(h) else false;
-            self.setButtonEnabled(&e.ptr.block, enabled);
-        }
-
-        // Disabled buttons leave the tab order; losing focus fires events, so
-        // settle focus before looks are resolved.
-        var fit = self.buttons.iterator();
-        while (fit.next()) |e| self.tree.get(e.ptr.block.node).?.flags.focusable = e.ptr.block.props.enabled;
-        self.input.syncFocus(&self.tree);
-
-        var it = self.buttons.iterator();
-        while (it.next()) |e| {
-            const b = &e.ptr.block;
-            const node = self.tree.get(b.node).?;
-            self.verifyProps(b.node, &e.ptr.checker, &b.props, "button");
-            b.out.focus_visible = b.out.focused and self.input.keyboard;
-
-            const look = self.theme.button_painter(b, &self.theme);
-            if (!std.mem.eql(u8, std.mem.asBytes(&look), std.mem.asBytes(&node.visual))) {
-                node.visual = look;
-                self.tree.markDirty(b.node, DirtyFlags.paint_only);
-            }
-            const c = self.theme.button_colors[@min(@intFromEnum(b.props.variant), self.theme.button_colors.len - 1)];
-            self.syncText(b.node, b.props.text, self.theme.ui_font, self.theme.font_size, if (b.props.enabled) c.text else c.text_disabled, b.props.text_align);
-        }
-
-        var fit2 = self.fields.iterator();
-        while (fit2.next()) |e| self.updateField(e.ptr);
-
-        var eit2 = self.editors.iterator();
-        while (eit2.next()) |e| {
-            self.verifyProps(e.ptr.block.node, &e.ptr.checker, &e.ptr.block.props, "code_editor");
-            e.ptr.update();
-        }
-
-        var lit = self.labels.iterator();
-        while (lit.next()) |e| {
-            const l = &e.ptr.block;
-            self.verifyProps(l.node, &e.ptr.checker, &l.props, "label");
-            const f = switch (l.props.font) {
-                .ui => self.theme.ui_font,
-                .mono => self.theme.mono_font,
-            };
-            const size = if (l.props.size > 0) l.props.size else self.theme.font_size;
-            const color = if (l.props.color.a != 0) l.props.color else self.theme.text_color;
-            self.syncText(l.node, l.props.text, f, size, color, l.props.text_align);
-            if (self.tree.get(l.node).?.text) |t| {
-                l.out.text_width = t.width;
-                l.out.text_height = t.line_height;
-            }
-        }
-    }
-
-    /// Free blocks whose node was destroyed. Restarts after each removal: the
-    /// pool must not be mutated mid-iteration.
-    fn sweep(self: *Ui, pool: anytype) void {
-        while (true) {
-            var stale: ?Handle = null;
-            var it = pool.iterator();
-            while (it.next()) |e| {
-                if (!self.tree.isValid(e.ptr.block.node)) {
-                    stale = e.handle;
-                    break;
-                }
-            }
-            const h = stale orelse return;
-            self.releaseSlot(pool.get(h).?);
-            _ = pool.destroy(h);
-        }
-    }
-
-    fn releaseSlot(self: *Ui, slot: anytype) void {
-        if (@TypeOf(slot) == *FieldSlot) {
-            self.freeField(slot);
-        } else if (@TypeOf(slot) == *code_editor.Slot) {
-            slot.deinit();
-        } else {
-            self.freeText(&slot.block.props.text);
-            if (@TypeOf(slot) == *ButtonSlot) self.freeLink(slot);
-        }
-    }
-
-    /// Shadow-check raw prop writes; fold any missing dirty bits into the tree.
-    fn verifyProps(self: *Ui, h: Handle, checker: anytype, props: anytype, name: []const u8) void {
-        const node = self.tree.get(h).?;
-        var flags = node.dirty;
-        checker.verify(props, &flags, name);
-        const added = DirtyFlags.fromBits(flags.bits() & ~node.dirty.bits());
-        if (!added.isClean()) self.tree.markDirty(h, added);
-    }
+    // ---- rendering ---------------------------------------------------------------------
 
     /// Glyph bitmap source for the renderer: `software.render(..., .{ .glyphs = ui.glyphProvider() })`.
     pub fn glyphProvider(self: *Ui) @import("../text/system.zig").GlyphProvider {
@@ -1034,17 +449,55 @@ pub const Ui = struct {
         try paint.build(&self.tree, list);
     }
 
+    // ---- frame ------------------------------------------------------------
+
+    /// Free the state of widgets whose node was destroyed. Restarts after each
+    /// removal: a pool must not be mutated mid-iteration.
+    fn sweep(self: *Ui, pool: anytype) void {
+        while (true) {
+            var stale: ?Handle = null;
+            var it = pool.iterator();
+            while (it.next()) |e| {
+                if (!self.tree.isValid(e.ptr.node)) {
+                    stale = e.handle;
+                    break;
+                }
+            }
+            const h = stale orelse return;
+            pool.get(h).?.deinit();
+            _ = pool.destroy(h);
+        }
+    }
+
+    /// Run `method` on every live widget.
+    fn forEachWidget(self: *Ui, comptime method: []const u8) void {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors }) |pool| {
+            var it = pool.iterator();
+            while (it.next()) |e| @field(@TypeOf(e.ptr.*), method)(e.ptr);
+        }
+    }
+
+    /// Reclaim the state of destroyed widgets, settle focus, check raw prop
+    /// writes against the shadow copies (debug builds), and bring every
+    /// widget's look and text up to date.
+    pub fn update(self: *Ui) void {
+        self.sweep(&self.buttons);
+        self.sweep(&self.labels);
+        self.sweep(&self.fields);
+        self.sweep(&self.editors);
+
+        if (self.shortcuts.count() > 0) self.shortcuts.prune(&self.tree, &self.commands);
+
+        // Disabled widgets leave the tab order; losing focus fires events, so
+        // settle focus before looks are resolved.
+        self.forEachWidget("prepare");
+        self.input.syncFocus(&self.tree);
+        self.forEachWidget("update");
+    }
+
     /// End of frame: clear frame-scoped flags and dirty bits.
     pub fn endFrame(self: *Ui) void {
-        var it = self.buttons.iterator();
-        while (it.next()) |e| e.ptr.block.out.clicked = false;
-        var fit = self.fields.iterator();
-        while (fit.next()) |e| {
-            e.ptr.block.out.changed = false;
-            e.ptr.block.out.submitted = false;
-        }
-        var eit = self.editors.iterator();
-        while (eit.next()) |e| e.ptr.block.out.changed = false;
+        self.forEachWidget("endFrame");
         self.tree.clearDirty(self.tree.root);
     }
 };
@@ -1123,7 +576,7 @@ test "clicking outside, or on a disabled button, does nothing" {
     defer t.deinit();
     const a = try t.ui.createButton(t.ui.tree.root, box(80, 30));
     const b = try t.ui.createButton(t.ui.tree.root, box(80, 30));
-    t.ui.setButtonEnabled(b, false);
+    b.setEnabled(false);
     try t.frame();
 
     t.click(300, 80); // empty space
@@ -1163,10 +616,10 @@ test "setButtonText copies, so the caller can free; and frees on deinit" {
     defer t.deinit(); // the testing allocator reports leaks
     const b = try t.ui.createButton(t.ui.tree.root, box(80, 30));
     var buf = [_]u8{ 'h', 'i' };
-    try t.ui.setButtonText(b, &buf);
+    try b.setText(&buf);
     buf[0] = 'X';
     try std.testing.expectEqualStrings("hi", b.props.text.slice());
-    try t.ui.setButtonText(b, "longer text"); // replaces and frees the old copy
+    try b.setText("longer text"); // replaces and frees the old copy
     try std.testing.expectEqualStrings("longer text", b.props.text.slice());
 }
 
@@ -1174,7 +627,7 @@ test "destroying a button's node reclaims its block" {
     const t = try Harness.init();
     defer t.deinit();
     const b = try t.ui.createButton(t.ui.tree.root, box(80, 30));
-    try t.ui.setButtonText(b, "bye");
+    try b.setText("bye");
     try std.testing.expectEqual(@as(u32, 1), t.ui.buttons.count());
     _ = t.ui.tree.destroySubtree(b.node);
     t.ui.update();
@@ -1223,7 +676,7 @@ test "variant setter marks paint and swaps colors" {
     defer t.deinit();
     const b = try t.ui.createButton(t.ui.tree.root, box(80, 30));
     try t.frame();
-    t.ui.setButtonVariant(b, .danger);
+    b.setVariant(.danger);
     try std.testing.expect(t.ui.isDirty());
     try t.frame();
     try std.testing.expectEqual(t.ui.theme.button_colors[2].normal, t.ui.tree.get(b.node).?.visual.background);
@@ -1298,7 +751,7 @@ test "labels reshape when text, size, or font change, and keep their text copy" 
     const w1 = l.out.text_width;
 
     var buf = [_]u8{ 'a', 'b', 'c' };
-    try ui.setLabelText(l, &buf);
+    try l.setText(&buf);
     buf[0] = 'Z'; // the toolkit copied it
     try t.h.frame();
     try std.testing.expect(l.out.text_width > w1);
@@ -1321,7 +774,7 @@ test "an auto-sized button wraps its label plus padding, and paints centered tex
     const ui = &t.h.ui;
     ui.tree.get(ui.tree.root).?.style = .{ .align_items = .start };
     const b = try ui.createButton(ui.tree.root, .{ .padding = Edges.xy(10, 5) });
-    try ui.setButtonText(b, "MM"); // 2 * 0.9 * 20 = 36 wide
+    try b.setText("MM"); // 2 * 0.9 * 20 = 36 wide
     try t.h.frame();
 
     const node = ui.tree.get(b.node).?;
@@ -1347,8 +800,8 @@ test "disabled buttons use the disabled text color" {
     defer t.deinit();
     const ui = &t.h.ui;
     const b = try ui.createButton(ui.tree.root, .{ .padding = Edges.all(4) });
-    try ui.setButtonText(b, "x");
-    ui.setButtonEnabled(b, false);
+    try b.setText("x");
+    b.setEnabled(false);
     try t.h.frame();
     try std.testing.expectEqual(ui.theme.button_colors[0].text_disabled, ui.tree.get(b.node).?.text.?.color);
 }
@@ -1359,7 +812,7 @@ test "destroying a node frees its text, and text outlives nothing" {
     const ui = &t.h.ui;
     const l = try ui.createLabel(ui.tree.root, .{}, "temporary");
     const b = try ui.createButton(ui.tree.root, .{});
-    try ui.setButtonText(b, "also temporary");
+    try b.setText("also temporary");
     try t.h.frame();
     _ = ui.tree.destroySubtree(l.node);
     t.h.ui.update();
@@ -1434,7 +887,7 @@ test "disabled buttons are skipped by Tab and cannot be activated by key" {
     const a = try ui.createButton(ui.tree.root, box(80, 30));
     const dis = try ui.createButton(ui.tree.root, box(80, 30));
     const c = try ui.createButton(ui.tree.root, box(80, 30));
-    ui.setButtonEnabled(dis, false);
+    dis.setEnabled(false);
     try t.frame();
 
     ui.key(.tab, .{}, true, false);
@@ -1445,7 +898,7 @@ test "disabled buttons are skipped by Tab and cannot be activated by key" {
     try std.testing.expect(c.out.focused and !dis.out.focused);
 
     // Disabling the focused button drops its focus.
-    ui.setButtonEnabled(c, false);
+    c.setEnabled(false);
     try t.frame();
     try std.testing.expect(!c.out.focused);
     try std.testing.expect(ui.focused() == null);
@@ -1531,11 +984,10 @@ fn press(t: *TextHarness, k: keys.Key, mods: keys.Mods) !void {
 test "typing edits the field, sets flags, and calls on_change" {
     const t = try TextHarness.init();
     defer t.deinit();
-    const ui = &t.h.ui;
     const tf = try focusedField(t);
 
     try type_(t, "hello");
-    try std.testing.expectEqualStrings("hello", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("hello", tf.text());
     try std.testing.expect(tf.out.focused);
     try std.testing.expectEqual(@as(u32, 1), tf.out.change_count);
     try std.testing.expectEqual(@as(u32, 1), FieldCounts.changes);
@@ -1543,16 +995,15 @@ test "typing edits the field, sets flags, and calls on_change" {
     try std.testing.expect(!tf.out.changed); // frame-scoped: cleared by endFrame in frame()
 
     try type_(t, " \u{e9}");
-    try std.testing.expectEqualStrings("hello \u{e9}", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("hello \u{e9}", tf.text());
     try press(t, .backspace, .{}); // removes the whole two-byte character
-    try std.testing.expectEqualStrings("hello ", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("hello ", tf.text());
     try std.testing.expectEqual(@as(u32, 3), tf.out.change_count);
 }
 
 test "navigation, selection, and replacement" {
     const t = try TextHarness.init();
     defer t.deinit();
-    const ui = &t.h.ui;
     const tf = try focusedField(t);
     try type_(t, "one two three");
 
@@ -1563,13 +1014,13 @@ test "navigation, selection, and replacement" {
     try std.testing.expectEqual(@as(u32, 4), tf.out.sel_start);
     try std.testing.expectEqual(@as(u32, 8), tf.out.sel_end);
     try type_(t, "2");
-    try std.testing.expectEqualStrings("one 2three", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("one 2three", tf.text());
     try press(t, .end, .{});
     try press(t, .backspace, .{ .ctrl = true }); // "2three" is one word
-    try std.testing.expectEqualStrings("one ", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("one ", tf.text());
     try press(t, .left, .{});
     try press(t, .delete, .{});
-    try std.testing.expectEqualStrings("one", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("one", tf.text());
 }
 
 test "clipboard: select all, copy, cut, paste (newlines become spaces)" {
@@ -1584,17 +1035,17 @@ test "clipboard: select all, copy, cut, paste (newlines become spaces)" {
     try std.testing.expectEqual(@as(u32, 3), tf.out.sel_end);
     try press(t, .c, .{ .ctrl = true });
     try std.testing.expectEqualStrings("abc", FakeClip.contents());
-    try std.testing.expectEqualStrings("abc", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("abc", tf.text());
 
     try press(t, .x, .{ .ctrl = true });
-    try std.testing.expectEqualStrings("", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("", tf.text());
     FakeClip.put("x\ny\r\nz");
     try press(t, .v, .{ .ctrl = true });
-    try std.testing.expectEqualStrings("x y  z", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("x y  z", tf.text());
 
     // A plain 'a' (no modifier) is not consumed: text arrives via text_input only.
     ui.key(.a, .{}, true, false);
-    try std.testing.expectEqualStrings("x y  z", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("x y  z", tf.text());
 }
 
 test "enter submits; submit flags are frame-scoped" {
@@ -1623,14 +1074,14 @@ test "read-only fields copy but do not edit; disabled fields ignore everything" 
     try press(t, .a, .{ .ctrl = true });
     try press(t, .c, .{ .ctrl = true });
     try press(t, .x, .{ .ctrl = true });
-    try std.testing.expectEqualStrings("keep", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("keep", tf.text());
     try std.testing.expectEqualStrings("keep", FakeClip.contents());
 
     tf.props.read_only = false;
     tf.props.enabled = false;
     try t.h.frame();
     try type_(t, "x");
-    try std.testing.expectEqualStrings("keep", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("keep", tf.text());
     try std.testing.expect(ui.focused() == null); // disabled fields leave the tab order and lose focus
 }
 
@@ -1642,22 +1093,21 @@ test "text only reaches the focused field" {
     const b = try ui.createTextField(ui.tree.root, .{ .width = Length.px(100), .height = Length.px(28) });
     try t.h.frame();
     try type_(t, "to a");
-    try std.testing.expectEqualStrings("to a", ui.textFieldText(a));
-    try std.testing.expectEqualStrings("", ui.textFieldText(b));
+    try std.testing.expectEqualStrings("to a", a.text());
+    try std.testing.expectEqualStrings("", b.text());
     try press(t, .tab, .{});
     try type_(t, "to b");
-    try std.testing.expectEqualStrings("to b", ui.textFieldText(b));
-    try std.testing.expectEqualStrings("to a", ui.textFieldText(a));
+    try std.testing.expectEqualStrings("to b", b.text());
+    try std.testing.expectEqualStrings("to a", a.text());
 }
 
 test "setTextFieldText replaces content without counting as an edit" {
     const t = try TextHarness.init();
     defer t.deinit();
-    const ui = &t.h.ui;
     const tf = try focusedField(t);
-    try ui.setTextFieldText(tf, "preset");
+    try tf.setText("preset");
     try t.h.frame();
-    try std.testing.expectEqualStrings("preset", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("preset", tf.text());
     try std.testing.expectEqual(@as(u32, 0), tf.out.change_count);
     try std.testing.expectEqual(@as(u32, 6), tf.out.caret);
     try std.testing.expectEqual(@as(u32, 0), FieldCounts.changes);
@@ -1723,7 +1173,7 @@ test "the caret shows when focused, blinks on tick, and resets on typing" {
     defer t.deinit();
     const ui = &t.h.ui;
     const tf = try focusedField(t);
-    _ = try ui.setTextFieldText(tf, "ab");
+    _ = try tf.setText("ab");
     try t.h.frame();
     const decor = ui.tree.get(tf.node).?.text.?.decor; // a copy: typing replaces the block
     try std.testing.expect(decor.caret_on);
@@ -1788,7 +1238,7 @@ test "an empty field shows its placeholder, dimmed, and hides it once there is t
     defer t.deinit();
     const ui = &t.h.ui;
     const tf = try focusedField(t);
-    try ui.setTextFieldPlaceholder(tf, "Search");
+    try tf.setPlaceholder("Search");
     try t.h.frame();
     const node = ui.tree.get(tf.node).?;
     try std.testing.expectEqual(@as(usize, 6), node.text.?.glyphs.len);
@@ -1822,7 +1272,7 @@ test "removing a field frees its storage" {
     defer t.deinit(); // leak-checked
     const ui = &t.h.ui;
     const tf = try focusedField(t);
-    try ui.setTextFieldPlaceholder(tf, "placeholder");
+    try tf.setPlaceholder("placeholder");
     try type_(t, "some content that is long enough to grow the gap buffer");
     _ = ui.tree.destroySubtree(tf.node);
     try t.h.frame();
@@ -1937,7 +1387,7 @@ test "typing in a text field is not stolen by plain-key shortcuts, but modified 
     _ = ui.keyHandled(.a, .{}, true, false);
     ui.textInput("a");
     try t.h.frame();
-    try std.testing.expectEqualStrings("a", ui.textFieldText(tf));
+    try std.testing.expectEqualStrings("a", tf.text());
     try std.testing.expectEqualStrings("", CmdLog.str()); // the shortcut did not fire
 
     _ = ui.keyHandled(.a, .{ .ctrl = true }, true, false); // the field takes select-all
@@ -2026,7 +1476,7 @@ test "a command-linked button runs the command, mirrors its enabled state, and f
     const ui = &t.ui;
     CmdLog.reset();
     const b = try ui.createButton(ui.tree.root, box(80, 30));
-    try ui.setButtonCommand(b, "view.v"); // the command does not exist yet
+    try b.setCommand("view.v"); // the command does not exist yet
     try t.frame();
     try std.testing.expect(!b.props.enabled);
 
@@ -2044,7 +1494,7 @@ test "a command-linked button runs the command, mirrors its enabled state, and f
     try std.testing.expectEqualStrings("v", CmdLog.str()); // no second run
     try std.testing.expect(!ui.setCommandEnabled("missing", false));
 
-    try ui.setButtonCommand(b, "view.v"); // re-linking replaces the old link
+    try b.setCommand("view.v"); // re-linking replaces the old link
     _ = ui.tree.destroySubtree(b.node);
     try t.frame();
     try std.testing.expectEqual(@as(u32, 0), ui.buttons.count());
@@ -2115,8 +1565,8 @@ fn editorBox(t: *TextHarness) !*CodeEditor {
     return ed;
 }
 
-fn edText(ui: *Ui, ed: *CodeEditor) ![]u8 {
-    return ui.codeEditorText(ed, testing_alloc);
+fn edText(_: *Ui, ed: *CodeEditor) ![]u8 {
+    return ed.textAlloc(testing_alloc);
 }
 
 const testing_alloc = std.testing.allocator;
@@ -2162,7 +1612,7 @@ test "typing, Enter, Backspace, and undo/redo through events update text and out
     try expectEdText(ui, ed, "hi");
     try press(t, .y, .{ .ctrl = true }); // nothing left to redo
     try expectEdText(ui, ed, "hi");
-    ui.markCodeEditorSaved(ed);
+    ed.markSaved();
     try t.h.frame();
     try std.testing.expect(!ed.out.modified);
 }
@@ -2172,9 +1622,9 @@ test "clicking places the caret, dragging selects, double and triple click selec
     defer t.deinit();
     const ui = &t.h.ui;
     const ed = try editorBox(t);
-    try ui.loadCodeEditorText(ed, "alpha beta\ngamma\ndelta", false);
+    try ed.loadText("alpha beta\ngamma\ndelta", false);
     try t.h.frame();
-    const core = ui.codeEditorCore(ed);
+    const core = ed.core();
 
     // Line 1 ("gamma"), column 2.
     const x = gutter_px + 2 * cell_px + 1;
@@ -2211,7 +1661,7 @@ test "alt-click adds a cursor and typing goes to every cursor" {
     defer t.deinit();
     const ui = &t.h.ui;
     const ed = try editorBox(t);
-    try ui.loadCodeEditorText(ed, "one\ntwo", false);
+    try ed.loadText("one\ntwo", false);
     try t.h.frame();
 
     ui.pointerMove(gutter_px, 5);
@@ -2242,9 +1692,9 @@ test "the caret scrolls into view, page keys move by a screenful, and the wheel 
     const ui = &t.h.ui;
     const ed = try editorBox(t);
     const text = try manyLines(100);
-    try ui.loadCodeEditorText(ed, text, true);
+    try ed.loadText(text, true);
     try t.h.frame();
-    const slot = Ui.editorSlot(ed);
+    const slot = ed;
     try std.testing.expectEqual(@as(f32, 0), slot.scroll_y);
 
     try press(t, .end, .{ .ctrl = true }); // end of the document
@@ -2269,11 +1719,10 @@ test "the caret scrolls into view, page keys move by a screenful, and the wheel 
 test "only the lines in view are painted, with balanced clips" {
     const t = try TextHarness.init();
     defer t.deinit();
-    const ui = &t.h.ui;
     t.h.list = DrawList.init(&t.h.cmds, &t.h.glyph_store);
     const ed = try editorBox(t);
     const text = try manyLines(20000);
-    try ui.loadCodeEditorText(ed, text, true);
+    try ed.loadText(text, true);
     try t.h.frame();
 
     var runs: usize = 0;
@@ -2288,7 +1737,7 @@ test "selections, the current line, and carets are drawn; the caret blinks" {
     defer t.deinit();
     const ui = &t.h.ui;
     const ed = try editorBox(t);
-    try ui.loadCodeEditorText(ed, "abcdef\nsecond", false);
+    try ed.loadText("abcdef\nsecond", false);
     try t.h.frame();
     const colors = ui.theme.editor;
 
@@ -2325,7 +1774,7 @@ test "tabs expand for display, so caret positions follow the visual columns" {
     defer t.deinit();
     const ui = &t.h.ui;
     const ed = try editorBox(t);
-    try ui.loadCodeEditorText(ed, "\tx\n  \ty", false);
+    try ed.loadText("\tx\n  \ty", false);
     try t.h.frame();
     try press(t, .end, .{}); // end of line 0: after a tab (4 cells) and "x"
     const r = ui.textInputRect().?;
@@ -2346,7 +1795,7 @@ test "read-only editors navigate and copy but do not edit; disabled ones are ine
     defer t.deinit();
     const ui = &t.h.ui;
     const ed = try editorBox(t);
-    try ui.loadCodeEditorText(ed, "keep this", false);
+    try ed.loadText("keep this", false);
     ed.props.read_only = true;
     try t.h.frame();
 
@@ -2373,7 +1822,7 @@ test "cut, paste, and tab handling through the clipboard and keys" {
     defer t.deinit();
     const ui = &t.h.ui;
     const ed = try editorBox(t);
-    try ui.loadCodeEditorText(ed, "one two", false);
+    try ed.loadText("one two", false);
     try t.h.frame();
     try press(t, .a, .{ .ctrl = true });
     try press(t, .x, .{ .ctrl = true });
@@ -2394,7 +1843,7 @@ test "removing an editor frees its document, history, and scratch" {
     const ui = &t.h.ui;
     const ed = try editorBox(t);
     const text = try manyLines(500);
-    try ui.loadCodeEditorText(ed, text, true);
+    try ed.loadText(text, true);
     try type_(t, "typed text");
     try press(t, .enter, .{});
     try press(t, .z, .{ .ctrl = true });
@@ -2410,9 +1859,9 @@ test "a larger document keeps its caret stops, line numbers, and mouse mapping i
     const ui = &t.h.ui;
     const ed = try editorBox(t);
     const text = try manyLines(50);
-    try ui.loadCodeEditorText(ed, text, true);
+    try ed.loadText(text, true);
     try t.h.frame();
-    const core = ui.codeEditorCore(ed);
+    const core = ed.core();
 
     // Insert lines above, then click on what is now line 7 (0-based 6).
     try press(t, .home, .{ .ctrl = true });
@@ -2458,7 +1907,7 @@ test "highlighted text is drawn in one run per color, with the right colors" {
     defer t.deinit();
     const ui = &t.h.ui;
     const ed = try editorBox(t);
-    try ui.loadCodeEditorText(ed, "const x = 42; // hi", false);
+    try ed.loadText("const x = 42; // hi", false);
     try t.h.frame();
     const colors = ui.theme.editor;
 
@@ -2468,7 +1917,7 @@ test "highlighted text is drawn in one run per color, with the right colors" {
     try std.testing.expectEqual(@as(usize, 1), n);
     try std.testing.expectEqual(colors.tokenColor(.plain), runs[0].color);
 
-    try ui.setCodeEditorLanguage(ed, &syntax_mod.zig);
+    try ed.setLanguage(&syntax_mod.zig);
     try t.h.frame();
     n = rowRuns(&t.h.list, 0, &runs);
     try std.testing.expect(n >= 5);
@@ -2487,7 +1936,7 @@ test "highlighted text is drawn in one run per color, with the right colors" {
     try std.testing.expectEqual(@as(u32, 4), runs[n - 1].glyphs); // the space has no glyph
 
     // Switching the language off goes back to a single run.
-    try ui.setCodeEditorLanguage(ed, null);
+    try ed.setLanguage(null);
     try t.h.frame();
     try std.testing.expectEqual(@as(usize, 1), rowRuns(&t.h.list, 0, &runs));
 }
@@ -2497,8 +1946,8 @@ test "tokens line up with expanded tabs and carry their colors" {
     defer t.deinit();
     const ui = &t.h.ui;
     const ed = try editorBox(t);
-    try ui.loadCodeEditorText(ed, "\tconst x", false);
-    try ui.setCodeEditorLanguage(ed, &syntax_mod.zig);
+    try ed.loadText("\tconst x", false);
+    try ed.setLanguage(&syntax_mod.zig);
     try t.h.frame();
     var runs: [32]RowRun = undefined;
     const n = rowRuns(&t.h.list, 0, &runs);
@@ -2512,15 +1961,15 @@ test "opening a block comment above recolors the lines below it" {
     defer t.deinit();
     const ui = &t.h.ui;
     const ed = try editorBox(t);
-    try ui.loadCodeEditorText(ed, "int a;\nint b;\nint c;", false);
-    try ui.setCodeEditorLanguage(ed, &syntax_mod.c);
+    try ed.loadText("int a;\nint b;\nint c;", false);
+    try ed.setLanguage(&syntax_mod.c);
     try t.h.frame();
     const colors = ui.theme.editor;
     var runs: [32]RowRun = undefined;
     _ = rowRuns(&t.h.list, 2, &runs);
     try std.testing.expectEqual(colors.tokenColor(.type), runs[0].color);
 
-    ui.codeEditorCore(ed).setCaret(6, false); // end of line 0
+    ed.core().setCaret(6, false); // end of line 0
     try type_(t, "/*");
     const n = rowRuns(&t.h.list, 2, &runs);
     try std.testing.expectEqual(@as(usize, 1), n);
@@ -2534,7 +1983,6 @@ test "opening a block comment above recolors the lines below it" {
 test "a large file is lexed lazily: only to the viewport, then up to the caret when jumping" {
     const t = try TextHarness.init();
     defer t.deinit();
-    const ui = &t.h.ui;
     t.h.list = DrawList.init(&t.h.cmds, &t.h.glyph_store);
     const ed = try editorBox(t);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -2542,10 +1990,10 @@ test "a large file is lexed lazily: only to the viewport, then up to the caret w
         var line: [64]u8 = undefined;
         try buf.appendSlice(testing_alloc, try std.fmt.bufPrint(&line, "const v{d}: u32 = {d}; // c\n", .{ i, i }));
     }
-    try ui.loadCodeEditorText(ed, try buf.toOwnedSlice(testing_alloc), true);
-    try ui.setCodeEditorLanguage(ed, &syntax_mod.zig);
+    try ed.loadText(try buf.toOwnedSlice(testing_alloc), true);
+    try ed.setLanguage(&syntax_mod.zig);
     try t.h.frame();
-    const hl = &Ui.editorSlot(ed).highlighter.?;
+    const hl = &ed.highlighter.?;
     try std.testing.expect(hl.lexed <= 10); // just the lines above the visible ones (none) plus a few
 
     try press(t, .end, .{ .ctrl = true }); // jump to the bottom: lex everything above it, once
@@ -2563,12 +2011,11 @@ test "a large file is lexed lazily: only to the viewport, then up to the caret w
 test "no highlighter, no cost: plain editors never create one" {
     const t = try TextHarness.init();
     defer t.deinit();
-    const ui = &t.h.ui;
     const ed = try editorBox(t);
-    try ui.loadCodeEditorText(ed, "const x = 1;", false);
+    try ed.loadText("const x = 1;", false);
     try t.h.frame();
-    try std.testing.expect(Ui.editorSlot(ed).highlighter == null);
-    try ui.setCodeEditorLanguage(ed, &syntax_mod.plain); // "plain" lexes nothing but is still a language
+    try std.testing.expect(ed.highlighter == null);
+    try ed.setLanguage(&syntax_mod.plain); // "plain" lexes nothing but is still a language
     try t.h.frame();
     var runs: [32]RowRun = undefined;
     try std.testing.expectEqual(@as(usize, 1), rowRuns(&t.h.list, 0, &runs));
