@@ -33,7 +33,7 @@ const Selection = sel_mod.Selection;
 const SelectionSet = sel_mod.SelectionSet;
 const line_editor = @import("../text/line_editor.zig");
 
-pub const Error = doc_mod.Error;
+pub const Error = doc_mod.ApplyError;
 
 pub const EditKind = enum { typing, delete_back, delete_fwd, other };
 
@@ -81,6 +81,10 @@ pub const Editor = struct {
     /// Open `bytes` as the file contents (borrowed unless `owned`).
     pub fn initWithText(gpa: std.mem.Allocator, bytes: []const u8, owned: bool) !Editor {
         return fromDocument(gpa, try Document.initWithText(gpa, bytes, owned));
+    }
+
+    pub fn initMapped(gpa: std.mem.Allocator, bytes: []const u8) !Editor {
+        return fromDocument(gpa, try Document.initMapped(gpa, bytes));
     }
 
     fn fromDocument(gpa: std.mem.Allocator, doc: Document) Editor {
@@ -167,6 +171,7 @@ pub const Editor = struct {
     }
 
     fn replace(self: *Editor, kind: EditKind, now: u64, edits: []const Edit, mode: SelectionMode) Error!bool {
+        if (self.doc.isIndexing()) return error.Indexing;
         var any = false;
         for (edits) |e| any = any or e.end > e.start or e.text.len > 0;
         if (!any) return false;
@@ -254,6 +259,7 @@ pub const Editor = struct {
     // ---- undo / redo ---------------------------------------------------------------------
 
     pub fn undo(self: *Editor) Error!bool {
+        if (self.doc.isIndexing()) return error.Indexing;
         if (self.undo_stack.items.len == 0) return false;
         self.merge_ok = false;
         try self.redo_stack.ensureUnusedCapacity(self.gpa, 1);
@@ -275,6 +281,7 @@ pub const Editor = struct {
     }
 
     pub fn redo(self: *Editor) Error!bool {
+        if (self.doc.isIndexing()) return error.Indexing;
         if (self.redo_stack.items.len == 0) return false;
         self.merge_ok = false;
         try self.undo_stack.ensureUnusedCapacity(self.gpa, 1);

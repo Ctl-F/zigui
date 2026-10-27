@@ -22,8 +22,8 @@ const surface_w = 800;
 const surface_h = 560;
 
 const palette = [_]Color{
-    Color.rgb(20, 20, 24),   Color.rgb(224, 64, 64),  Color.rgb(240, 170, 40),
-    Color.rgb(80, 190, 90),  Color.rgb(64, 140, 230), Color.rgb(170, 90, 220),
+    Color.rgb(20, 20, 24),  Color.rgb(224, 64, 64),  Color.rgb(240, 170, 40),
+    Color.rgb(80, 190, 90), Color.rgb(64, 140, 230), Color.rgb(170, 90, 220),
 };
 
 const Point = struct { x: f32, y: f32 };
@@ -111,7 +111,7 @@ const Paint = struct {
         if (ev.kind != .key_down) return;
         switch (ev.key) {
             .d1, .d2, .d3, .d4, .d5, .d6 => {
-                self.color = palette[@intFromEnum(ev.key) - @intFromEnum(zigui.keys.Key.d1)];
+                self.color = palette[@backingInt(ev.key) - @backingInt(zigui.keys.Key.d1)];
                 self.eraser = false;
             },
             .c => self.clear(),
@@ -232,9 +232,18 @@ pub fn main(init: std.process.Init) !void {
     const screenshot = init.environ_map.get("ZIGUI_SCREENSHOT");
     var script = std.mem.tokenizeScalar(u8, init.environ_map.get("ZIGUI_SCRIPT") orelse "", ';');
     var running = true;
+
+    var lastFocused = ui.tree.focused;
+
     while (running) {
         _ = ui.tick(sdl.ticks());
         ui.update();
+
+        if (!lastFocused.eql(ui.tree.focused)) {
+            lastFocused = ui.tree.focused;
+            std.debug.print("Focused node: {}\n", .{lastFocused});
+        }
+
         if (force or ui.isDirty()) {
             const px = window.pixelSize();
             try ui.renderFrame(backend, &list, .{ .pixel_w = px.w, .pixel_h = px.h, .scale = window.scale(), .clear = Color.black });
@@ -255,10 +264,11 @@ pub fn main(init: std.process.Init) !void {
             app.canvas.releaseSurface();
             return;
         }
-        const timeout: i32 = if (ui.nextWakeMs()) |ms| @intCast(ms) else -1;
-        var ev = sdl.waitEvent(timeout);
+        //const timeout: i32 = if (ui.nextWakeMs()) |ms| @intCast(ms) else -1;
+        var ev: ?sdl.Event = sdl.pollEvent(); // sdl.waitEvent(timeout);
         _ = ui.tick(sdl.ticks());
         while (ev) |e| : (ev = sdl.pollEvent()) {
+            //std.debug.print("Event fired: {}\n", .{e});
             switch (e.data) {
                 .quit, .close_requested => running = false,
                 .resized, .expose => force = true,

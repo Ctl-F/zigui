@@ -293,6 +293,14 @@ pub fn ticks() u64 {
     return c.SDL_GetTicks();
 }
 
+/// Wake a blocked `waitEvent` from any thread (the event is dropped by the shim;
+/// the loop just runs another iteration).
+pub fn wake() void {
+    var ev: c.SDL_Event = std.mem.zeroes(c.SDL_Event);
+    ev.type = c.SDL_EVENT_USER;
+    _ = c.SDL_PushEvent(&ev);
+}
+
 /// Nanoseconds from a monotonic clock, for `Ui.clock`.
 pub fn ticksNs() u64 {
     return c.SDL_GetTicksNS();

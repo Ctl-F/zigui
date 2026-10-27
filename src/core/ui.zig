@@ -98,6 +98,10 @@ pub const Ui = struct {
     /// and is counted in `slow_handlers`. 0 disables the check.
     handler_budget_ns: u64 = 8_000_000,
     slow_handlers: u32 = 0,
+    /// Called from other threads to wake the platform's event loop (background
+    /// work finished something to draw). Must be safe to call from any thread;
+    /// set it before starting such work (`sdl.wake`).
+    wake: ?*const fn () void = null,
     /// Interactive nodes found without an accessible name (debug builds).
     a11y_warnings: u32 = 0,
     a11y_log: bool = true,
@@ -3486,4 +3490,54 @@ test "IME composition in the code editor is drawn over the caret line and commit
     ui.textEditing("again", 5);
     ui.setFocus(null);
     try std.testing.expectEqual(@as(usize, 0), ed.preedit.items.len);
+}
+
+test "openFile maps a file, shows it at once, indexes in the background, then allows editing" {
+    const io = std.testing.io;
+    const path = ".zig-cache/open_file_test.txt";
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(std.testing.allocator);
+    for (0..30000) |i| try body.print(std.testing.allocator, "row {d} of the big file\n", .{i});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = body.items });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try ui.add(CodeEditor, ui.tree.root, .{ .style = .{ .width = Length.px(300), .height = Length.px(100), .shrink = 0 } });
+    try ed.openFile(io, path);
+    try std.testing.expectEqual(body.items.len, ed.editor.doc.len());
+
+    // Usable immediately: the first line reads even though indexing may be running.
+    const first = try ed.editor.doc.range(0, 10);
+    try std.testing.expectEqualStrings("row 0 of t", first);
+
+    // Editing waits for the index.
+    ui.setFocus(ed.node);
+    if (ed.editor.doc.isIndexing()) {
+        ui.textInput("zzz");
+        try std.testing.expectEqual(body.items.len, ed.editor.doc.len());
+    }
+
+    var spins: usize = 0;
+    while (true) : (spins += 1) {
+        ui.update();
+        if (!ed.out.indexing) break;
+        try std.testing.expect(spins < 5_000_000);
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expectEqual(@as(f32, 1), ed.out.index_progress);
+    try std.testing.expectEqual(@as(usize, 30001), ed.editor.doc.lineCount());
+    try t.h.frame();
+    try std.testing.expectEqual(@as(u32, 30001), ed.out.line_count);
+
+    // Now it edits normally (and the text still comes from the mapping).
+    ui.textInput("EDIT ");
+    try std.testing.expect(std.mem.startsWith(u8, try ed.editor.doc.range(0, 9), "EDIT row "));
+
+    // Opening another file replaces it; destroying the editor mid-index is clean.
+    try ed.openFile(io, path);
+    try std.testing.expectEqual(body.items.len, ed.editor.doc.len());
+    _ = ui.tree.destroySubtree(ed.node);
+    ui.update();
 }

@@ -16,7 +16,7 @@ atlas, fields), commands and scoped shortcuts, a piece-table editor core with
 undo/redo and multi-cursor, a code editor widget with incremental syntax
 highlighting, a software renderer, an SDL3 platform shim, a runtime widget
 schema and registry, generated forms and wizards, ZON UI documents, and a visual
-builder. About 455 tests.
+builder. About 465 tests.
 
 Not built yet (largest first): a renderer backend interface and GPU path, canvas
 and frame scheduling, damage tracking, list/tree widgets and a model interface,
@@ -251,6 +251,17 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   it in at the caret, underlined, and the code editor draws it over the caret
   line; the committed text arrives through `textInput`, and losing focus cancels
   it. Candidate-window placement uses the composition-aware `caretRect`.
+- Large files (`CodeEditor.openFile(io, path)`): the file is memory-mapped
+  read-only without prefaulting (`editor/mapped_file.zig`), becomes the piece
+  table's borrowed original at once (`PieceTable.initMapped`), and a worker thread
+  scans newlines in 4 MiB chunks (`editor/indexer.zig`), handing each chunk to
+  the UI thread through a 32-slot ring (the worker waits if the UI falls behind;
+  nothing in the core is touched off-thread). `Ui.wake` (the SDL shim's `wake`)
+  lets the worker unblock the event loop. While `out.indexing` the line count
+  grows, line lookups work for the indexed part, and edits and undo return
+  `error.Indexing` (ignored by the widget); afterwards it is an ordinary
+  document. The index costs 8 bytes per line. Truncating a mapped file from
+  outside faults on the lost pages; save to a new file and rename.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.
@@ -362,9 +373,8 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
 Ordered by the spec-drift notes (`NOTES/spec-drift-notes.md`); the notes are the
 authority for rationale, and a few items are recommendations, not requirements.
 
-1. Memory-mapped document open and an off-thread newline-index scan.
-2. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
-3. The C facade (`src/capi/`), once the core Zig library is done.
+1. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
+2. The C facade (`src/capi/`), once the core Zig library is done.
 
 Smaller gaps: theme metrics (padding, min sizes) and a painter measure override; layout follow-ups (width-constrained text measure, stack/absolute,
 split and scroll containers, wrap, grid, calc `Length`); draw commands for

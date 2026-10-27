@@ -57,8 +57,12 @@ pub const PieceTable = struct {
     gpa: std.mem.Allocator,
     original: []const u8 = "",
     original_owned: bool = false,
-    /// Sorted offsets of '\n' in `original`.
-    original_nl: []usize = &.{},
+    /// Sorted offsets of '\n' in `original`. While `indexing`, only the part of
+    /// the file scanned so far (`indexed_to` bytes) is covered.
+    original_nl: std.ArrayListUnmanaged(usize) = .empty,
+    /// A mapped file's newline index is still being built (see `initMapped`).
+    indexing: bool = false,
+    indexed_to: usize = 0,
     add: std.ArrayListUnmanaged(u8) = .empty,
     add_nl: std.ArrayListUnmanaged(usize) = .empty,
     nodes: std.ArrayListUnmanaged(Node) = .empty,
@@ -82,13 +86,10 @@ pub const PieceTable = struct {
         var count: usize = 0;
         var pos: usize = 0;
         while (std.mem.indexOfScalarPos(u8, bytes, pos, '\n')) |i| : (pos = i + 1) count += 1;
-        t.original_nl = try gpa.alloc(usize, count);
-        var k: usize = 0;
+        try t.original_nl.ensureTotalCapacityPrecise(gpa, count);
         pos = 0;
-        while (std.mem.indexOfScalarPos(u8, bytes, pos, '\n')) |i| : (pos = i + 1) {
-            t.original_nl[k] = i;
-            k += 1;
-        }
+        while (std.mem.indexOfScalarPos(u8, bytes, pos, '\n')) |i| : (pos = i + 1) t.original_nl.appendAssumeCapacity(i);
+        t.indexed_to = bytes.len;
 
         if (bytes.len > 0) {
             try t.nodes.ensureUnusedCapacity(gpa, 4);
@@ -97,9 +98,48 @@ pub const PieceTable = struct {
         return t;
     }
 
+    /// Start with `bytes` (borrowed; typically a memory-mapped file) as the
+    /// original text without scanning it. The document is usable at once: it is
+    /// all one piece and the first lines are findable as soon as the newline
+    /// index has reached them. Feed the index with `appendOriginalIndex` (a
+    /// background scan does this); until it reports completion the document
+    /// cannot be edited and `lineCount` only counts the lines found so far.
+    pub fn initMapped(gpa: std.mem.Allocator, bytes: []const u8) !PieceTable {
+        var t = init(gpa);
+        errdefer t.deinit();
+        t.original = bytes;
+        t.indexing = bytes.len > 0;
+        if (bytes.len > 0) {
+            try t.nodes.ensureUnusedCapacity(gpa, 4);
+            t.root = t.allocNode(.original, 0, bytes.len);
+        }
+        return t;
+    }
+
+    /// Add newline offsets found in the next stretch of the file: `offsets` are
+    /// ascending and past everything given before, and the scan has covered the
+    /// file up to `scanned_to` bytes. When that is the whole file, indexing ends.
+    pub fn appendOriginalIndex(self: *PieceTable, offsets: []const usize, scanned_to: usize) !void {
+        std.debug.assert(self.indexing);
+        std.debug.assert(scanned_to >= self.indexed_to and scanned_to <= self.original.len);
+        try self.original_nl.appendSlice(self.gpa, offsets);
+        self.indexed_to = scanned_to;
+        // Untouched since opening (edits wait for the index), so one piece covers it all.
+        const root = &self.nodes.items[self.root];
+        root.nl = self.original_nl.items.len;
+        root.sub_nl = root.nl;
+        if (scanned_to == self.original.len) self.indexing = false;
+    }
+
+    /// Fraction of a mapped file indexed so far, 0..1 (1 when complete).
+    pub fn indexProgress(self: *const PieceTable) f32 {
+        if (!self.indexing or self.original.len == 0) return 1;
+        return @as(f32, @floatFromInt(self.indexed_to)) / @as(f32, @floatFromInt(self.original.len));
+    }
+
     pub fn deinit(self: *PieceTable) void {
         if (self.original_owned) self.gpa.free(@constCast(self.original));
-        self.gpa.free(self.original_nl);
+        self.original_nl.deinit(self.gpa);
         self.add.deinit(self.gpa);
         self.add_nl.deinit(self.gpa);
         self.nodes.deinit(self.gpa);
@@ -139,7 +179,7 @@ pub const PieceTable = struct {
 
     fn bufNl(self: *const PieceTable, b: Buf) []const usize {
         return switch (b) {
-            .original => self.original_nl,
+            .original => self.original_nl.items,
             .add => self.add_nl.items,
         };
     }
@@ -288,6 +328,7 @@ pub const PieceTable = struct {
 
     /// Insert `text` so it starts at `offset` (0..len).
     pub fn insert(self: *PieceTable, offset: usize, text: []const u8) !void {
+        if (self.indexing) return error.Indexing;
         std.debug.assert(offset <= self.len());
         if (text.len == 0) return;
         try self.reserve();
@@ -313,6 +354,7 @@ pub const PieceTable = struct {
 
     /// Remove `n` bytes starting at `offset`.
     pub fn delete(self: *PieceTable, offset: usize, n: usize) !void {
+        if (self.indexing) return error.Indexing;
         const total = self.len();
         std.debug.assert(offset <= total);
         const count = @min(n, total - offset);
@@ -483,6 +525,46 @@ test "empty table" {
     try testing.expectEqual(@as(usize, 0), t.lineEnd(0));
     try testing.expect(t.chunkAt(0) == null);
     try t.validate();
+}
+
+test "a mapped original is usable before it is indexed, and lines appear as the index grows" {
+    const text = "alpha\nbeta\n\ngamma\ndelta";
+    var t = try PieceTable.initMapped(testing.allocator, text);
+    defer t.deinit();
+    try testing.expectEqual(text.len, t.len());
+    try testing.expect(t.indexing and t.indexProgress() == 0);
+    try testing.expectEqual(@as(usize, 1), t.lineCount()); // nothing found yet
+    try testing.expectEqualStrings(text[0..5], t.chunkAt(0).?[0..5]); // but the text reads fine
+    try testing.expectError(error.Indexing, t.insert(0, "x"));
+    try testing.expectError(error.Indexing, t.delete(0, 1));
+
+    // The scan reports the first stretch (through "beta\n"), then the rest.
+    try t.appendOriginalIndex(&.{ 5, 10 }, 11);
+    try testing.expect(t.indexing);
+    try testing.expectEqual(@as(usize, 3), t.lineCount());
+    try testing.expectEqual(@as(usize, 6), t.lineStart(1));
+    try testing.expectEqual(@as(usize, 1), t.lineOfOffset(8));
+    try t.appendOriginalIndex(&.{ 11, 17 }, text.len);
+    try testing.expect(!t.indexing and t.indexProgress() == 1);
+    try testing.expectEqual(@as(usize, 5), t.lineCount());
+    try testing.expectEqual(@as(usize, 18), t.lineStart(4));
+    try t.validate();
+
+    // Now it edits like any other document.
+    try t.insert(6, "NEW ");
+    try testing.expectEqual(@as(usize, 5), t.lineCount());
+    try testing.expectEqual(@as(usize, 6), t.lineStart(1));
+    try t.delete(0, 6);
+    try testing.expectEqual(@as(usize, 4), t.lineCount());
+    try t.validate();
+}
+
+test "an empty mapped file is complete at once" {
+    var t = try PieceTable.initMapped(testing.allocator, "");
+    defer t.deinit();
+    try testing.expect(!t.indexing);
+    try t.insert(0, "hi");
+    try testing.expectEqual(@as(usize, 2), t.len());
 }
 
 test "an original file is borrowed, not copied, and indexed by line" {

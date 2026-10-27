@@ -49,6 +49,8 @@ const Editor = @import("../editor/editor.zig").Editor;
 const Selection = @import("../editor/selection.zig").Selection;
 const syntax = @import("../editor/syntax.zig");
 const Highlighter = @import("../editor/highlighter.zig").Highlighter;
+const MappedFile = @import("../editor/mapped_file.zig").MappedFile;
+const Indexer = @import("../editor/indexer.zig").Indexer;
 
 pub const Font = label.Font;
 
@@ -92,11 +94,17 @@ pub const CodeEditor = struct {
 
     /// Syntax highlighting, if a language is set.
     highlighter: ?Highlighter = null,
+    /// A file opened with `openFile`: the mapping the text borrows, and the
+    /// background scan still indexing its lines.
+    mapped: ?MappedFile = null,
+    indexer: ?*Indexer = null,
 
     pub fn deinit(self: *CodeEditor) void {
+        self.releaseFile(false);
         if (self.highlighter) |*h| h.deinit();
         self.spans.deinit(self.ui.gpa);
         self.editor.deinit();
+        self.releaseFile(true);
         self.display.deinit(self.ui.gpa);
         self.preedit.deinit(self.ui.gpa);
         self.map.deinit(self.ui.gpa);
@@ -123,6 +131,68 @@ pub const CodeEditor = struct {
     }
 
     /// Call after the editor core was replaced.
+    /// Stop indexing; unmap the file if `unmap` (only once the editor no longer
+    /// borrows its bytes).
+    fn releaseFile(self: *CodeEditor, unmap: bool) void {
+        if (self.indexer) |ix| ix.destroy();
+        self.indexer = null;
+        if (unmap) {
+            if (self.mapped) |*m| m.close();
+            self.mapped = null;
+        }
+    }
+
+    fn wakeUi(ctx: ?*anyopaque) void {
+        const ui: *Ui = @ptrCast(@alignCast(ctx.?));
+        if (ui.wake) |w| w();
+    }
+
+    /// Open `path` as the document without reading it: the file is memory-mapped
+    /// (read-only) and shown at once, while a background thread indexes its lines.
+    /// Until indexing finishes (`out.indexing`) the line count grows, the text
+    /// cannot be edited, and jumps past the indexed part stop short. Set
+    /// `Ui.wake` so the event loop wakes as the scan makes progress. Needs the
+    /// `Io` the program uses for files.
+    pub fn openFile(self: *CodeEditor, io: std.Io, path: []const u8) !void {
+        var mapped = try MappedFile.open(io, path);
+        errdefer mapped.close();
+        var fresh = try Editor.initMapped(self.ui.gpa, mapped.bytes);
+        errdefer fresh.deinit();
+        var indexer: ?*Indexer = null;
+        if (fresh.doc.isIndexing()) {
+            indexer = try Indexer.start(self.ui.gpa, mapped.bytes, .{ .wake = .{ .ctx = self.ui, .call = wakeUi } });
+        }
+        self.releaseFile(false);
+        self.editor.deinit();
+        if (self.mapped) |*old| old.close();
+        self.editor = fresh;
+        self.mapped = mapped;
+        self.indexer = indexer;
+        self.scroll_x = 0;
+        self.scroll_y = 0;
+        self.last_version = 0;
+        self.repaint = true;
+        self.resetHighlighting();
+    }
+
+    /// Move newline offsets the worker has found into the document's index.
+    fn pumpIndex(self: *CodeEditor) void {
+        const ix = self.indexer orelse return;
+        var chunks: [@import("../editor/indexer.zig").ring_len]@import("../editor/indexer.zig").Chunk = undefined;
+        const n = ix.take(&chunks);
+        if (n == 0) return;
+        for (chunks[0..n]) |c| {
+            defer self.ui.gpa.free(c.offsets);
+            self.editor.doc.table.appendOriginalIndex(c.offsets, c.scanned_to) catch {};
+        }
+        self.resetHighlighting();
+        self.repaint = true;
+        if (!self.editor.doc.isIndexing()) {
+            ix.destroy();
+            self.indexer = null;
+        }
+    }
+
     pub fn resetHighlighting(self: *CodeEditor) void {
         if (self.highlighter) |*h| h.reset(self.editor.doc.lineCount()) catch {};
     }
@@ -210,7 +280,10 @@ pub const CodeEditor = struct {
     /// editor. History is cleared and the text counts as saved.
     pub fn loadText(self: *CodeEditor, bytes: []const u8, owned: bool) !void {
         const fresh = try Editor.initWithText(self.ui.gpa, bytes, owned);
+        self.releaseFile(false);
         self.editor.deinit();
+        if (self.mapped) |*old| old.close();
+        self.mapped = null;
         self.editor = fresh;
         self.scroll_x = 0;
         self.scroll_y = 0;
@@ -436,6 +509,7 @@ pub const CodeEditor = struct {
     /// Per-frame sync: apply props, notice document changes, keep the caret in
     /// view, refresh `out`, and mark the node dirty if anything needs repainting.
     pub fn update(self: *CodeEditor) void {
+        self.pumpIndex();
         self.ui.verifyProps(self.node, &self.checker, &self.props, "code_editor");
         const tree = &self.ui.tree;
         const node = tree.get(self.node).?;
@@ -476,6 +550,8 @@ pub const CodeEditor = struct {
         out.caret_column = @intCast(self.editor.doc.columnOf(head) catch 0);
         out.selection_count = @intCast(self.editor.sel.items.items.len);
         out.modified = self.editor.isModified();
+        out.indexing = self.editor.doc.isIndexing();
+        out.index_progress = self.editor.doc.table.indexProgress();
 
         if (self.repaint) {
             self.repaint = false;
@@ -893,6 +969,10 @@ pub const CodeEditor = struct {
         hovered: bool = false,
         /// Text differs from the last save point (see `markSaved`).
         modified: bool = false,
+        /// A file opened with `openFile` is still being indexed: lines are still
+        /// being counted and editing is off.
+        indexing: bool = false,
+        index_progress: f32 = 1,
         change_count: u32 = 0,
         line_count: u32 = 1,
         /// 0-based line and column (code points) of the primary caret.

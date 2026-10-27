@@ -67,6 +67,8 @@ pub const Change = struct {
 };
 
 pub const Error = error{OutOfMemory};
+/// Editing can also fail while a mapped file is still being indexed.
+pub const ApplyError = Error || error{Indexing};
 
 pub const Document = struct {
     gpa: std.mem.Allocator,
@@ -82,6 +84,17 @@ pub const Document = struct {
     }
 
     /// Open `bytes` as the original text (see `PieceTable.initWithOriginal`).
+    /// A document over borrowed, memory-mapped bytes whose newline index is built
+    /// later (see `PieceTable.initMapped`).
+    pub fn initMapped(gpa: std.mem.Allocator, bytes: []const u8) !Document {
+        return .{ .gpa = gpa, .table = try PieceTable.initMapped(gpa, bytes) };
+    }
+
+    /// True while a mapped file is still being indexed (it cannot be edited yet).
+    pub fn isIndexing(self: *const Document) bool {
+        return self.table.indexing;
+    }
+
     pub fn initWithText(gpa: std.mem.Allocator, bytes: []const u8, owned: bool) !Document {
         return .{ .gpa = gpa, .table = try PieceTable.initWithOriginal(gpa, bytes, owned) };
     }
@@ -105,7 +118,7 @@ pub const Document = struct {
 
     /// Apply an op and record its change. A delete must match the document's
     /// text at that range (checked in safe builds).
-    pub fn apply(self: *Document, op: Op) Error!void {
+    pub fn apply(self: *Document, op: Op) ApplyError!void {
         const line = self.table.lineOfOffset(op.offset);
         var nl: usize = 0;
         for (op.text) |c| nl += @intFromBool(c == '\n');

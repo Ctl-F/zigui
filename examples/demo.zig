@@ -90,12 +90,9 @@ fn addCard(a: *App) !void {
 /// Load the file behind sidebar row `index` into the editor.
 fn openFile(a: *App, index: usize) void {
     const ed = a.editor orelse return;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(a.io, a.paths[index], a.gpa, .limited(32 * 1024 * 1024)) catch |err| {
+    // Memory-mapped and indexed in the background: opens instantly at any size.
+    ed.openFile(a.io, a.paths[index]) catch |err| {
         std.log.warn("could not open {s}: {s}", .{ a.paths[index], @errorName(err) });
-        return;
-    };
-    ed.loadText(bytes, true) catch {
-        a.gpa.free(bytes);
         return;
     };
     a.language = zigui.syntax.languageForPath(a.paths[index]);
@@ -454,6 +451,7 @@ pub fn main(init: std.process.Init) !void {
 
     var ui = try Ui.init(gpa);
     ui.clock = sdl.ticksNs;
+    ui.wake = sdl.wake;
     defer ui.deinit();
 
     // Fonts: the file bytes and StbFont structs must outlive the Ui.
@@ -487,7 +485,7 @@ pub fn main(init: std.process.Init) !void {
     state.alt_theme.field.border_focus = rgb(0xf0a030);
     state.alt_theme.editor.background = rgb(0x1a1612);
     state.alt_theme.editor.current_line = rgb(0x26201a);
-    state.alt_theme.editor.syntax[@intFromEnum(zigui.syntax.TokenKind.keyword)] = rgb(0xf0a030);
+    state.alt_theme.editor.syntax[@backingInt(zigui.syntax.TokenKind.keyword)] = rgb(0xf0a030);
     try buildUi(&state);
     try setupCommands(&state);
 
@@ -513,11 +511,20 @@ pub fn main(init: std.process.Init) !void {
 
     var text_input_on = false;
     var running = true;
+
+    var lastFocused = ui.tree.focused;
+
     while (running) {
         _ = ui.tick(sdl.ticks());
         // Settle widget state from last iteration's input, then refresh the
         // status text from it (so it never lags a keystroke behind).
         ui.update();
+
+        if (!lastFocused.eql(ui.tree.focused)) {
+            lastFocused = ui.tree.focused;
+            std.debug.print("Focused: {}\n", .{lastFocused});
+        }
+
         if (state.status) |st| {
             const ed = state.editor.?;
             var sbuf: [160]u8 = undefined;
