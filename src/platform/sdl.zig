@@ -70,6 +70,8 @@ pub const Window = struct {
             return error.WindowFailed;
         errdefer c.SDL_DestroyWindow(handle);
         const renderer = c.SDL_CreateRenderer(handle, null) orelse return error.RendererFailed;
+        // Pace presents to the display so continuous canvases do not spin.
+        _ = c.SDL_SetRenderVSync(renderer, 1);
         return .{ .handle = handle, .renderer = renderer };
     }
 

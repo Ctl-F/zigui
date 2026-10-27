@@ -105,6 +105,8 @@ The canvas is a widget with a state block like any other, with three surface mod
 
 Two tiers overall: a portable draw context for most needs, and the backend escape hatch for games and 3D. Native-pass code is backend-specific by nature, so ship one portable GPU path first so the escape hatch is not a fork.
 
+Implemented in `src/widgets/canvas.zig`: draw-list and offscreen-texture modes, redraw policies, pointer capture and grab, raw-key mode. Native-pass mode waits for the GPU backend.
+
 ### Canvas input
 
 - Pointer capture, so drags that leave the rect keep going to the canvas.

@@ -141,6 +141,22 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(builder_exe);
 
+    const paint_exe = b.addExecutable(.{
+        .name = "paint",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/paint.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zigui", .module = mod },
+                .{ .name = "zigui_sdl", .module = sdl_mod },
+                .{ .name = "zigui_stb", .module = stb_mod },
+            },
+        }),
+    });
+    b.installArtifact(paint_exe);
+
     const run_demo = b.addRunArtifact(demo);
     const demo_step = b.step("demo", "Build and run the demo window (needs SDL3)");
     demo_step.dependOn(&run_demo.step);
@@ -148,6 +164,10 @@ pub fn build(b: *std.Build) void {
     const run_builder = b.addRunArtifact(builder_exe);
     const builder_step = b.step("builder", "Build and run the UI builder (edits ui.zon; or run zig-out/bin/builder FILE)");
     builder_step.dependOn(&run_builder.step);
+
+    const run_paint = b.addRunArtifact(paint_exe);
+    const paint_step = b.step("paint", "Build and run the paint example (canvas with an offscreen surface)");
+    paint_step.dependOn(&run_paint.step);
 
     const run_dedit = b.addRunArtifact(dedit);
     const dedit_step = b.step("dedit", "Build and run the demo editor");

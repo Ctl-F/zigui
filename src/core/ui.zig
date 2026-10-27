@@ -43,6 +43,7 @@ const button = @import("../widgets/button.zig");
 const label = @import("../widgets/label.zig");
 const text_field = @import("../widgets/text_field.zig");
 const code_editor = @import("../widgets/code_editor.zig");
+const canvas_mod = @import("../widgets/canvas.zig");
 const widget = @import("../widgets/widget.zig");
 
 pub const Scope = shortcuts_mod.Scope;
@@ -53,7 +54,8 @@ pub const Clipboard = @import("clipboard.zig").Clipboard;
 pub const Button = button.Button;
 pub const Label = label.Label;
 pub const TextField = text_field.TextField;
-pub const CodeEditor = code_editor.CodeEditor;
+pub const Canvas = canvas_mod.Canvas;
+const CodeEditor = code_editor.CodeEditor;
 
 /// The UI context: tree, layout, input, theme, and every widget.
 ///
@@ -77,6 +79,10 @@ pub const Ui = struct {
     labels: Pool(Label, 64),
     fields: Pool(TextField, 64),
     editors: Pool(CodeEditor, 16),
+    canvases: Pool(Canvas, 16),
+    /// The renderer the app draws with (set by `renderFrame` or `setBackend`);
+    /// canvases create their offscreen surfaces through it.
+    backend: ?render_backend.Backend = null,
     clipboard: ?Clipboard = null,
     /// Last time passed to `tick`, in milliseconds.
     now_ms: u64 = 0,
@@ -101,6 +107,7 @@ pub const Ui = struct {
             .labels = Pool(Label, 64).init(gpa),
             .fields = Pool(TextField, 64).init(gpa),
             .editors = Pool(CodeEditor, 16).init(gpa),
+            .canvases = Pool(Canvas, 16).init(gpa),
             .commands = commands_mod.Commands.init(gpa),
             .shortcuts = shortcuts_mod.Shortcuts.init(gpa),
         };
@@ -112,7 +119,7 @@ pub const Ui = struct {
         self.theme = theme;
         self.tree.markDirty(self.tree.root, DirtyFlags.layout_and_paint);
         // Widgets reshape text and repaint from the new theme in `update`.
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| self.tree.markDirty(e.ptr.node, DirtyFlags.layout_and_paint);
         }
@@ -132,7 +139,7 @@ pub const Ui = struct {
     }
 
     pub fn deinit(self: *Ui) void {
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| e.ptr.deinit();
             pool.deinit();
@@ -147,11 +154,12 @@ pub const Ui = struct {
 
     // ---- creating widgets --------------------------------------------------------
 
-    fn poolFor(self: *Ui, comptime W: type) *Pool(W, if (W == CodeEditor) 16 else 64) {
+    fn poolFor(self: *Ui, comptime W: type) *Pool(W, if (W == CodeEditor or W == Canvas) 16 else 64) {
         if (W == Button) return &self.buttons;
         if (W == Label) return &self.labels;
         if (W == TextField) return &self.fields;
         if (W == CodeEditor) return &self.editors;
+        if (W == Canvas) return &self.canvases;
         @compileError("not a widget type: " ++ @typeName(W));
     }
 
@@ -227,14 +235,14 @@ pub const Ui = struct {
     pub fn tick(self: *Ui, now_ms: u64) bool {
         self.now_ms = now_ms;
         var changed = false;
-        inline for (.{ &self.fields, &self.editors }) |pool| {
+        inline for (.{ &self.fields, &self.editors, &self.canvases }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| changed = e.ptr.tick(now_ms) or changed;
         }
         return changed;
     }
 
-    /// Milliseconds until the next timed update (caret blink), or null if
+    /// Milliseconds until the next timed update (caret blink, canvas frame), or null if
     /// nothing needs one. Use as the event-wait timeout.
     pub fn nextWakeMs(self: *Ui) ?u32 {
         var best: ?u64 = null;
@@ -246,7 +254,13 @@ pub const Ui = struct {
                 }
             }
         }
-        return if (best) |b| @intCast(b) else null;
+        var cit = self.canvases.iterator();
+        while (cit.next()) |e| {
+            if (e.ptr.msUntilFrame(self.now_ms)) |left| {
+                if (best == null or left < best.?) best = left;
+            }
+        }
+        return if (best) |b| @intCast(@min(b, std.math.maxInt(u32))) else null;
     }
 
     /// Where the text caret is, in window coordinates, if a text widget has
@@ -492,6 +506,12 @@ pub const Ui = struct {
         try paint.build(&self.tree, list);
     }
 
+    /// Tell the Ui which renderer the app uses, before the first frame, so
+    /// widgets such as canvases can create textures. `renderFrame` also sets it.
+    pub fn setBackend(self: *Ui, be: ?render_backend.Backend) void {
+        self.backend = be;
+    }
+
     pub const RenderOptions = struct {
         /// Target size in device pixels.
         pixel_w: u32,
@@ -505,6 +525,7 @@ pub const Ui = struct {
     /// (begin, atlas upload if the backend wants it, submit, present). Call it
     /// when `isDirty()` or the platform asks for a redraw.
     pub fn renderFrame(self: *Ui, be: render_backend.Backend, list: *DrawList, o: RenderOptions) !void {
+        self.backend = be;
         const scale = if (o.scale > 0) o.scale else 1;
         const logical: geometry.Size = .{
             .w = @as(f32, @floatFromInt(o.pixel_w)) / scale,
@@ -545,7 +566,7 @@ pub const Ui = struct {
 
     /// Run `method` on every live widget.
     fn forEachWidget(self: *Ui, comptime method: []const u8) void {
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| @field(@TypeOf(e.ptr.*), method)(e.ptr);
         }
@@ -560,6 +581,7 @@ pub const Ui = struct {
         self.sweep(&self.labels);
         self.sweep(&self.fields);
         self.sweep(&self.editors);
+        self.sweep(&self.canvases);
 
         if (self.shortcuts.count() > 0) self.shortcuts.prune(&self.tree, &self.commands);
 

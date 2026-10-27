@@ -16,7 +16,7 @@ atlas, fields), commands and scoped shortcuts, a piece-table editor core with
 undo/redo and multi-cursor, a code editor widget with incremental syntax
 highlighting, a software renderer, an SDL3 platform shim, a runtime widget
 schema and registry, generated forms and wizards, ZON UI documents, and a visual
-builder. About 420 tests.
+builder. About 430 tests.
 
 Not built yet (largest first): a renderer backend interface and GPU path, canvas
 and frame scheduling, damage tracking, list/tree widgets and a model interface,
@@ -29,6 +29,7 @@ zig build test                 # all tests; no SDL needed
 zig build check-boundary       # also part of `test`: no C-convention code in the core
 zig build demo                 # IDE-style demo window (needs SDL3 dev files, pkg-config sdl3)
 zig build dedit                # a minimal demo editor window
+zig build paint                # paint program on a canvas with an offscreen surface
 zig build builder              # the UI builder, editing ./ui.zon (or zig-out/bin/builder FILE)
 ```
 
@@ -198,6 +199,17 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   changed pages, so a GPU backend never sees a missing glyph. No draw command
   samples textures yet, and no GPU backend exists; `software.render` remains as
   the rasterizer underneath.
+- Canvas (`widgets/canvas.zig`): draw-list mode (`on_draw` emits commands clipped
+  to the node) and offscreen-texture mode (`createSurface`, `updateSurface`,
+  drawn with the new `image` draw command; the software renderer samples nearest
+  or bilinear). `redraw_policy` is `on_demand`, `continuous`, or `fixed_hz`, and
+  `Ui.tick`/`nextWakeMs` honor it (the SDL window now vsyncs). Input: pointer
+  events with local coordinates and press capture, `grab_input` to send all
+  pointer input to the canvas, and `raw_keys` so a focused canvas gets every key
+  before shortcuts and Tab (only Escape escapes; `NodeFlags.raw_keys`). Not built:
+  native-pass mode (needs the GPU backend), pointer lock, pen pressure and tilt,
+  motion coalescing. `Ui.backend` is set by `renderFrame` or `setBackend`.
+  Release a canvas surface before destroying the canvas.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.
@@ -309,15 +321,14 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
 Ordered by the spec-drift notes (`NOTES/spec-drift-notes.md`); the notes are the
 authority for rationale, and a few items are recommendations, not requirements.
 
-1. Canvas node with `redraw_policy` and raw-key mode in key routing.
-2. Frame stats ring buffer and overlay, a handler time-budget warning, and a test
+1. Frame stats ring buffer and overlay, a handler time-budget warning, and a test
    that steady-state frames allocate nothing.
-3. Damage rects and per-repaint-boundary draw-record caching.
-4. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
+2. Damage rects and per-repaint-boundary draw-record caching.
+3. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
    focus scopes (modal traps), tab indices, IME preedit.
-5. Memory-mapped document open and an off-thread newline-index scan.
-6. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
-7. The C facade (`src/capi/`), once the core Zig library is done.
+4. Memory-mapped document open and an off-thread newline-index scan.
+5. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
+6. The C facade (`src/capi/`), once the core Zig library is done.
 
 Smaller gaps: theme metrics (padding, min sizes) and a painter measure override; layout follow-ups (width-constrained text measure, stack/absolute,
 split and scroll containers, wrap, grid, calc `Length`); draw commands for

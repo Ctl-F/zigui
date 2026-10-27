@@ -22,6 +22,7 @@ const Button = @import("button.zig").Button;
 const Label = @import("label.zig").Label;
 const TextField = @import("text_field.zig").TextField;
 const CodeEditor = @import("code_editor.zig").CodeEditor;
+const Canvas = @import("canvas.zig").Canvas;
 
 pub const Error = schema.Error || error{ UnknownWidget, NotAWidget, StaleHandle };
 
@@ -128,6 +129,7 @@ pub const widgets = [_]Info{
     describe("label", Label),
     describe("text_field", TextField),
     describe("code_editor", CodeEditor),
+    describe("canvas", Canvas),
 };
 
 pub fn find(name: []const u8) ?*const Info {

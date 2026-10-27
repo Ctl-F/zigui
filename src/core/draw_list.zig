@@ -68,6 +68,19 @@ pub const RoundedFill = struct { rect: Rect, paint: Paint, radii: [4]f32 };
 
 pub const Line = struct { from: Vec2, to: Vec2, paint: Paint, width: f32 };
 
+pub const ImageFilter = enum { nearest, linear };
+
+/// A textured quad: `src` (texels; zero width or height means the whole
+/// texture) stretched over `rect`, multiplied by `tint`. The texture is an
+/// opaque handle issued by the renderer backend.
+pub const Image = struct {
+    rect: Rect,
+    texture: @import("handle.zig").Handle,
+    src: Rect = .{},
+    tint: Color = Color.white,
+    filter: ImageFilter = .linear,
+};
+
 /// A run of pre-shaped glyphs, referenced by offset and count into the side
 /// array. Glyph positions are baseline pen positions in logical pixels.
 pub const GlyphRun = struct {
@@ -95,6 +108,7 @@ pub const Command = union(enum) {
     push_opacity: f32,
     pop_opacity,
     glyph_run: GlyphRun,
+    image: Image,
 };
 
 comptime {
@@ -172,6 +186,10 @@ pub const DrawList = struct {
 
     pub fn line(self: *DrawList, from: Vec2, to: Vec2, width: f32, paint: Paint) Error!void {
         try self.push(.{ .line = .{ .from = from, .to = to, .paint = paint, .width = width } });
+    }
+
+    pub fn image(self: *DrawList, img: Image) Error!void {
+        try self.push(.{ .image = img });
     }
 
     pub fn pushClip(self: *DrawList, rect: Rect) Error!void {

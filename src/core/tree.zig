@@ -51,7 +51,10 @@ pub const NodeFlags = packed struct(u16) {
     /// Typing goes into this node (text fields): unmodified printable-key
     /// shortcuts do not fire while it has focus.
     accepts_text: bool = false,
-    _reserved: u9 = 0,
+    /// A focused node with this set gets every key first and nothing falls
+    /// through to shortcuts or Tab navigation (canvases); only Escape escapes.
+    raw_keys: bool = false,
+    _reserved: u8 = 0,
 };
 
 pub const Style = @import("style.zig").Style;

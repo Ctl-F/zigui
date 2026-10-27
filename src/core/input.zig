@@ -41,6 +41,9 @@ pub const Input = struct {
     hover: Handle = Handle.invalid,
     pressed: Handle = Handle.invalid,
     pressed_button: u32 = 0,
+    /// While valid, every pointer event (move, button, wheel) goes to this node,
+    /// wherever the pointer is. See `Ui.grabPointer`.
+    grab: Handle = Handle.invalid,
     /// The node last notified with focus_in.
     focus_seen: Handle = Handle.invalid,
     /// True if the most recent input was from the keyboard.
@@ -94,10 +97,17 @@ pub const Input = struct {
         self.hover = new;
     }
 
+    /// The node pointer events are aimed at: the grabbing node while one holds
+    /// the grab, otherwise whatever is under the pointer.
+    fn pointerTarget(self: *const Input, tree: *Tree, x: f32, y: f32) ?Handle {
+        if (tree.isValid(self.grab)) return self.grab;
+        return tree.hitTest(x, y);
+    }
+
     pub fn pointerMove(self: *Input, tree: *Tree, x: f32, y: f32) void {
         self.pointer_x = x;
         self.pointer_y = y;
-        const hit = tree.hitTest(x, y);
+        const hit = self.pointerTarget(tree, x, y);
         self.setHover(tree, hit, x, y);
         const target = if (tree.isValid(self.pressed)) self.pressed else (hit orelse return);
         var ev: Event = .{ .kind = .pointer_move, .target = target, .x = x, .y = y, .mods = self.mods };
@@ -112,7 +122,7 @@ pub const Input = struct {
     pub fn pointerButtonEx(self: *Input, tree: *Tree, x: f32, y: f32, button: u32, down: bool, clicks: u32) void {
         self.pointer_x = x;
         self.pointer_y = y;
-        const hit = tree.hitTest(x, y);
+        const hit = self.pointerTarget(tree, x, y);
         self.setHover(tree, hit, x, y);
 
         if (down) {
@@ -148,7 +158,7 @@ pub const Input = struct {
             }
         }
         // The pointer may now be over something else (or the pressed node was removed).
-        self.setHover(tree, tree.hitTest(x, y), x, y);
+        self.setHover(tree, self.pointerTarget(tree, x, y), x, y);
     }
 
     // ---- keyboard focus ---------------------------------------------------
@@ -206,6 +216,10 @@ pub const Input = struct {
         };
         dispatch.dispatch(tree, &ev);
         if (ev.handled) return true;
+        // Raw-key nodes take everything but Escape, so a canvas can use any key.
+        if (tree.get(target)) |n| {
+            if (n.flags.raw_keys and k != .escape) return true;
+        }
         if (hook) |h| {
             if (h.run(h.ctx, tree, k, mods, down, repeat)) return true;
         }
@@ -229,7 +243,7 @@ pub const Input = struct {
     }
 
     pub fn wheel(self: *Input, tree: *Tree, x: f32, y: f32, dx: f32, dy: f32) void {
-        const hit = tree.hitTest(x, y) orelse return;
+        const hit = self.pointerTarget(tree, x, y) orelse return;
         var ev: Event = .{ .kind = .wheel, .target = hit, .x = x, .y = y, .dx = dx, .dy = dy, .mods = self.mods };
         dispatch.dispatch(tree, &ev);
     }

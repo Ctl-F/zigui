@@ -8,7 +8,8 @@
 //! Supported: fill_rect, stroke_rect (with radius), fill_rounded_rect (per-corner
 //! radii), line, push/pop clip (rectangular, pixel-snapped outward), push/pop
 //! opacity, solid / linear / radial paints, and glyph runs (through a
-//! `GlyphProvider`; without one, runs are skipped). Not yet: image patterns.
+//! `GlyphProvider`; without one, runs are skipped), and `image` quads sampled
+//! from a `TextureSource` (nearest or bilinear). Not yet: image patterns.
 //! Unsupported commands are skipped.
 //!
 //! Text blends coverage straight over the destination in sRGB space (no gamma
@@ -66,6 +67,21 @@ pub const Framebuffer = struct {
     }
 };
 
+/// Pixels of a texture the renderer can sample.
+pub const TextureView = struct {
+    pixels: []const u8,
+    width: u32,
+    height: u32,
+    /// 4 bytes per pixel straight RGBA, or 1 byte of coverage (drawn in the tint).
+    alpha_only: bool = false,
+};
+
+/// Where `image` commands find their textures.
+pub const TextureSource = struct {
+    ctx: *anyopaque,
+    lookup: *const fn (ctx: *anyopaque, texture: @import("../core/handle.zig").Handle) ?TextureView,
+};
+
 pub const Options = struct {
     /// Device pixels per logical pixel.
     scale: f32 = 1,
@@ -75,6 +91,8 @@ pub const Options = struct {
     damage: ?Rect = null,
     /// Source of glyph bitmaps for `glyph_run` commands.
     glyphs: ?GlyphProvider = null,
+    /// Source of textures for `image` commands (they are skipped without one).
+    textures: ?TextureSource = null,
 };
 
 /// Half-open integer pixel rectangle.
@@ -211,11 +229,36 @@ fn toU8(v: f32) u8 {
     return @intFromFloat(std.math.clamp(@round(v), 0, 255));
 }
 
+fn texel(t: TextureView, x: i32, y: i32) Color {
+    const cx: u32 = @intCast(std.math.clamp(x, 0, @as(i32, @intCast(t.width)) - 1));
+    const cy: u32 = @intCast(std.math.clamp(y, 0, @as(i32, @intCast(t.height)) - 1));
+    const i = @as(usize, cy) * t.width + cx;
+    if (t.alpha_only) return .{ .r = 255, .g = 255, .b = 255, .a = t.pixels[i] };
+    return .{ .r = t.pixels[i * 4], .g = t.pixels[i * 4 + 1], .b = t.pixels[i * 4 + 2], .a = t.pixels[i * 4 + 3] };
+}
+
+fn sampleNearest(t: TextureView, u: f32, v: f32) Color {
+    return texel(t, floorI(u), floorI(v));
+}
+
+fn sampleLinear(t: TextureView, u: f32, v: f32) Color {
+    const fx = u - 0.5;
+    const fy = v - 0.5;
+    const x0 = floorI(fx);
+    const y0 = floorI(fy);
+    const tx = fx - @floor(fx);
+    const ty = fy - @floor(fy);
+    const top = lerpColor(texel(t, x0, y0), texel(t, x0 + 1, y0), tx);
+    const bottom = lerpColor(texel(t, x0, y0 + 1), texel(t, x0 + 1, y0 + 1), tx);
+    return lerpColor(top, bottom, ty);
+}
+
 const Renderer = struct {
     fb: *Framebuffer,
     scale: f32,
     glyphs: ?GlyphProvider = null,
     glyph_items: []const draw_list.Glyph = &.{},
+    textures: ?TextureSource = null,
 
     clip: IRect,
     clips: [max_clip_depth]IRect = undefined,
@@ -301,6 +344,45 @@ const Renderer = struct {
                 .hh = d.h / 2,
                 .radii = sr,
             } }, paint);
+        }
+    }
+
+    fn drawImage(self: *Renderer, img: draw_list.Image) void {
+        const src_src = self.textures orelse return;
+        const tex = src_src.lookup(src_src.ctx, img.texture) orelse return;
+        if (tex.width == 0 or tex.height == 0) return;
+        const d = self.scaled(img.rect);
+        if (d.w <= 0 or d.h <= 0) return;
+        const tw: f32 = @floatFromInt(tex.width);
+        const th: f32 = @floatFromInt(tex.height);
+        const s = if (img.src.w > 0 and img.src.h > 0) img.src else Rect{ .x = 0, .y = 0, .w = tw, .h = th };
+        const area = IRect.covering(d, 0).intersect(self.clip);
+        if (area.isEmpty()) return;
+        const w: usize = self.fb.width;
+        var y = area.y0;
+        while (y < area.y1) : (y += 1) {
+            const row = self.fb.pixels[@as(usize, @intCast(y)) * w ..][0..w];
+            const v = s.y + (@as(f32, @floatFromInt(y)) + 0.5 - d.y) / d.h * s.h;
+            var x = area.x0;
+            while (x < area.x1) : (x += 1) {
+                const u = s.x + (@as(f32, @floatFromInt(x)) + 0.5 - d.x) / d.w * s.w;
+                var c = switch (img.filter) {
+                    .nearest => sampleNearest(tex, u, v),
+                    .linear => sampleLinear(tex, u, v),
+                };
+                // Coverage-only textures take the tint's color; others multiply.
+                if (tex.alpha_only) {
+                    c = .{ .r = img.tint.r, .g = img.tint.g, .b = img.tint.b, .a = toU8(@as(f32, @floatFromInt(c.a)) * @as(f32, @floatFromInt(img.tint.a)) / 255.0) };
+                } else {
+                    c = .{
+                        .r = toU8(@as(f32, @floatFromInt(c.r)) * @as(f32, @floatFromInt(img.tint.r)) / 255.0),
+                        .g = toU8(@as(f32, @floatFromInt(c.g)) * @as(f32, @floatFromInt(img.tint.g)) / 255.0),
+                        .b = toU8(@as(f32, @floatFromInt(c.b)) * @as(f32, @floatFromInt(img.tint.b)) / 255.0),
+                        .a = toU8(@as(f32, @floatFromInt(c.a)) * @as(f32, @floatFromInt(img.tint.a)) / 255.0),
+                    };
+                }
+                blend(&row[@intCast(x)], c, self.opacity);
+            }
         }
     }
 
@@ -412,6 +494,7 @@ const Renderer = struct {
                 }
             },
             .glyph_run => |run| self.drawGlyphRun(run),
+            .image => |img| self.drawImage(img),
         }
     }
 };
@@ -423,7 +506,7 @@ pub fn render(fb: *Framebuffer, list: *const DrawList, opts: Options) void {
         const d: Rect = .{ .x = dmg.x * opts.scale, .y = dmg.y * opts.scale, .w = dmg.w * opts.scale, .h = dmg.h * opts.scale };
         bounds = bounds.intersect(IRect.covering(d, 0));
     }
-    var r: Renderer = .{ .fb = fb, .scale = opts.scale, .clip = bounds, .glyphs = opts.glyphs, .glyph_items = list.glyphItems() };
+    var r: Renderer = .{ .fb = fb, .scale = opts.scale, .clip = bounds, .glyphs = opts.glyphs, .glyph_items = list.glyphItems(), .textures = opts.textures };
 
     if (opts.clear) |c| {
         var y = bounds.y0;

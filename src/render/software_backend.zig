@@ -88,7 +88,19 @@ pub const SoftwareBackend = struct {
     fn submit(ctx: *anyopaque, s: backend_mod.Submit) Error!void {
         const self = self_(ctx);
         if (!self.in_frame) return error.BadFrameState;
-        software.render(&self.fb, s.list, .{ .scale = self.scale, .clear = s.clear, .damage = s.damage, .glyphs = s.glyphs });
+        software.render(&self.fb, s.list, .{
+            .scale = self.scale,
+            .clear = s.clear,
+            .damage = s.damage,
+            .glyphs = s.glyphs,
+            .textures = .{ .ctx = self, .lookup = lookupTexture },
+        });
+    }
+
+    fn lookupTexture(ctx: *anyopaque, id: backend_mod.TextureId) ?software.TextureView {
+        const self = self_(ctx);
+        const t = self.textures.get(id) orelse return null;
+        return .{ .pixels = t.pixels, .width = t.desc.width, .height = t.desc.height, .alpha_only = t.desc.format == .alpha8 };
     }
 
     fn endFrame(ctx: *anyopaque) Error!void {
@@ -245,6 +257,59 @@ test "textures: create, update a sub-rectangle, destroy, and stale handles fail"
     be.destroyTexture(t);
     try testing.expectError(error.BadTexture, be.updateTexture(t, .{ .x = 0, .y = 0, .w = 1, .h = 1 }, &src, 4));
     be.destroyTexture(t); // destroying twice is harmless
+}
+
+test "image commands sample a texture: nearest keeps texels crisp, tint multiplies" {
+    var sb = try SoftwareBackend.init(testing.allocator, null);
+    defer sb.deinit();
+    const be = sb.backend();
+    const tex = try be.createTexture(.{ .width = 2, .height = 1 });
+    const texels = [_]u8{ 255, 0, 0, 255, 0, 255, 0, 255 }; // red, green
+    try be.updateTexture(tex, .{ .x = 0, .y = 0, .w = 2, .h = 1 }, &texels, 8);
+
+    var cmds: [8]draw_list.Command = undefined;
+    var gl: [4]draw_list.Glyph = undefined;
+    var list = draw_list.DrawList.init(&cmds, &gl);
+    try list.image(.{ .rect = .{ .x = 0, .y = 0, .w = 8, .h = 2 }, .texture = tex, .filter = .nearest });
+    try list.image(.{ .rect = .{ .x = 0, .y = 4, .w = 8, .h = 2 }, .texture = tex, .filter = .nearest, .tint = Color.rgb(128, 128, 128) });
+    try be.beginFrame(.{ .pixel_w = 8, .pixel_h = 6 });
+    try be.submit(.{ .list = &list, .clear = Color.black });
+    try be.endFrame();
+    const img = try be.readback(testing.allocator);
+    defer img.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, img.rgba[(0 * 8 + 1) * 4 ..][0..4]);
+    try testing.expectEqualSlices(u8, &.{ 0, 255, 0, 255 }, img.rgba[(0 * 8 + 6) * 4 ..][0..4]);
+    try testing.expectEqualSlices(u8, &.{ 128, 0, 0, 255 }, img.rgba[(4 * 8 + 1) * 4 ..][0..4]);
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 255 }, img.rgba[(3 * 8 + 1) * 4 ..][0..4]); // outside both quads
+    // A destroyed texture draws nothing.
+    be.destroyTexture(tex);
+    try be.beginFrame(.{ .pixel_w = 8, .pixel_h = 6 });
+    try be.submit(.{ .list = &list, .clear = Color.black });
+    try be.endFrame();
+    const gone = try be.readback(testing.allocator);
+    defer gone.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 255 }, gone.rgba[(0 * 8 + 1) * 4 ..][0..4]);
+}
+
+test "linear filtering blends neighbouring texels; alpha textures take the tint color" {
+    var sb = try SoftwareBackend.init(testing.allocator, null);
+    defer sb.deinit();
+    const be = sb.backend();
+    const tex = try be.createTexture(.{ .width = 2, .height = 1, .format = .alpha8 });
+    try be.updateTexture(tex, .{ .x = 0, .y = 0, .w = 2, .h = 1 }, &.{ 0, 255 }, 2);
+    var cmds: [8]draw_list.Command = undefined;
+    var gl: [4]draw_list.Glyph = undefined;
+    var list = draw_list.DrawList.init(&cmds, &gl);
+    try list.image(.{ .rect = .{ .x = 0, .y = 0, .w = 4, .h = 1 }, .texture = tex, .tint = Color.rgb(200, 100, 50) });
+    try be.beginFrame(.{ .pixel_w = 4, .pixel_h = 1 });
+    try be.submit(.{ .list = &list, .clear = Color.black });
+    try be.endFrame();
+    const img = try be.readback(testing.allocator);
+    defer img.deinit(testing.allocator);
+    try testing.expectEqual(@as(u8, 0), img.rgba[0]); // left edge: no coverage
+    try testing.expectEqualSlices(u8, &.{ 200, 100, 50, 255 }, img.rgba[3 * 4 ..][0..4]); // right edge: full tint
+    const mid = img.rgba[1 * 4]; // between: a partial mix
+    try testing.expect(mid > 0 and mid < 200);
 }
 
 test "destroying the backend frees leftover textures" {
