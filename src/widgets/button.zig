@@ -19,18 +19,17 @@ pub const Variant = enum(u32) { normal = 0, primary, danger, flat };
 
 pub const Text = @import("common.zig").Text;
 
-pub const Button = extern struct {
+pub const Button = struct {
     props: Props = .{},
     out: Out = .{},
     node: Handle = Handle.invalid,
 
-    pub const Props = extern struct {
+    pub const Props = struct {
         text: Text = .{},
         enabled: bool = true,
         variant: Variant = .normal,
         text_align: Align = .center,
-        on_click: ?event.Handler = null,
-        on_click_user: ?*anyopaque = null,
+        on_click: ?event.Callback = null,
 
         pub const dirty_map = .{
             .text = shadow.Category.layout,
@@ -40,7 +39,7 @@ pub const Button = extern struct {
         };
     };
 
-    pub const Out = extern struct {
+    pub const Out = struct {
         /// A click happened this frame.
         clicked: bool = false,
         hovered: bool = false,
@@ -54,9 +53,8 @@ pub const Button = extern struct {
     };
 };
 
-/// Shared listener for every button event kind; `user_data` is the `*Button`.
-pub fn handleEvent(ev: *event.Event, user: ?*anyopaque) callconv(.c) void {
-    const b: *Button = @ptrCast(@alignCast(user.?));
+/// Shared listener for every button event kind; the callback context is the `*Button`.
+pub fn handleEvent(b: *Button, ev: *event.Event) void {
     switch (ev.kind) {
         .focus_in => b.out.focused = true,
         .focus_out => b.out.focused = false,
@@ -80,7 +78,7 @@ pub fn handleEvent(ev: *event.Event, user: ?*anyopaque) callconv(.c) void {
 fn activate(b: *Button, ev: *event.Event) void {
     b.out.clicked = true;
     b.out.click_count +%= 1;
-    if (b.props.on_click) |cb| cb(ev, b.props.on_click_user);
+    if (b.props.on_click) |cb| cb.invoke(ev);
 }
 
 pub const listened_kinds = [_]event.EventKind{ .pointer_enter, .pointer_leave, .pointer_down, .pointer_up, .click, .focus_in, .focus_out, .key_down };

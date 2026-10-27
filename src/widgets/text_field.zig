@@ -20,12 +20,12 @@ const label = @import("label.zig");
 pub const Text = @import("common.zig").Text;
 pub const Font = label.Font;
 
-pub const TextField = extern struct {
+pub const TextField = struct {
     props: Props = .{},
     out: Out = .{},
     node: Handle = Handle.invalid,
 
-    pub const Props = extern struct {
+    pub const Props = struct {
         /// Shown, dimmed, while the field is empty.
         placeholder: Text = .{},
         enabled: bool = true,
@@ -33,10 +33,8 @@ pub const TextField = extern struct {
         font: Font = .ui,
         /// Em size in logical pixels; 0 uses the theme's size.
         size: f32 = 0,
-        on_change: ?event.Handler = null,
-        on_change_user: ?*anyopaque = null,
-        on_submit: ?event.Handler = null,
-        on_submit_user: ?*anyopaque = null,
+        on_change: ?event.Callback = null,
+        on_submit: ?event.Callback = null,
 
         pub const dirty_map = .{
             .placeholder = shadow.Category.layout,
@@ -47,7 +45,7 @@ pub const TextField = extern struct {
         };
     };
 
-    pub const Out = extern struct {
+    pub const Out = struct {
         /// The user edited the text this frame.
         changed: bool = false,
         /// Enter was pressed this frame.

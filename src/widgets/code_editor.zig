@@ -46,12 +46,12 @@ const Highlighter = @import("../editor/highlighter.zig").Highlighter;
 
 pub const Font = label.Font;
 
-pub const CodeEditor = extern struct {
+pub const CodeEditor = struct {
     props: Props = .{},
     out: Out = .{},
     node: Handle = Handle.invalid,
 
-    pub const Props = extern struct {
+    pub const Props = struct {
         font: Font = .mono,
         /// Em size in logical pixels; 0 uses the theme's size.
         size: f32 = 0,
@@ -61,8 +61,7 @@ pub const CodeEditor = extern struct {
         line_numbers: bool = true,
         auto_indent: bool = true,
         /// Called after each user edit (typing, deleting, paste, undo/redo).
-        on_change: ?event.Handler = null,
-        on_change_user: ?*anyopaque = null,
+        on_change: ?event.Callback = null,
 
         pub const dirty_map = .{
             .font = shadow.Category.paint,
@@ -74,7 +73,7 @@ pub const CodeEditor = extern struct {
         };
     };
 
-    pub const Out = extern struct {
+    pub const Out = struct {
         /// The user changed the text this frame.
         changed: bool = false,
         focused: bool = false,
@@ -317,7 +316,7 @@ pub const Slot = struct {
         self.block.out.changed = true;
         self.block.out.change_count +%= 1;
         self.touch(true);
-        if (self.block.props.on_change) |cb| cb(ev, self.block.props.on_change_user);
+        if (self.block.props.on_change) |cb| cb.invoke(ev);
     }
 
     fn maxScrollY(self: *Slot, m: Metrics, geo: Geo) f32 {
@@ -543,8 +542,7 @@ pub const Slot = struct {
         cb.set(cb.ctx, text);
     }
 
-    pub fn handleEvent(ev: *event.Event, user: ?*anyopaque) callconv(.c) void {
-        const self: *Slot = @ptrCast(@alignCast(user.?));
+    pub fn handleEvent(self: *Slot, ev: *event.Event) void {
         const props = &self.block.props;
         const out = &self.block.out;
         const ed = &self.editor;

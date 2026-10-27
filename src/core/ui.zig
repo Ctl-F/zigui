@@ -161,7 +161,7 @@ pub const Ui = struct {
         const slot = self.buttons.get(slot_h).?;
         errdefer _ = self.buttons.destroy(slot_h);
         for (button.listened_kinds) |kind| {
-            try self.tree.addListener(node_h, .{ .kind = kind, .callback = button.handleEvent, .user_data = &slot.block });
+            try self.tree.addListener(node_h, .{ .kind = kind, .callback = event_types.Callback.bind(&slot.block, button.handleEvent) });
         }
         return &slot.block;
     }
@@ -232,7 +232,7 @@ pub const Ui = struct {
             _ = self.fields.destroy(slot_h);
         }
         for (field_kinds) |kind| {
-            try self.tree.addListener(node_h, .{ .kind = kind, .callback = fieldEvent, .user_data = slot });
+            try self.tree.addListener(node_h, .{ .kind = kind, .callback = event_types.Callback.bind(slot, fieldEvent) });
         }
         return &slot.block;
     }
@@ -299,8 +299,7 @@ pub const Ui = struct {
         return best;
     }
 
-    fn fieldEvent(ev: *event_types.Event, user: ?*anyopaque) callconv(.c) void {
-        const slot: *FieldSlot = @ptrCast(@alignCast(user.?));
+    fn fieldEvent(slot: *FieldSlot, ev: *event_types.Event) void {
         const self = slot.ui;
         const props = &slot.block.props;
         const out = &slot.block.out;
@@ -382,7 +381,7 @@ pub const Ui = struct {
             .enter => {
                 slot.block.out.submitted = true;
                 slot.block.out.submit_count +%= 1;
-                if (props.on_submit) |cb| cb(ev, props.on_submit_user);
+                if (props.on_submit) |cb| cb.invoke(ev);
             },
             else => return,
         }
@@ -394,7 +393,7 @@ pub const Ui = struct {
         self.touchField(slot);
         slot.block.out.changed = true;
         slot.block.out.change_count +%= 1;
-        if (slot.block.props.on_change) |cb| cb(ev, slot.block.props.on_change_user);
+        if (slot.block.props.on_change) |cb| cb.invoke(ev);
     }
 
     fn copySelection(self: *Ui, slot: *FieldSlot) void {
@@ -613,7 +612,7 @@ pub const Ui = struct {
         }
         self.tree.get(node_h).?.paint_hook = .{ .ctx = slot, .run = code_editor.Slot.paintHook };
         for (editor_kinds) |kind| {
-            try self.tree.addListener(node_h, .{ .kind = kind, .callback = code_editor.Slot.handleEvent, .user_data = slot });
+            try self.tree.addListener(node_h, .{ .kind = kind, .callback = event_types.Callback.bind(slot, code_editor.Slot.handleEvent) });
         }
         return &slot.block;
     }
@@ -820,8 +819,8 @@ pub const Ui = struct {
     /// Register a named command. `handler` receives a `command` event whose
     /// text is the command name; it may be null for commands that only exist to
     /// be enabled/disabled or listed.
-    pub fn registerCommand(self: *Ui, name: []const u8, title: []const u8, handler: ?event_types.Handler, user: ?*anyopaque) !Handle {
-        return self.commands.register(name, title, handler, user);
+    pub fn registerCommand(self: *Ui, name: []const u8, title: []const u8, run: ?event_types.Callback) !Handle {
+        return self.commands.register(name, title, run);
     }
 
     /// Run a command by name. The event targets the focused node, or the root.
@@ -869,9 +868,8 @@ pub const Ui = struct {
         return self.shortcuts.shortcutText(h, buf);
     }
 
-    fn linkHandler(ev: *event_types.Event, user: ?*anyopaque) callconv(.c) void {
+    fn linkHandler(link: *CommandLink, ev: *event_types.Event) void {
         _ = ev;
-        const link: *CommandLink = @ptrCast(@alignCast(user.?));
         _ = link.ui.invokeCommand(link.name);
     }
 
@@ -893,8 +891,7 @@ pub const Ui = struct {
         link.* = .{ .ui = self, .name = try self.gpa.dupe(u8, command) };
         self.freeLink(slot);
         slot.link = link;
-        b.props.on_click = linkHandler;
-        b.props.on_click_user = link;
+        b.props.on_click = event_types.Callback.bind(link, linkHandler);
     }
 
     /// Deliver committed text (typing, paste, IME) to the focused widget.
@@ -1099,15 +1096,14 @@ test "a click sets flags, bumps the counter, and runs the callback" {
     defer t.deinit();
     const Count = struct {
         var n: u32 = 0;
-        fn cb(_: *event_mod.Event, user: ?*anyopaque) callconv(.c) void {
+        fn cb(user: ?*anyopaque, _: *event_mod.Event) void {
             const p: *u32 = @ptrCast(@alignCast(user.?));
             p.* += 1;
         }
     };
     Count.n = 0;
     const b = try t.ui.createButton(t.ui.tree.root, box(80, 30));
-    b.props.on_click = Count.cb;
-    b.props.on_click_user = &Count.n;
+    b.props.on_click = .{ .ctx = &Count.n, .call = Count.cb };
     try t.frame();
 
     t.click(10, 10);
@@ -1191,7 +1187,7 @@ test "a handler may destroy buttons and add nodes mid-click" {
     const Ctx = struct {
         ui: *Ui,
         victim: Handle,
-        fn cb(_: *event_mod.Event, user: ?*anyopaque) callconv(.c) void {
+        fn cb(user: ?*anyopaque, _: *event_mod.Event) void {
             const c: *@This() = @ptrCast(@alignCast(user.?));
             _ = c.ui.tree.destroySubtree(c.victim);
         }
@@ -1199,8 +1195,7 @@ test "a handler may destroy buttons and add nodes mid-click" {
     const a = try t.ui.createButton(t.ui.tree.root, box(80, 30));
     const victim = try t.ui.createButton(t.ui.tree.root, box(80, 30));
     var ctx: Ctx = .{ .ui = &t.ui, .victim = victim.node };
-    a.props.on_click = Ctx.cb;
-    a.props.on_click_user = &ctx;
+    a.props.on_click = .{ .ctx = &ctx, .call = Ctx.cb };
     try t.frame();
 
     t.click(10, 10);
@@ -1399,14 +1394,14 @@ test "Tab walks buttons, Enter and Space activate, and the ring shows after keyb
     const ui = &t.ui;
     const Count = struct {
         var n: u32 = 0;
-        fn cb(_: *event_mod.Event, _: ?*anyopaque) callconv(.c) void {
+        fn cb(_: ?*anyopaque, _: *event_mod.Event) void {
             n += 1;
         }
     };
     Count.n = 0;
     const a = try ui.createButton(ui.tree.root, box(80, 30));
     const b = try ui.createButton(ui.tree.root, box(80, 30));
-    b.props.on_click = Count.cb;
+    b.props.on_click = .{ .call = Count.cb };
     try t.frame();
 
     ui.key(.tab, 0, true, false);
@@ -1498,10 +1493,10 @@ const FakeClip = struct {
 const FieldCounts = struct {
     var changes: u32 = 0;
     var submits: u32 = 0;
-    fn onChange(_: *event_mod.Event, _: ?*anyopaque) callconv(.c) void {
+    fn onChange(_: ?*anyopaque, _: *event_mod.Event) void {
         changes += 1;
     }
-    fn onSubmit(_: *event_mod.Event, _: ?*anyopaque) callconv(.c) void {
+    fn onSubmit(_: ?*anyopaque, _: *event_mod.Event) void {
         submits += 1;
     }
 };
@@ -1515,8 +1510,8 @@ fn focusedField(t: *TextHarness) !*TextField {
     FieldCounts.changes = 0;
     FieldCounts.submits = 0;
     const tf = try ui.createTextField(ui.tree.root, .{ .width = Length.px(200), .height = Length.px(28), .padding = Edges.xy(6, 0) });
-    tf.props.on_change = FieldCounts.onChange;
-    tf.props.on_submit = FieldCounts.onSubmit;
+    tf.props.on_change = .{ .call = FieldCounts.onChange };
+    tf.props.on_submit = .{ .call = FieldCounts.onSubmit };
     try t.h.frame();
     ui.setFocus(tf.node);
     try t.h.frame();
@@ -1852,7 +1847,7 @@ const CmdLog = struct {
     }
 
     /// Logs the last character of the command name.
-    fn handler(ev: *event_mod.Event, _: ?*anyopaque) callconv(.c) void {
+    fn handler(_: ?*anyopaque, ev: *event_mod.Event) void {
         const name = ev.textSlice();
         if (len < buf.len) {
             buf[len] = name[name.len - 1];
@@ -1863,7 +1858,7 @@ const CmdLog = struct {
 };
 
 fn regCmd(ui: *Ui, name: []const u8) !void {
-    _ = try ui.registerCommand(name, name, CmdLog.handler, null);
+    _ = try ui.registerCommand(name, name, .{ .call = CmdLog.handler });
 }
 
 test "a bound shortcut runs its command with the focused node as target" {
@@ -2113,7 +2108,7 @@ fn editorBox(t: *TextHarness) !*CodeEditor {
     FakeClip.len = 0;
     FieldCounts.changes = 0;
     const ed = try ui.createCodeEditor(ui.tree.root, .{ .width = Length.px(300), .height = Length.px(100) });
-    ed.props.on_change = FieldCounts.onChange;
+    ed.props.on_change = .{ .call = FieldCounts.onChange };
     try t.h.frame();
     ui.setFocus(ed.node);
     try t.h.frame();

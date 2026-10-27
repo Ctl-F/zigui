@@ -73,10 +73,6 @@ const App = struct {
     }
 };
 
-fn app(user: ?*anyopaque) *App {
-    return @ptrCast(@alignCast(user.?));
-}
-
 fn addCard(a: *App) !void {
     const col = card_palette[a.card_serial % card_palette.len];
     const card = try a.addNode(a.cards, .{ .grow = 1, .padding = Edges.all(14) }, .{ .background = rgb(col), .radius = 12 });
@@ -104,8 +100,7 @@ fn openFile(a: *App, index: usize) void {
     a.ui.setCodeEditorLanguage(ed, a.language) catch {};
 }
 
-fn onSelectItem(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    const ctx: *SidebarItem = @ptrCast(@alignCast(user.?));
+fn onSelectItem(ctx: *SidebarItem, _: *zigui.Event) void {
     const a = ctx.app;
     a.clicks += 1;
     a.ui.setButtonVariant(a.items[a.selected], .flat);
@@ -116,22 +111,19 @@ fn onSelectItem(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
 
 // ---- commands (shared by shortcuts and buttons) ----
 
-fn cmdAddCard(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    const a = app(user);
+fn cmdAddCard(a: *App, _: *zigui.Event) void {
     a.clicks += 1;
     if (a.card_count < max_cards) addCard(a) catch {};
 }
 
-fn cmdRemoveCard(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    const a = app(user);
+fn cmdRemoveCard(a: *App, _: *zigui.Event) void {
     a.clicks += 1;
     if (a.card_count == 0) return;
     _ = a.ui.tree.destroySubtree(a.ui.tree.get(a.cards).?.last_child);
     a.card_count -= 1;
 }
 
-fn cmdClearCards(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    const a = app(user);
+fn cmdClearCards(a: *App, _: *zigui.Event) void {
     a.clicks += 1;
     while (a.card_count > 0) {
         _ = a.ui.tree.destroySubtree(a.ui.tree.get(a.cards).?.last_child);
@@ -139,21 +131,18 @@ fn cmdClearCards(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
     }
 }
 
-fn cmdToggleSidebar(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    const a = app(user);
+fn cmdToggleSidebar(a: *App, _: *zigui.Event) void {
     a.clicks += 1;
     a.sidebar_visible = !a.sidebar_visible;
     a.ui.setHidden(a.sidebar, !a.sidebar_visible);
 }
 
-fn cmdFocusFilter(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    const a = app(user);
+fn cmdFocusFilter(a: *App, _: *zigui.Event) void {
     if (a.filter) |f| a.ui.setFocus(f.node);
 }
 
 /// Esc in the filter: clear it, or leave it if it is already empty.
-fn cmdClearFilter(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    const a = app(user);
+fn cmdClearFilter(a: *App, _: *zigui.Event) void {
     const f = a.filter orelse return;
     if (a.ui.textFieldText(f).len == 0) {
         a.ui.setFocus(null);
@@ -179,24 +168,24 @@ fn moveSelection(a: *App, step: isize) void {
     openFile(a, a.selected);
 }
 
-fn cmdNextFile(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    moveSelection(app(user), 1);
+fn cmdNextFile(a: *App, _: *zigui.Event) void {
+    moveSelection(a, 1);
 }
 
-fn cmdPrevFile(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    moveSelection(app(user), -1);
+fn cmdPrevFile(a: *App, _: *zigui.Event) void {
+    moveSelection(a, -1);
 }
 
 fn setupCommands(a: *App) !void {
     const ui = a.ui;
-    _ = try ui.registerCommand("cards.add", "+ Card", cmdAddCard, a);
-    _ = try ui.registerCommand("cards.remove", "- Card", cmdRemoveCard, a);
-    _ = try ui.registerCommand("cards.clear", "Clear cards", cmdClearCards, a);
-    _ = try ui.registerCommand("view.sidebar", "Sidebar", cmdToggleSidebar, a);
-    _ = try ui.registerCommand("filter.focus", "Filter", cmdFocusFilter, a);
-    _ = try ui.registerCommand("filter.clear", "Clear filter", cmdClearFilter, a);
-    _ = try ui.registerCommand("file.next", "Next file", cmdNextFile, a);
-    _ = try ui.registerCommand("file.prev", "Previous file", cmdPrevFile, a);
+    _ = try ui.registerCommand("cards.add", "+ Card", .bind(a, cmdAddCard));
+    _ = try ui.registerCommand("cards.remove", "- Card", .bind(a, cmdRemoveCard));
+    _ = try ui.registerCommand("cards.clear", "Clear cards", .bind(a, cmdClearCards));
+    _ = try ui.registerCommand("view.sidebar", "Sidebar", .bind(a, cmdToggleSidebar));
+    _ = try ui.registerCommand("filter.focus", "Filter", .bind(a, cmdFocusFilter));
+    _ = try ui.registerCommand("filter.clear", "Clear filter", .bind(a, cmdClearFilter));
+    _ = try ui.registerCommand("file.next", "Next file", .bind(a, cmdNextFile));
+    _ = try ui.registerCommand("file.prev", "Previous file", .bind(a, cmdPrevFile));
     _ = ui.setCommandRepeat("file.next", true);
     _ = ui.setCommandRepeat("file.prev", true);
 
@@ -241,13 +230,12 @@ fn applyFilter(a: *App) void {
     for (a.items, a.names) |b, name| a.ui.setHidden(b.node, !containsIgnoreCase(name, needle));
 }
 
-fn onFilterChanged(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    applyFilter(app(user));
+fn onFilterChanged(a: *App, _: *zigui.Event) void {
+    applyFilter(a);
 }
 
 /// Enter in the filter selects the first row that is still visible.
-fn onFilterSubmit(_: *zigui.Event, user: ?*anyopaque) callconv(.c) void {
-    const a = app(user);
+fn onFilterSubmit(a: *App, _: *zigui.Event) void {
     a.clicks += 1;
     for (a.items, 0..) |b, i| {
         if (a.ui.tree.get(b.node).?.flags.hidden) continue;
@@ -282,10 +270,8 @@ fn buildUi(a: *App) !void {
     _ = try a.addNode(header, .{ .grow = 1 }, .{});
     const filter = try ui.createTextField(header, .{ .width = Length.px(220), .padding = Edges.xy(8, 0), .shrink = 0 });
     try ui.setTextFieldPlaceholder(filter, "Filter files...");
-    filter.props.on_change = onFilterChanged;
-    filter.props.on_change_user = a;
-    filter.props.on_submit = onFilterSubmit;
-    filter.props.on_submit_user = a;
+    filter.props.on_change = .bind(a, onFilterChanged);
+    filter.props.on_submit = .bind(a, onFilterSubmit);
     a.filter = filter;
     const disabled = try ui.createButton(header, .{ .padding = Edges.xy(14, 0), .shrink = 0 });
     try ui.setButtonText(disabled, "Disabled");
@@ -324,8 +310,7 @@ fn buildUi(a: *App) !void {
         ui.setButtonVariant(b, if (i == a.selected) .primary else .flat);
         a.items[i] = b;
         a.item_ctx[i] = .{ .app = a, .index = i };
-        b.props.on_click = onSelectItem;
-        b.props.on_click_user = &a.item_ctx[i];
+        b.props.on_click = .bind(&a.item_ctx[i], onSelectItem);
     }
 
     const content = try a.addNode(a.body, .{ .direction = .column, .grow = 1, .gap = Length.px(8) }, .{});
@@ -561,7 +546,7 @@ pub fn main(init: std.process.Init) !void {
                 .quit, .close_requested => running = false,
                 .resized, .expose => force = true,
                 .mouse_move => |m| ui.pointerMove(m.x, m.y),
-                .mouse_button => |m| ui.pointerButtonEx(m.x, m.y, @intFromEnum(m.button), m.down, m.clicks),
+                .mouse_button => |m| ui.pointerButtonEx(m.x, m.y, @backingInt(m.button), m.down, m.clicks),
                 .mouse_wheel => |m| ui.wheel(0, 0, m.x, m.y),
                 .text_input => |t| ui.textInput(t.bytes[0..t.len]),
                 .key => |k| {

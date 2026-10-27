@@ -61,6 +61,7 @@ pub const CodeEditor = code_editor.CodeEditor;
 pub const TextField = text_field.TextField;
 pub const Theme = theme.Theme;
 pub const Event = event.Event;
+pub const Callback = event.Callback;
 pub const EventKind = event.EventKind;
 pub const Layout = layout.Layout;
 pub const DrawList = draw_list.DrawList;

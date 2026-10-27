@@ -371,7 +371,7 @@ const Log = struct {
 
     /// Handler that appends the first letter after the last dot of the command
     /// name (so "x.a" logs 'a'), making the order of runs easy to assert.
-    fn handler(ev: *event.Event, _: ?*anyopaque) callconv(.c) void {
+    fn handler(_: ?*anyopaque, ev: *event.Event) void {
         const name = ev.textSlice();
         if (len < buf.len) {
             buf[len] = name[name.len - 1];
@@ -401,7 +401,7 @@ const Fixture = struct {
     }
 
     fn cmd(self: *Fixture, name: []const u8) !Handle {
-        return self.cmds.register(name, name, Log.handler, null);
+        return self.cmds.register(name, name, .{ .call = Log.handler });
     }
 
     fn node(self: *Fixture, parent: Handle) !Handle {

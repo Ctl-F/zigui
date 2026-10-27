@@ -100,13 +100,51 @@ pub const Event = extern struct {
     }
 };
 
-pub const Handler = *const fn (ev: *Event, user_data: ?*anyopaque) callconv(.c) void;
+/// A callback: a function plus the context it receives first. Build one with
+/// `bind` (typed context) or `fromFn` (no context). Shadow checking skips any
+/// struct that declares `is_callback`, since changing a handler needs no layout
+/// or paint.
+pub const Callback = struct {
+    ctx: ?*anyopaque = null,
+    call: *const fn (ctx: ?*anyopaque, ev: *Event) void,
 
-pub const Listener = extern struct {
+    pub const is_callback = true;
+
+    /// `Callback.bind(&app, App.onSave)` where `onSave` is `fn (*App, *Event) void`.
+    pub fn bind(ctx: anytype, comptime f: anytype) Callback {
+        const Ptr = @TypeOf(ctx);
+        return .{
+            .ctx = @ptrCast(ctx),
+            .call = &struct {
+                fn thunk(c: ?*anyopaque, ev: *Event) void {
+                    f(@as(Ptr, @ptrCast(@alignCast(c.?))), ev);
+                }
+            }.thunk,
+        };
+    }
+
+    /// For callbacks that need no context: `fn (*Event) void`.
+    pub fn fromFn(comptime f: fn (*Event) void) Callback {
+        return .{ .call = &struct {
+            fn thunk(_: ?*anyopaque, ev: *Event) void {
+                f(ev);
+            }
+        }.thunk };
+    }
+
+    pub fn eql(a: Callback, b: Callback) bool {
+        return a.ctx == b.ctx and a.call == b.call;
+    }
+
+    pub fn invoke(self: Callback, ev: *Event) void {
+        self.call(self.ctx, ev);
+    }
+};
+
+pub const Listener = struct {
     kind: EventKind,
     /// Fire during the capture phase instead of the bubble phase. Listeners on
     /// the target itself fire regardless.
     capture: bool = false,
-    callback: Handler,
-    user_data: ?*anyopaque = null,
+    callback: Callback,
 };

@@ -444,15 +444,15 @@ pub const Tree = struct {
         if (listener.kind.isPointer()) node.flags.interactive = true;
     }
 
-    /// Remove every listener matching `kind`, `callback`, and `user_data`.
+    /// Remove every listener matching `kind` and `callback` (function and context).
     /// Removing the last pointer listener clears the interactive bit.
-    pub fn removeListener(self: *Tree, h: Handle, kind: event.EventKind, callback: event.Handler, user_data: ?*anyopaque) void {
+    pub fn removeListener(self: *Tree, h: Handle, kind: event.EventKind, callback: event.Callback) void {
         const node = self.get(h) orelse return;
         const list = node.listeners orelse return;
         var i: usize = 0;
         while (i < list.items.len) {
             const l = list.items[i];
-            if (l.kind == kind and l.callback == callback and l.user_data == user_data) {
+            if (l.kind == kind and l.callback.eql(callback)) {
                 _ = list.orderedRemove(i);
             } else i += 1;
         }

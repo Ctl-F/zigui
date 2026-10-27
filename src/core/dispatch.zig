@@ -64,7 +64,7 @@ fn fire(tree: *Tree, ev: *Event, h: Handle, phase: Phase) void {
         const l = list.items[i];
         if (l.kind != ev.kind) continue;
         if (phase != .target and l.capture != (phase == .capture)) continue;
-        l.callback(ev, l.user_data);
+        l.callback.invoke(ev);
     }
 }
 
@@ -86,7 +86,7 @@ const Log = struct {
 
 const Probe = struct { log: *Log, tag: u8, stop: bool = false };
 
-fn probeHandler(ev: *Event, user: ?*anyopaque) callconv(.c) void {
+fn probeHandler(user: ?*anyopaque, ev: *Event) void {
     const p: *Probe = @ptrCast(@alignCast(user.?));
     p.log.add(p.tag);
     if (p.stop) ev.stopPropagation();
@@ -106,11 +106,11 @@ test "capture runs root-down, then target, then bubble up" {
     var tgt: Probe = .{ .log = &log, .tag = 'T' };
     var bub_a: Probe = .{ .log = &log, .tag = 'a' };
     var bub_root: Probe = .{ .log = &log, .tag = 'r' };
-    try tree.addListener(tree.root, .{ .kind = .click, .capture = true, .callback = probeHandler, .user_data = &cap_root });
-    try tree.addListener(a, .{ .kind = .click, .capture = true, .callback = probeHandler, .user_data = &cap_a });
-    try tree.addListener(b, .{ .kind = .click, .callback = probeHandler, .user_data = &tgt });
-    try tree.addListener(a, .{ .kind = .click, .callback = probeHandler, .user_data = &bub_a });
-    try tree.addListener(tree.root, .{ .kind = .click, .callback = probeHandler, .user_data = &bub_root });
+    try tree.addListener(tree.root, .{ .kind = .click, .capture = true, .callback = .{ .ctx = &cap_root, .call = probeHandler } });
+    try tree.addListener(a, .{ .kind = .click, .capture = true, .callback = .{ .ctx = &cap_a, .call = probeHandler } });
+    try tree.addListener(b, .{ .kind = .click, .callback = .{ .ctx = &tgt, .call = probeHandler } });
+    try tree.addListener(a, .{ .kind = .click, .callback = .{ .ctx = &bub_a, .call = probeHandler } });
+    try tree.addListener(tree.root, .{ .kind = .click, .callback = .{ .ctx = &bub_root, .call = probeHandler } });
 
     var ev: Event = .{ .kind = .click, .target = b };
     dispatch(&tree, &ev);
@@ -129,9 +129,9 @@ test "stopPropagation finishes the current node then stops" {
     var t1: Probe = .{ .log = &log, .tag = '1', .stop = true };
     var t2: Probe = .{ .log = &log, .tag = '2' };
     var up: Probe = .{ .log = &log, .tag = 'u' };
-    try tree.addListener(b, .{ .kind = .click, .callback = probeHandler, .user_data = &t1 });
-    try tree.addListener(b, .{ .kind = .click, .callback = probeHandler, .user_data = &t2 });
-    try tree.addListener(a, .{ .kind = .click, .callback = probeHandler, .user_data = &up });
+    try tree.addListener(b, .{ .kind = .click, .callback = .{ .ctx = &t1, .call = probeHandler } });
+    try tree.addListener(b, .{ .kind = .click, .callback = .{ .ctx = &t2, .call = probeHandler } });
+    try tree.addListener(a, .{ .kind = .click, .callback = .{ .ctx = &up, .call = probeHandler } });
 
     var ev: Event = .{ .kind = .click, .target = b };
     dispatch(&tree, &ev);
@@ -147,8 +147,8 @@ test "non-bubbling kinds only reach the target" {
     var log: Log = .{};
     var on_root: Probe = .{ .log = &log, .tag = 'r' };
     var on_a: Probe = .{ .log = &log, .tag = 'a' };
-    try tree.addListener(tree.root, .{ .kind = .pointer_enter, .callback = probeHandler, .user_data = &on_root });
-    try tree.addListener(a, .{ .kind = .pointer_enter, .callback = probeHandler, .user_data = &on_a });
+    try tree.addListener(tree.root, .{ .kind = .pointer_enter, .callback = .{ .ctx = &on_root, .call = probeHandler } });
+    try tree.addListener(a, .{ .kind = .pointer_enter, .callback = .{ .ctx = &on_a, .call = probeHandler } });
     var ev: Event = .{ .kind = .pointer_enter, .target = a };
     dispatch(&tree, &ev);
     try std.testing.expectEqualStrings("a", log.str());
@@ -164,12 +164,12 @@ test "listeners only see their own kind, and local coordinates are relative" {
     const Seen = struct {
         var lx: f32 = -1;
         var ly: f32 = -1;
-        fn h(ev: *Event, _: ?*anyopaque) callconv(.c) void {
+        fn h(_: ?*anyopaque, ev: *Event) void {
             lx = ev.local_x;
             ly = ev.local_y;
         }
     };
-    try tree.addListener(a, .{ .kind = .pointer_down, .callback = Seen.h });
+    try tree.addListener(a, .{ .kind = .pointer_down, .callback = .{ .call = Seen.h } });
     var other: Event = .{ .kind = .pointer_up, .target = a, .x = 15, .y = 25 };
     dispatch(&tree, &other);
     try std.testing.expectEqual(@as(f32, -1), Seen.lx);
@@ -192,14 +192,14 @@ test "destroying the target inside a handler is deferred until dispatch ends" {
         alive_after_destroy: bool = false,
     };
     const H = struct {
-        fn h(ev: *Event, user: ?*anyopaque) callconv(.c) void {
+        fn h(user: ?*anyopaque, ev: *Event) void {
             const ctx: *Ctx = @ptrCast(@alignCast(user.?));
             _ = ctx.tree.destroySubtree(ev.target);
             ctx.alive_after_destroy = ctx.tree.isValid(ev.target); // still alive mid-dispatch
         }
     };
     var ctx: Ctx = .{ .tree = &tree, .target = a };
-    try tree.addListener(a, .{ .kind = .click, .callback = H.h, .user_data = &ctx });
+    try tree.addListener(a, .{ .kind = .click, .callback = .{ .ctx = &ctx, .call = H.h } });
 
     var ev: Event = .{ .kind = .click, .target = a };
     dispatch(&tree, &ev);
@@ -214,11 +214,11 @@ test "removing the last pointer listener clears the interactive bit" {
     const a = try tree.create(.{});
     try tree.appendChild(tree.root, a);
     const H = struct {
-        fn h(_: *Event, _: ?*anyopaque) callconv(.c) void {}
+        fn h(_: ?*anyopaque, _: *Event) void {}
     };
-    try tree.addListener(a, .{ .kind = .click, .callback = H.h });
+    try tree.addListener(a, .{ .kind = .click, .callback = .{ .call = H.h } });
     try std.testing.expect(tree.get(a).?.flags.interactive);
-    tree.removeListener(a, .click, H.h, null);
+    tree.removeListener(a, .click, .{ .call = H.h });
     try std.testing.expect(!tree.get(a).?.flags.interactive);
     try std.testing.expect(tree.get(a).?.listeners == null);
 }
@@ -229,7 +229,7 @@ test "hit test picks the topmost interactive node and respects clipping" {
     tree.get(tree.root).?.rect = .{ .w = 200, .h = 200 };
 
     const H = struct {
-        fn h(_: *Event, _: ?*anyopaque) callconv(.c) void {}
+        fn h(_: ?*anyopaque, _: *Event) void {}
     };
     const under = try tree.create(.{});
     const over = try tree.create(.{});
@@ -240,8 +240,8 @@ test "hit test picks the topmost interactive node and respects clipping" {
     tree.get(under).?.rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 };
     tree.get(over).?.rect = .{ .x = 50, .y = 50, .w = 100, .h = 100 };
     tree.get(plain).?.rect = .{ .x = 0, .y = 150, .w = 200, .h = 50 }; // not interactive
-    try tree.addListener(under, .{ .kind = .click, .callback = H.h });
-    try tree.addListener(over, .{ .kind = .click, .callback = H.h });
+    try tree.addListener(under, .{ .kind = .click, .callback = .{ .call = H.h } });
+    try tree.addListener(over, .{ .kind = .click, .callback = .{ .call = H.h } });
 
     try std.testing.expect(Handle.eql(tree.hitTest(10, 10).?, under));
     try std.testing.expect(Handle.eql(tree.hitTest(60, 60).?, over)); // overlap: later sibling wins
@@ -256,7 +256,7 @@ test "hit test picks the topmost interactive node and respects clipping" {
     const kid = try tree.create(.{});
     try tree.appendChild(clip, kid);
     tree.get(kid).?.rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 };
-    try tree.addListener(kid, .{ .kind = .click, .callback = H.h });
+    try tree.addListener(kid, .{ .kind = .click, .callback = .{ .call = H.h } });
     try std.testing.expect(Handle.eql(tree.hitTest(10, 10).?, kid));
     try std.testing.expect(!Handle.eql(tree.hitTest(60, 10) orelse Handle.invalid, kid));
 

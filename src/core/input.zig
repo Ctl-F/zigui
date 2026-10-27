@@ -258,7 +258,7 @@ const Spy = struct {
     log: *Log,
     tag: u8,
 
-    fn handler(ev: *Event, user: ?*anyopaque) callconv(.c) void {
+    fn handler(user: ?*anyopaque, ev: *Event) void {
         const s: *Spy = @ptrCast(@alignCast(user.?));
         const k: u8 = switch (ev.kind) {
             .pointer_enter => 'e',
@@ -274,7 +274,7 @@ const Spy = struct {
     }
 
     fn attach(self: *Spy, tree: *Tree, h: Handle, comptime kinds: []const event.EventKind) !void {
-        inline for (kinds) |k| try tree.addListener(h, .{ .kind = k, .callback = handler, .user_data = self });
+        inline for (kinds) |k| try tree.addListener(h, .{ .kind = k, .callback = .{ .ctx = self, .call = handler } });
     }
 };
 
@@ -383,7 +383,7 @@ fn focusBoxes(tree: *Tree, comptime n: usize) ![n]Handle {
 }
 
 const FocusLog = struct {
-    fn handler(ev: *Event, user: ?*anyopaque) callconv(.c) void {
+    fn handler(user: ?*anyopaque, ev: *Event) void {
         const s: *Spy = @ptrCast(@alignCast(user.?));
         s.log.add(s.tag);
         s.log.add(switch (ev.kind) {
@@ -398,7 +398,7 @@ const FocusLog = struct {
 
 fn spyFocus(tree: *Tree, h: Handle, spy: *Spy) !void {
     inline for (.{ event.EventKind.focus_in, .focus_out, .key_down, .text_input }) |k| {
-        try tree.addListener(h, .{ .kind = k, .callback = FocusLog.handler, .user_data = spy });
+        try tree.addListener(h, .{ .kind = k, .callback = .{ .ctx = spy, .call = FocusLog.handler } });
     }
 }
 
@@ -413,10 +413,10 @@ test "clicking a focusable node focuses it and blurs the previous one" {
     try spyFocus(&tree, n[1], &s1);
     // Pointer listeners make the nodes hit-testable.
     const H = struct {
-        fn h(_: *Event, _: ?*anyopaque) callconv(.c) void {}
+        fn h(_: ?*anyopaque, _: *Event) void {}
     };
-    try tree.addListener(n[0], .{ .kind = .click, .callback = H.h });
-    try tree.addListener(n[1], .{ .kind = .click, .callback = H.h });
+    try tree.addListener(n[0], .{ .kind = .click, .callback = .{ .call = H.h } });
+    try tree.addListener(n[1], .{ .kind = .click, .callback = .{ .call = H.h } });
 
     var input: Input = .{};
     input.pointerButton(&tree, 10, 10, 1, true);
@@ -465,11 +465,11 @@ test "a handler that handles Tab keeps focus where it is" {
     defer tree.deinit();
     const n = try focusBoxes(&tree, 2);
     const Eat = struct {
-        fn h(ev: *Event, _: ?*anyopaque) callconv(.c) void {
+        fn h(_: ?*anyopaque, ev: *Event) void {
             ev.markHandled();
         }
     };
-    try tree.addListener(n[0], .{ .kind = .key_down, .callback = Eat.h });
+    try tree.addListener(n[0], .{ .kind = .key_down, .callback = .{ .call = Eat.h } });
     var input: Input = .{};
     input.setFocus(&tree, n[0]);
     input.key(&tree, .tab, 0, true, false, 0, 0);

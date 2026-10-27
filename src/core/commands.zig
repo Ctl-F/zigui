@@ -4,8 +4,7 @@
 //! A command has a unique name ("file.save"), a human title, an enabled flag,
 //! and an optional handler. Running it calls the handler with an `Event` of
 //! kind `command` whose `text` is the command name, so one handler can serve
-//! several commands. Handlers use the same `callconv(.c)` signature as every
-//! other callback.
+//! several commands. Handlers are ordinary `event.Callback`s.
 //!
 //! Commands are addressed by generational `Handle`, so a stale handle from an
 //! unregistered command is detected instead of aliasing a new one.
@@ -20,8 +19,7 @@ pub const Command = struct {
     name: []u8,
     /// Owned. Shown in menus and palettes.
     title: []u8,
-    handler: ?event.Handler,
-    user_data: ?*anyopaque,
+    run: ?event.Callback,
     enabled: bool = true,
     /// Whether holding the shortcut key re-runs it (arrow navigation yes, save no).
     repeat: bool = false,
@@ -59,8 +57,7 @@ pub const Commands = struct {
         self: *Commands,
         name: []const u8,
         title: []const u8,
-        handler: ?event.Handler,
-        user_data: ?*anyopaque,
+        run: ?event.Callback,
     ) Error!Handle {
         if (self.by_name.contains(name)) return error.DuplicateCommand;
         const owned_name = try self.gpa.dupe(u8, name);
@@ -70,8 +67,7 @@ pub const Commands = struct {
         const h = try self.pool.create(.{
             .name = owned_name,
             .title = owned_title,
-            .handler = handler,
-            .user_data = user_data,
+            .run = run,
         });
         errdefer _ = self.pool.destroy(h);
         try self.by_name.put(self.gpa, owned_name, h);
@@ -111,8 +107,7 @@ pub const Commands = struct {
     pub fn invoke(self: *Commands, h: Handle, target: Handle) bool {
         const c = self.pool.get(h) orelse return false;
         if (!c.enabled) return false;
-        const handler = c.handler orelse return false;
-        const user = c.user_data;
+        const run = c.run orelse return false;
         // The name slice dies if the handler unregisters the command, so the
         // event's text is only valid during the call, as documented.
         var ev: event.Event = .{
@@ -121,7 +116,7 @@ pub const Commands = struct {
             .text = c.name.ptr,
             .text_len = c.name.len,
         };
-        handler(&ev, user);
+        run.invoke(&ev);
         return true;
     }
 
@@ -147,7 +142,7 @@ const Probe = struct {
         last_user = null;
     }
 
-    fn handler(ev: *event.Event, user: ?*anyopaque) callconv(.c) void {
+    fn handler(user: ?*anyopaque, ev: *event.Event) void {
         calls += 1;
         const got = ev.textSlice();
         @memcpy(last_name[0..got.len], got);
@@ -166,7 +161,7 @@ test "register, find, and invoke by handle or name" {
     defer cmds.deinit();
     Probe.reset();
     var token: u32 = 7;
-    const h = try cmds.register("file.save", "Save", Probe.handler, &token);
+    const h = try cmds.register("file.save", "Save", .{ .ctx = &token, .call = Probe.handler });
     try testing.expect(cmds.find("file.save").?.eql(h));
     try testing.expect(cmds.find("file.open") == null);
 
@@ -182,10 +177,10 @@ test "duplicate names are rejected; titles and names are copied" {
     var cmds = Commands.init(testing.allocator);
     defer cmds.deinit(); // leak-checked
     var buf = [_]u8{ 'a', 'b' };
-    _ = try cmds.register(&buf, &buf, null, null);
+    _ = try cmds.register(&buf, &buf, null);
     buf[0] = 'z'; // the registry made its own copy
     try testing.expect(cmds.find("ab") != null);
-    try testing.expectError(error.DuplicateCommand, cmds.register("ab", "Other", null, null));
+    try testing.expectError(error.DuplicateCommand, cmds.register("ab", "Other", null));
     try testing.expectEqualStrings("ab", cmds.get(cmds.find("ab").?).?.title);
 }
 
@@ -193,8 +188,8 @@ test "disabled commands and commands without handlers do not run" {
     var cmds = Commands.init(testing.allocator);
     defer cmds.deinit();
     Probe.reset();
-    const h = try cmds.register("a", "A", Probe.handler, null);
-    const bare = try cmds.register("b", "B", null, null);
+    const h = try cmds.register("a", "A", .{ .call = Probe.handler });
+    const bare = try cmds.register("b", "B", null);
     cmds.setEnabled(h, false);
     try testing.expect(!cmds.isEnabled(h));
     try testing.expect(!cmds.invoke(h, Handle.invalid));
@@ -208,12 +203,12 @@ test "unregistering frees the name for reuse and stales the old handle" {
     var cmds = Commands.init(testing.allocator);
     defer cmds.deinit();
     Probe.reset();
-    const h = try cmds.register("x", "X", Probe.handler, null);
+    const h = try cmds.register("x", "X", .{ .call = Probe.handler });
     try testing.expect(cmds.unregister(h));
     try testing.expect(!cmds.unregister(h));
     try testing.expect(cmds.find("x") == null);
     try testing.expect(!cmds.invoke(h, Handle.invalid));
-    const h2 = try cmds.register("x", "X again", Probe.handler, null);
+    const h2 = try cmds.register("x", "X again", .{ .call = Probe.handler });
     try testing.expect(!h2.eql(h));
     try testing.expect(!cmds.invoke(h, Handle.invalid)); // still stale
     try testing.expect(cmds.invoke(h2, Handle.invalid));
@@ -225,12 +220,12 @@ test "a handler can unregister its own command" {
     const Self = struct {
         var registry: *Commands = undefined;
         var me: Handle = undefined;
-        fn run(_: *event.Event, _: ?*anyopaque) callconv(.c) void {
+        fn run(_: ?*anyopaque, _: *event.Event) void {
             _ = registry.unregister(me);
         }
     };
     Self.registry = &cmds;
-    Self.me = try cmds.register("once", "Once", Self.run, null);
+    Self.me = try cmds.register("once", "Once", .{ .call = Self.run });
     try testing.expect(cmds.invoke(Self.me, Handle.invalid));
     try testing.expectEqual(@as(u32, 0), cmds.count());
 }

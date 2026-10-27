@@ -16,12 +16,12 @@ pub const Font = enum(u32) {
     mono,
 };
 
-pub const Label = extern struct {
+pub const Label = struct {
     props: Props = .{},
     out: Out = .{},
     node: Handle = Handle.invalid,
 
-    pub const Props = extern struct {
+    pub const Props = struct {
         text: Text = .{},
         font: Font = .ui,
         /// Em size in logical pixels; 0 uses the theme's size.
@@ -39,7 +39,7 @@ pub const Label = extern struct {
         };
     };
 
-    pub const Out = extern struct {
+    pub const Out = struct {
         /// Measured size of the text line in logical pixels.
         text_width: f32 = 0,
         text_height: f32 = 0,

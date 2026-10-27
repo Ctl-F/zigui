@@ -47,6 +47,8 @@ fn isCallback(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .pointer => |p| @typeInfo(p.child) == .@"fn",
         .optional => |o| isCallback(o.child),
+        // `event.Callback` (and anything else marked the same way).
+        .@"struct" => @hasDecl(T, "is_callback"),
         else => false,
     };
 }
@@ -247,4 +249,31 @@ test "required categories come from dirty_map" {
     try std.testing.expect(text_req.layout and !text_req.paint);
     const color_req = comptime requiredFor(TestProps, "color");
     try std.testing.expect(color_req.paint and !color_req.layout);
+}
+
+const CallbackProps = struct {
+    enabled: bool = true,
+    on_click: ?@import("event.zig").Callback = null,
+};
+
+fn cbA(_: ?*anyopaque, _: *@import("event.zig").Event) void {}
+fn cbB(_: ?*anyopaque, _: *@import("event.zig").Event) void {}
+
+test "changing a Callback prop needs no dirty flag" {
+    if (!enabled or strict) return error.SkipZigTest;
+    var props: CallbackProps = .{};
+    var checker = Checker(CallbackProps).init(&props);
+    var dirty = DirtyFlags.none;
+
+    props.on_click = .{ .call = cbA };
+    checker.verify(&props, &dirty, "test");
+    try std.testing.expect(dirty.isClean());
+    var token: u32 = 0;
+    props.on_click = .{ .ctx = &token, .call = cbB }; // a different function and context
+    checker.verify(&props, &dirty, "test");
+    try std.testing.expect(dirty.isClean());
+
+    props.enabled = false; // ordinary props are still checked
+    checker.verify(&props, &dirty, "test");
+    try std.testing.expect(!dirty.isClean());
 }
