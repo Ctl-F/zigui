@@ -13,10 +13,8 @@ pub const Decor = struct {
     sel_on: bool = false,
     sel_x0: f32 = 0,
     sel_x1: f32 = 0,
-    sel_color: Color = Color.transparent,
     caret_on: bool = false,
     caret_x: f32 = 0,
-    caret_color: Color = Color.transparent,
 
     pub fn active(self: Decor) bool {
         return self.sel_on or self.caret_on or self.scroll_x != 0;

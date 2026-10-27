@@ -10,7 +10,8 @@
 //!
 //!   Commands and shortcuts (the header buttons show theirs):
 //!     Ctrl+N add card, Ctrl+D remove card, Ctrl+K Ctrl+X remove all cards,
-//!     Ctrl+B toggle sidebar, Ctrl+F focus the filter,
+//!     Ctrl+B toggle sidebar, Ctrl+F focus the filter, Ctrl+T switch theme
+//!     (an alternative theme with its own button painter and colors),
 //!     Up / Down move through the files while focus is in the sidebar (panel
 //!     scope), Esc clears the filter while it has focus (widget scope).
 //!   Text uses system fonts (stb_truetype); override with ZIGUI_FONT / ZIGUI_MONO_FONT.
@@ -64,6 +65,9 @@ const App = struct {
     gpa: std.mem.Allocator = undefined,
     last_status: [160]u8 = undefined,
     last_status_len: usize = 0,
+    base_theme: zigui.Theme = .{},
+    alt_theme: zigui.Theme = .{},
+    alt_active: bool = false,
     card_serial: usize = 0,
 
     fn addNode(self: *App, parent: Handle, style: zigui.Style, visual: zigui.tree.Visual) !Handle {
@@ -135,6 +139,21 @@ fn cmdToggleSidebar(a: *App, _: *zigui.Event) void {
     a.ui.setHidden(a.sidebar, !a.sidebar_visible);
 }
 
+/// An alternative button look: flat, square, with an accent bar along the bottom.
+fn flatButtonPainter(pc: *zigui.PaintCtx, b: *const Button) zigui.paint_ctx.Error!void {
+    const c = b.colors();
+    const bg = if (!b.props.enabled) c.disabled else if (b.out.pressed) c.pressed else if (b.out.hovered) c.hover else c.normal;
+    try pc.list.fillRect(pc.rect, zigui.draw_list.Paint.solid(bg));
+    const bar: zigui.geometry.Rect = .{ .x = pc.rect.x, .y = pc.rect.bottom() - 3, .w = pc.rect.w, .h = 3 };
+    try pc.list.fillRect(bar, zigui.draw_list.Paint.solid(if (b.out.focus_visible) b.ui.theme.focus_ring else rgb(0xf0a030)));
+    pc.text_color = if (b.props.enabled) c.text else c.text_disabled;
+}
+
+fn cmdSwitchTheme(a: *App, _: *zigui.Event) void {
+    a.alt_active = !a.alt_active;
+    a.ui.setTheme(if (a.alt_active) a.alt_theme else a.base_theme);
+}
+
 fn cmdFocusFilter(a: *App, _: *zigui.Event) void {
     if (a.filter) |f| a.ui.setFocus(f.node);
 }
@@ -180,6 +199,7 @@ fn setupCommands(a: *App) !void {
     _ = try ui.registerCommand("cards.remove", .{ .title = "- Card", .run = .bind(a, cmdRemoveCard) });
     _ = try ui.registerCommand("cards.clear", .{ .title = "Clear cards", .run = .bind(a, cmdClearCards) });
     _ = try ui.registerCommand("view.sidebar", .{ .title = "Sidebar", .run = .bind(a, cmdToggleSidebar) });
+    _ = try ui.registerCommand("view.theme", .{ .title = "Switch theme", .run = .bind(a, cmdSwitchTheme) });
     _ = try ui.registerCommand("filter.focus", .{ .title = "Filter", .run = .bind(a, cmdFocusFilter) });
     _ = try ui.registerCommand("filter.clear", .{ .title = "Clear filter", .run = .bind(a, cmdClearFilter) });
     _ = try ui.registerCommand("file.next", .{ .title = "Next file", .run = .bind(a, cmdNextFile), .repeat = true });
@@ -192,6 +212,7 @@ fn setupCommands(a: *App) !void {
         \\ctrl+k ctrl+x = cards.clear   # a two-key chord
         \\ctrl+b = view.sidebar
         \\ctrl+f = filter.focus
+        \\ctrl+t = view.theme
         \\
     );
     if (report.errors > 0) std.log.warn("keymap: {d} bad line(s), first at line {d}", .{ report.errors, report.first_error_line });
@@ -432,6 +453,19 @@ pub fn main(init: std.process.Init) !void {
     }
     ui.clipboard = .{ .get = clipGet, .set = clipSet };
     var state: App = .{ .ui = &ui, .io = io, .gpa = gpa };
+    state.base_theme = ui.theme;
+    state.alt_theme = ui.theme;
+    state.alt_theme.button_painter = flatButtonPainter;
+    state.alt_theme.corner_radius = 0;
+    state.alt_theme.font_size = 15;
+    state.alt_theme.button_colors[0].normal = rgb(0x5a4a38);
+    state.alt_theme.button_colors[0].hover = rgb(0x6e5a44);
+    state.alt_theme.button_colors[1].normal = rgb(0xb8541f);
+    state.alt_theme.button_colors[1].hover = rgb(0xd06428);
+    state.alt_theme.field.border_focus = rgb(0xf0a030);
+    state.alt_theme.editor.background = rgb(0x1a1612);
+    state.alt_theme.editor.current_line = rgb(0x26201a);
+    state.alt_theme.editor.syntax[@intFromEnum(zigui.syntax.TokenKind.keyword)] = rgb(0xf0a030);
     try buildUi(&state);
     try setupCommands(&state);
 

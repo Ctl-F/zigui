@@ -3,8 +3,10 @@
 
 const geometry = @import("../core/geometry.zig");
 const Color = geometry.Color;
-const Visual = @import("../core/style.zig").Visual;
 const button = @import("button.zig");
+const label = @import("label.zig");
+const text_field = @import("text_field.zig");
+const code_editor = @import("code_editor.zig");
 const syntax = @import("../editor/syntax.zig");
 
 pub const ButtonColors = struct {
@@ -17,9 +19,6 @@ pub const ButtonColors = struct {
     text: Color = Color.rgb(0xdf, 0xe1, 0xe5),
     text_disabled: Color = Color.rgb(0x7a, 0x7d, 0x83),
 };
-
-/// Turns a button's state into a `Visual`. Replace to restyle all buttons.
-pub const ButtonPainter = *const fn (b: *const button.Button, theme: *const Theme) Visual;
 
 pub const FieldColors = struct {
     background: Color = Color.rgb(0x1e, 0x1f, 0x22),
@@ -118,5 +117,11 @@ pub const Theme = struct {
     /// Default em size for UI text, logical pixels.
     font_size: f32 = 14,
     text_color: Color = Color.rgb(0xdf, 0xe1, 0xe5),
-    button_painter: ButtonPainter = button.defaultPainter,
+    /// One painter per widget type: it emits the widget's draw commands from its
+    /// state, so replacing one gives every widget of that type a new look with
+    /// identical behavior. Any widget can override its own (`setPainter`).
+    button_painter: button.Painter = button.defaultPainter,
+    label_painter: label.Painter = label.defaultPainter,
+    field_painter: text_field.Painter = text_field.defaultPainter,
+    editor_painter: code_editor.Painter = code_editor.defaultPainter,
 };

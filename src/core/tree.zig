@@ -96,12 +96,29 @@ pub const Node = struct {
 
 pub const ListenerList = std.ArrayListUnmanaged(event.Listener);
 
-/// Custom painting for widgets that draw their own content (the code editor):
-/// called by the paint pass after the node's background, inside its clip,
-/// with the node's rect in window coordinates. It must keep push/pop balanced.
+pub const PaintCtx = @import("paint_ctx.zig").PaintCtx;
+
+/// A node's painter: called by the paint pass after the node's `Visual`, inside
+/// its clip, before its text and children. It emits the node's own draw
+/// commands (and may set text color overrides on the context). It must keep
+/// push/pop balanced. Widgets install one that runs the theme's painter.
 pub const PaintHook = struct {
     ctx: *anyopaque,
-    run: *const fn (ctx: *anyopaque, abs: Rect, list: *@import("draw_list.zig").DrawList) @import("draw_list.zig").Error!void,
+    run: *const fn (ctx: *anyopaque, pc: *PaintCtx) @import("paint_ctx.zig").Error!void,
+
+    /// `PaintHook.bind(widget, Widget.paintHook)` where the function is
+    /// `fn (*Widget, *PaintCtx) Error!void`.
+    pub fn bind(ctx: anytype, comptime f: anytype) PaintHook {
+        const Ptr = @TypeOf(ctx);
+        return .{
+            .ctx = @ptrCast(ctx),
+            .run = &struct {
+                fn thunk(c: *anyopaque, pc: *PaintCtx) @import("paint_ctx.zig").Error!void {
+                    return f(@as(Ptr, @ptrCast(@alignCast(c))), pc);
+                }
+            }.thunk,
+        };
+    }
 };
 
 pub const TreeError = error{

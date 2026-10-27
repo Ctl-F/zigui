@@ -97,6 +97,18 @@ pub const Ui = struct {
         };
     }
 
+    /// Replace the theme (colors, fonts, metrics, and painters) and repaint
+    /// everything. Fonts and sizes that changed reshape text on the next `update`.
+    pub fn setTheme(self: *Ui, theme: Theme) void {
+        self.theme = theme;
+        self.tree.markDirty(self.tree.root, DirtyFlags.layout_and_paint);
+        // Widgets reshape text and repaint from the new theme in `update`.
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors }) |pool| {
+            var it = pool.iterator();
+            while (it.next()) |e| self.tree.markDirty(e.ptr.node, DirtyFlags.layout_and_paint);
+        }
+    }
+
     /// True unless this `Ui` was moved after its first widget was created.
     /// Always true when `ui_checks` is off.
     pub fn isPinned(self: *const Ui) bool {
@@ -168,7 +180,7 @@ pub const Ui = struct {
         for (W.listened_kinds) |kind| {
             try self.tree.addListener(node_h, .{ .kind = kind, .callback = event_types.Callback.bind(w, W.handleEvent) });
         }
-        if (@hasDecl(W, "paintHook")) self.tree.get(node_h).?.paint_hook = .{ .ctx = w, .run = W.paintHook };
+        self.tree.get(node_h).?.paint_hook = tree_mod.PaintHook.bind(w, W.paintHook);
         try w.apply(opts);
         return w;
     }
@@ -561,6 +573,41 @@ const Harness = struct {
     }
 };
 
+fn paintColor(p: draw_list.Paint) ?geometry.Color {
+    return switch (p) {
+        .color => |c| c,
+        else => null,
+    };
+}
+
+/// Color of the first filled box (a widget's background) in the list.
+fn firstFill(list: *const DrawList) ?geometry.Color {
+    for (list.items()) |c| switch (c) {
+        .fill_rect => |f| return paintColor(f.paint),
+        .fill_rounded_rect => |f| return paintColor(f.paint),
+        else => {},
+    };
+    return null;
+}
+
+/// Color of the first border stroke in the list.
+fn firstStroke(list: *const DrawList) ?geometry.Color {
+    for (list.items()) |c| switch (c) {
+        .stroke_rect => |s| return paintColor(s.paint),
+        else => {},
+    };
+    return null;
+}
+
+/// Color of the first text run in the list.
+fn firstTextColor(list: *const DrawList) ?geometry.Color {
+    for (list.items()) |c| switch (c) {
+        .glyph_run => |g| return g.color,
+        else => {},
+    };
+    return null;
+}
+
 fn box(w: f32, h: f32) Style {
     return .{ .width = Length.px(w), .height = Length.px(h), .shrink = 0 };
 }
@@ -612,24 +659,24 @@ test "hover and press change the look and mark paint dirty" {
     defer t.deinit();
     const b = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
     try t.frame();
-    const node = t.ui.tree.get(b.node).?;
+    _ = b;
     const c = t.ui.theme.button_colors[0];
-    try std.testing.expectEqual(c.normal, node.visual.background);
+    try std.testing.expectEqual(c.normal, firstFill(&t.list).?);
     try std.testing.expect(!t.ui.isDirty());
 
     t.ui.pointerMove(10, 10);
     t.ui.update();
-    try std.testing.expectEqual(c.hover, node.visual.background);
-    try std.testing.expect(t.ui.isDirty());
+    try std.testing.expect(t.ui.isDirty()); // the handler marked it: hover changes the look
     try t.frame();
+    try std.testing.expectEqual(c.hover, firstFill(&t.list).?);
 
     t.ui.pointerButton(10, 10, 1, true);
-    t.ui.update();
-    try std.testing.expectEqual(c.pressed, node.visual.background);
+    try t.frame();
+    try std.testing.expectEqual(c.pressed, firstFill(&t.list).?);
     t.ui.pointerButton(10, 10, 1, false);
     t.ui.pointerMove(300, 90);
     try t.frame();
-    try std.testing.expectEqual(c.normal, node.visual.background);
+    try std.testing.expectEqual(c.normal, firstFill(&t.list).?);
 }
 
 test "setButtonText copies, so the caller can free; and frees on deinit" {
@@ -689,7 +736,8 @@ test "raw prop writes are caught by the shadow checker and still repaint" {
     b.props.variant = .primary; // raw write, no dirty marking
     t.ui.update(); // warns, self-corrects
     try std.testing.expect(t.ui.isDirty());
-    try std.testing.expectEqual(t.ui.theme.button_colors[1].normal, t.ui.tree.get(b.node).?.visual.background);
+    try t.frame();
+    try std.testing.expectEqual(t.ui.theme.button_colors[1].normal, firstFill(&t.list).?);
 }
 
 test "variant setter marks paint and swaps colors" {
@@ -700,7 +748,7 @@ test "variant setter marks paint and swaps colors" {
     b.setVariant(.danger);
     try std.testing.expect(t.ui.isDirty());
     try t.frame();
-    try std.testing.expectEqual(t.ui.theme.button_colors[2].normal, t.ui.tree.get(b.node).?.visual.background);
+    try std.testing.expectEqual(t.ui.theme.button_colors[2].normal, firstFill(&t.list).?);
 }
 
 const event_mod = @import("event.zig");
@@ -835,7 +883,7 @@ test "disabled buttons use the disabled text color" {
     try b.setText("x");
     b.setEnabled(false);
     try t.h.frame();
-    try std.testing.expectEqual(ui.theme.button_colors[0].text_disabled, ui.tree.get(b.node).?.text.?.color);
+    try std.testing.expectEqual(ui.theme.button_colors[0].text_disabled, firstTextColor(&t.h.list).?);
 }
 
 test "destroying a node frees its text, and text outlives nothing" {
@@ -894,7 +942,7 @@ test "Tab walks buttons, Enter and Space activate, and the ring shows after keyb
     try t.frame();
     try std.testing.expect(!a.out.focused);
     try std.testing.expect(b.out.focused and b.out.focus_visible);
-    try std.testing.expectEqual(ui.theme.focus_ring, ui.tree.get(b.node).?.visual.border_color);
+    try std.testing.expectEqual(ui.theme.focus_ring, firstStroke(&t.list).?);
 
     ui.key(.enter, .{}, true, false);
     ui.key(.space, .{}, true, false);
@@ -908,7 +956,7 @@ test "Tab walks buttons, Enter and Space activate, and the ring shows after keyb
     try t.frame();
     try std.testing.expect(a.out.focused and !b.out.focused);
     try std.testing.expect(!a.out.focus_visible);
-    try std.testing.expect(ui.tree.get(a.node).?.visual.border_width == 0);
+    try std.testing.expect(firstStroke(&t.list) == null); // no ring after a mouse click
     try std.testing.expect(Handle.eql(ui.focused().?, a.node));
 }
 
@@ -1278,20 +1326,20 @@ test "an empty field shows its placeholder, dimmed, and hides it once there is t
     try t.h.frame();
     const node = ui.tree.get(tf.node).?;
     try std.testing.expectEqual(@as(usize, 6), node.text.?.glyphs.len);
-    try std.testing.expectEqual(ui.theme.field.placeholder, node.text.?.color);
+    try std.testing.expectEqual(ui.theme.field.placeholder, firstTextColor(&t.h.list).?);
 
     try type_(t, "hi");
     try std.testing.expectEqual(@as(usize, 2), ui.tree.get(tf.node).?.text.?.glyphs.len);
-    try std.testing.expectEqual(ui.theme.field.text, ui.tree.get(tf.node).?.text.?.color);
+    try std.testing.expectEqual(ui.theme.field.text, firstTextColor(&t.h.list).?);
 }
 
 test "focused fields get a highlighted border; the I-beam cursor and IME rect are reported" {
     const t = try TextHarness.init();
     defer t.deinit();
     const ui = &t.h.ui;
-    const tf = try focusedField(t);
+    _ = try focusedField(t);
     try type_(t, "ab");
-    try std.testing.expectEqual(ui.theme.field.border_focus, ui.tree.get(tf.node).?.visual.border_color);
+    try std.testing.expectEqual(ui.theme.field.border_focus, firstStroke(&t.h.list).?);
 
     ui.pointerMove(50, 10);
     try std.testing.expectEqual(tree_mod.Cursor.text, ui.cursor());
@@ -2150,4 +2198,250 @@ test "the pin check stays quiet through normal use and notices a copy" {
     // only; the copy must never be used or deinitialized.)
     const moved = ui.*;
     try std.testing.expect(!moved.isPinned());
+}
+
+// ---- painters and themes -----------------------------------------------------------------
+
+const PaintCtx = @import("paint_ctx.zig").PaintCtx;
+
+/// A painter with a completely different look: a vertical gradient, a bottom
+/// rule, and fixed text color.
+fn gradientButtonPainter(pc: *PaintCtx, b: *const Button) @import("paint_ctx.zig").Error!void {
+    const r = pc.rect;
+    const top = if (b.out.hovered) geometry.Color.rgb(250, 200, 60) else geometry.Color.rgb(240, 160, 40);
+    try pc.list.fillRect(r, draw_list.Paint.linear(.{ .x = r.x, .y = r.y }, .{ .x = r.x, .y = r.bottom() }, top, geometry.Color.rgb(160, 90, 20)));
+    try pc.list.line(.{ .x = r.x, .y = r.bottom() - 1 }, .{ .x = r.right(), .y = r.bottom() - 1 }, 2, draw_list.Paint.solid(geometry.Color.black));
+    pc.text_color = geometry.Color.rgb(1, 2, 3);
+}
+
+fn countKind(list: *const DrawList, comptime tag: std.meta.Tag(draw_list.Command)) usize {
+    var n: usize = 0;
+    for (list.items()) |c| n += @intFromBool(c == tag);
+    return n;
+}
+
+fn linearGradientFills(list: *const DrawList) usize {
+    var n: usize = 0;
+    for (list.items()) |c| switch (c) {
+        .fill_rect => |f| n += @intFromBool(f.paint == .linear_gradient),
+        else => {},
+    };
+    return n;
+}
+
+test "replacing the theme's button painter changes the look but not the behavior" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const Count = struct {
+        var n: u32 = 0;
+        fn cb(_: ?*anyopaque, _: *event_mod.Event) void {
+            n += 1;
+        }
+    };
+    Count.n = 0;
+    ui.theme.button_painter = gradientButtonPainter;
+    const b = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30), .text = "Go", .on_click = .{ .call = Count.cb } });
+    try t.h.frame();
+
+    try std.testing.expectEqual(@as(usize, 1), linearGradientFills(&t.h.list));
+    try std.testing.expectEqual(@as(usize, 1), countKind(&t.h.list, .line));
+    try std.testing.expectEqual(@as(usize, 0), countKind(&t.h.list, .fill_rounded_rect)); // not the default look
+    try std.testing.expectEqual(geometry.Color.rgb(1, 2, 3), firstTextColor(&t.h.list).?); // the painter colored the text
+
+    // Same behavior: hover still repaints, clicks still count.
+    t.h.click(10, 10);
+    try std.testing.expectEqual(@as(u32, 1), b.out.click_count);
+    try std.testing.expectEqual(@as(u32, 1), Count.n);
+    try t.h.frame();
+    try std.testing.expectEqual(@as(usize, 1), linearGradientFills(&t.h.list));
+}
+
+test "a per-widget painter overrides the theme's for that widget only, and can be removed" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const plain = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30) });
+    const special = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30), .painter = gradientButtonPainter });
+    _ = plain;
+    try t.h.frame();
+    try std.testing.expectEqual(@as(usize, 1), linearGradientFills(&t.h.list));
+    try std.testing.expectEqual(@as(usize, 1), countKind(&t.h.list, .fill_rounded_rect)); // the other one
+
+    special.setPainter(null);
+    try std.testing.expect(ui.isDirty()); // swapping a painter repaints
+    try t.h.frame();
+    try std.testing.expectEqual(@as(usize, 0), linearGradientFills(&t.h.list));
+    try std.testing.expectEqual(@as(usize, 2), countKind(&t.h.list, .fill_rounded_rect));
+}
+
+test "per-widget colors override the theme's variant colors for that widget only" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    var custom = ui.theme.button_colors[0];
+    custom.normal = geometry.Color.rgb(9, 99, 199);
+    custom.text = geometry.Color.rgb(8, 8, 8);
+    _ = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30), .text = "x", .colors = custom });
+    const other = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30), .text = "y" });
+    try t.h.frame();
+
+    var fills: [2]geometry.Color = undefined;
+    var n: usize = 0;
+    for (t.h.list.items()) |c| switch (c) {
+        .fill_rounded_rect => |f| {
+            if (n < 2) fills[n] = paintColor(f.paint).?;
+            n += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqual(geometry.Color.rgb(9, 99, 199), fills[0]);
+    try std.testing.expectEqual(ui.theme.button_colors[0].normal, fills[1]);
+    try std.testing.expectEqual(geometry.Color.rgb(8, 8, 8), firstTextColor(&t.h.list).?);
+
+    other.props.colors = custom; // raw write: the shadow checker marks paint
+    ui.update();
+    try std.testing.expect(ui.isDirty());
+}
+
+test "setTheme swaps colors, painters, and fonts and repaints everything" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    _ = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30), .text = "A", .variant = .primary });
+    const label_w = try ui.add(Label, ui.tree.root, .{ .text = "hello" });
+    try t.h.frame();
+    const before = firstFill(&t.h.list).?;
+    const before_text_w = label_w.out.text_width;
+    try std.testing.expectEqual(ui.theme.button_colors[1].normal, before);
+
+    var dark_red = ui.theme;
+    dark_red.button_colors[1].normal = geometry.Color.rgb(120, 0, 0);
+    dark_red.text_color = geometry.Color.rgb(10, 200, 10);
+    dark_red.font_size = 40; // bigger text must reshape
+    ui.setTheme(dark_red);
+    try std.testing.expect(ui.isDirty());
+    try t.h.frame();
+
+    try std.testing.expectEqual(geometry.Color.rgb(120, 0, 0), firstFill(&t.h.list).?);
+    try std.testing.expect(label_w.out.text_width > before_text_w * 1.5);
+    // The label's default painter now uses the new theme text color.
+    var label_color: ?geometry.Color = null;
+    for (t.h.list.items()) |c| switch (c) {
+        .glyph_run => |g| label_color = g.color, // the last run is the label's
+        else => {},
+    };
+    try std.testing.expectEqual(geometry.Color.rgb(10, 200, 10), label_color.?);
+
+    // Switching back restores the original look.
+    var restored = ui.theme;
+    restored.button_colors[1] = (Theme{}).button_colors[1];
+    restored.text_color = (Theme{}).text_color;
+    restored.font_size = 20;
+    ui.setTheme(restored);
+    try t.h.frame();
+    try std.testing.expectEqual(before, firstFill(&t.h.list).?);
+}
+
+test "label painters color text; per-label painters and props.color win" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const Rainbow = struct {
+        fn paint(pc: *PaintCtx, _: *const Label) @import("paint_ctx.zig").Error!void {
+            pc.text_color = geometry.Color.rgb(77, 66, 55);
+        }
+    };
+    const themed = try ui.add(Label, ui.tree.root, .{ .text = "a" });
+    const colored = try ui.add(Label, ui.tree.root, .{ .text = "b", .color = geometry.Color.rgb(1, 1, 1) });
+    const custom = try ui.add(Label, ui.tree.root, .{ .text = "c", .painter = Rainbow.paint });
+    _ = .{ themed, colored, custom };
+    try t.h.frame();
+    var colors: [3]geometry.Color = undefined;
+    var n: usize = 0;
+    for (t.h.list.items()) |c| switch (c) {
+        .glyph_run => |g| {
+            if (n < 3) colors[n] = g.color;
+            n += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqual(ui.theme.text_color, colors[0]);
+    try std.testing.expectEqual(geometry.Color.rgb(1, 1, 1), colors[1]);
+    try std.testing.expectEqual(geometry.Color.rgb(77, 66, 55), colors[2]);
+}
+
+test "a custom field painter controls the box, text, selection, and caret colors" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const Neon = struct {
+        fn paint(pc: *PaintCtx, f: *const TextField) @import("paint_ctx.zig").Error!void {
+            try pc.box(.{ .background = geometry.Color.rgb(0, 0, 40), .border_color = geometry.Color.rgb(0, 255, 255), .border_width = 3 });
+            pc.text_color = geometry.Color.rgb(255, 0, 255);
+            pc.selection_color = geometry.Color.rgb(255, 255, 0);
+            pc.caret_color = geometry.Color.rgb(0, 255, 0);
+            _ = f;
+        }
+    };
+    ui.theme.field_painter = Neon.paint;
+    const tf = try focusedField(t);
+    try type_(t, "ab");
+    try std.testing.expectEqual(geometry.Color.rgb(0, 0, 40), firstFill(&t.h.list).?);
+    try std.testing.expectEqual(geometry.Color.rgb(0, 255, 255), firstStroke(&t.h.list).?);
+    try std.testing.expectEqual(geometry.Color.rgb(255, 0, 255), firstTextColor(&t.h.list).?);
+    var caret = false;
+    for (t.h.list.items()) |c| {
+        if (solidFill(c)) |f| caret = caret or (f.rect.w == 1 and std.meta.eql(f.color, geometry.Color.rgb(0, 255, 0)));
+    }
+    try std.testing.expect(caret);
+    try press(t, .a, .{ .ctrl = true });
+    var selection = false;
+    for (t.h.list.items()) |c| {
+        if (solidFill(c)) |f| selection = selection or std.meta.eql(f.color, geometry.Color.rgb(255, 255, 0));
+    }
+    try std.testing.expect(selection);
+    _ = tf;
+}
+
+test "an editor painter can add chrome around the default content" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const Framed = struct {
+        fn paint(pc: *PaintCtx, ed: *CodeEditor) @import("paint_ctx.zig").Error!void {
+            try pc.box(.{ .background = geometry.Color.rgb(5, 5, 50), .border_color = geometry.Color.rgb(200, 0, 0), .border_width = 4 });
+            try ed.paintContent(pc);
+        }
+    };
+    ui.theme.editor_painter = Framed.paint;
+    const ed = try editorBox(t);
+    try ed.loadText("hello", false);
+    try t.h.frame();
+    try std.testing.expectEqual(geometry.Color.rgb(5, 5, 50), firstFill(&t.h.list).?);
+    try std.testing.expectEqual(geometry.Color.rgb(200, 0, 0), firstStroke(&t.h.list).?);
+    try std.testing.expect(countKind(&t.h.list, .glyph_run) >= 1); // the content is still there
+    try std.testing.expect(t.h.list.isBalanced());
+
+    // Per-editor colors tint the default painter for that editor.
+    ed.setPainter(null);
+    ui.theme.editor_painter = code_editor.defaultPainter;
+    var custom = ui.theme.editor;
+    custom.background = geometry.Color.rgb(33, 44, 55);
+    ed.props.colors = custom;
+    try t.h.frame();
+    try std.testing.expectEqual(geometry.Color.rgb(33, 44, 55), firstFill(&t.h.list).?);
+}
+
+test "plain nodes still draw their Visual, then their children" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    ui.tree.get(ui.tree.root).?.visual = .{ .background = geometry.Color.rgb(1, 2, 3), .border_color = geometry.Color.rgb(4, 5, 6), .border_width = 2 };
+    ui.tree.markDirty(ui.tree.root, DirtyFlags.layout_and_paint);
+    try t.frame();
+    try std.testing.expectEqual(geometry.Color.rgb(1, 2, 3), firstFill(&t.list).?);
+    try std.testing.expectEqual(geometry.Color.rgb(4, 5, 6), firstStroke(&t.list).?);
 }

@@ -39,6 +39,9 @@ const Stop = text_sys.Stop;
 const Glyph = text_sys.Glyph;
 const Theme = @import("theme.zig").Theme;
 const Ui = @import("../core/ui.zig").Ui;
+const paint_ctx = @import("../core/paint_ctx.zig");
+const PaintCtx = paint_ctx.PaintCtx;
+const EditorColors = @import("theme.zig").EditorColors;
 const Style = @import("../core/style.zig").Style;
 const Node = @import("../core/tree.zig").Node;
 const label = @import("label.zig");
@@ -48,6 +51,10 @@ const syntax = @import("../editor/syntax.zig");
 const Highlighter = @import("../editor/highlighter.zig").Highlighter;
 
 pub const Font = label.Font;
+
+/// Draws the editor: the default fills the background, then calls
+/// `paintContent` for the gutter, text, selections, carets, and scrollbar.
+pub const Painter = *const fn (ctx: *PaintCtx, ed: *CodeEditor) paint_ctx.Error!void;
 
 const blink_ms: u64 = 530;
 const gutter_pad: f32 = 8;
@@ -140,6 +147,8 @@ pub const CodeEditor = struct {
         line_numbers: bool = true,
         auto_indent: bool = true,
         on_change: ?event.Callback = null,
+        colors: ?EditorColors = null,
+        painter: ?Painter = null,
     };
 
     pub const listened_kinds = [_]event.EventKind{
@@ -166,6 +175,8 @@ pub const CodeEditor = struct {
             .line_numbers = o.line_numbers,
             .auto_indent = o.auto_indent,
             .on_change = o.on_change,
+            .colors = o.colors,
+            .painter = o.painter,
         };
         if (o.text.len > 0) try self.loadText(o.text, false);
         if (o.language) |l| try self.setLanguage(l);
@@ -405,13 +416,6 @@ pub const CodeEditor = struct {
         self.editor.auto_indent = self.props.auto_indent;
         node.flags.focusable = self.props.enabled;
 
-        const colors = self.ui.theme.editor;
-        const look: tree_mod.Visual = .{ .background = colors.background };
-        if (!std.mem.eql(u8, std.mem.asBytes(&look), std.mem.asBytes(&node.visual))) {
-            node.visual = look;
-            self.repaint = true;
-        }
-
         if (self.editor.doc.changes.items.len > 0 or self.editor.doc.version != self.last_version) {
             // Subscribers drain the change records here: the highlighter follows
             // every edit so only the affected lines are relexed.
@@ -454,11 +458,30 @@ pub const CodeEditor = struct {
 
     // ---- painting ------------------------------------------------------------------------
 
-    pub fn paintHook(ctx: *anyopaque, abs: Rect, list: *DrawList) draw_list.Error!void {
-        const self: *CodeEditor = @ptrCast(@alignCast(ctx));
+    /// The colors in effect: this editor's override, else the theme's.
+    pub fn palette(self: *const CodeEditor) EditorColors {
+        return self.props.colors orelse self.ui.theme.editor;
+    }
+
+    /// The node's painter hook: runs this editor's painter, else the theme's.
+    pub fn paintHook(self: *CodeEditor, pc: *PaintCtx) paint_ctx.Error!void {
+        const p = self.props.painter orelse self.ui.theme.editor_painter;
+        try p(pc, self);
+    }
+
+    pub fn setPainter(self: *CodeEditor, p: ?Painter) void {
+        self.props.painter = p;
+        self.repaint = true;
+    }
+
+    /// Draw the editor's content (gutter, text, selections, carets, scrollbar)
+    /// inside `pc.rect`. Painters call this after drawing their own chrome.
+    pub fn paintContent(self: *CodeEditor, pc: *PaintCtx) paint_ctx.Error!void {
+        const abs = pc.rect;
+        const list = pc.list;
         const m = self.metrics() orelse return;
         const geo = self.geometry(m);
-        const colors = self.ui.theme.editor;
+        const colors = self.palette();
         const ed = &self.editor;
         const focused = self.out.focused and self.props.enabled;
         const last_line = ed.doc.lineCount() - 1;
@@ -554,7 +577,7 @@ pub const CodeEditor = struct {
     fn emitLine(self: *CodeEditor, list: *DrawList, m: Metrics, origin_x: f32, baseline: f32, row_y: f32, line: usize) draw_list.Error!void {
         const glyphs = self.glyphs.items;
         if (glyphs.len == 0) return;
-        const colors = self.ui.theme.editor;
+        const colors = self.palette();
         const subpixel = !self.ui.text.isMonospace(m.font);
         const bounds: Rect = .{ .x = origin_x, .y = row_y, .w = self.stopX(std.math.maxInt(usize)), .h = m.line_h };
         const plain = colors.tokenColor(.plain);
@@ -802,8 +825,13 @@ pub const CodeEditor = struct {
         auto_indent: bool = true,
         /// Called after each user edit (typing, deleting, paste, undo/redo).
         on_change: ?event.Callback = null,
+        /// Overrides the theme's editor colors for this editor.
+        colors: ?EditorColors = null,
+        /// Overrides the theme's painter for this editor (use `setPainter`).
+        painter: ?Painter = null,
 
         pub const dirty_map = .{
+            .colors = shadow.Category.paint,
             .font = shadow.Category.paint,
             .size = shadow.Category.paint,
             .tab_width = shadow.Category.paint,
@@ -828,3 +856,9 @@ pub const CodeEditor = struct {
         selection_count: u32 = 1,
     };
 };
+
+/// The default look: a flat background, then the content.
+pub fn defaultPainter(pc: *PaintCtx, ed: *CodeEditor) paint_ctx.Error!void {
+    try pc.box(.{ .background = ed.palette().background });
+    try ed.paintContent(pc);
+}

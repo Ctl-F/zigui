@@ -14,14 +14,20 @@ const Handle = @import("../core/handle.zig").Handle;
 const event = @import("../core/event.zig");
 const shadow = @import("../core/shadow.zig");
 const DirtyFlags = @import("../core/dirty.zig").DirtyFlags;
-const Visual = @import("../core/style.zig").Visual;
-const Theme = @import("theme.zig").Theme;
+const theme_mod = @import("theme.zig");
+const ButtonColors = theme_mod.ButtonColors;
+const paint_ctx = @import("../core/paint_ctx.zig");
+const PaintCtx = paint_ctx.PaintCtx;
 const Align = @import("../text/block.zig").Align;
 const Ui = @import("../core/ui.zig").Ui;
 const Style = @import("../core/style.zig").Style;
 const Node = @import("../core/tree.zig").Node;
 
 pub const Variant = enum { normal, primary, danger, flat };
+
+/// Draws a button's box into the paint context (and may recolor its text).
+/// Set `Theme.button_painter` to restyle every button, or `props.painter` for one.
+pub const Painter = *const fn (ctx: *PaintCtx, b: *const Button) paint_ctx.Error!void;
 
 pub const Text = @import("common.zig").Text;
 
@@ -47,8 +53,14 @@ pub const Button = struct {
         variant: Variant = .normal,
         text_align: Align = .center,
         on_click: ?event.Callback = null,
+        /// Overrides the theme's colors for this button (all states).
+        colors: ?ButtonColors = null,
+        /// Overrides the theme's painter for this button. Use `setPainter` so
+        /// the change repaints.
+        painter: ?Painter = null,
 
         pub const dirty_map = .{
+            .colors = shadow.Category.paint,
             .text = shadow.Category.layout,
             .enabled = shadow.Category.paint,
             .variant = shadow.Category.paint,
@@ -79,6 +91,8 @@ pub const Button = struct {
         on_click: ?event.Callback = null,
         /// Run this command when clicked (see `setCommand`).
         command: ?[]const u8 = null,
+        colors: ?ButtonColors = null,
+        painter: ?Painter = null,
     };
 
     pub const listened_kinds = [_]event.EventKind{ .pointer_enter, .pointer_leave, .pointer_down, .pointer_up, .click, .focus_in, .focus_out, .key_down };
@@ -92,6 +106,8 @@ pub const Button = struct {
         self.props.enabled = o.enabled;
         self.props.text_align = o.text_align;
         self.props.on_click = o.on_click;
+        self.props.colors = o.colors;
+        self.props.painter = o.painter;
         if (o.text.len > 0) try self.setText(o.text);
         if (o.command) |c| try self.setCommand(c);
         self.checker.sync(&self.props);
@@ -119,6 +135,29 @@ pub const Button = struct {
         if (self.props.enabled == enabled) return;
         self.props.enabled = enabled;
         self.ui.tree.markDirty(self.node, DirtyFlags.paint_only);
+    }
+
+    /// Use `p` instead of the theme's painter for this button (null: back to the theme's).
+    pub fn setPainter(self: *Button, p: ?Painter) void {
+        self.props.painter = p;
+        self.repaint();
+    }
+
+    /// The colors in effect: this button's override, else the theme's for its variant.
+    pub fn colors(self: *const Button) ButtonColors {
+        if (self.props.colors) |c| return c;
+        const t = &self.ui.theme;
+        return t.button_colors[@min(@intFromEnum(self.props.variant), t.button_colors.len - 1)];
+    }
+
+    fn repaint(self: *Button) void {
+        self.ui.tree.markDirty(self.node, DirtyFlags.paint_only);
+    }
+
+    /// The node's painter hook: runs this button's painter, else the theme's.
+    pub fn paintHook(self: *Button, pc: *PaintCtx) paint_ctx.Error!void {
+        const p = self.props.painter orelse self.ui.theme.button_painter;
+        try p(pc, self);
     }
 
     pub fn setVariant(self: *Button, variant: Variant) void {
@@ -156,6 +195,11 @@ pub const Button = struct {
 
     /// Shared listener for every button event kind.
     pub fn handleEvent(b: *Button, ev: *event.Event) void {
+        // State that painters read changes here, so every change repaints.
+        switch (ev.kind) {
+            .focus_in, .focus_out, .pointer_enter, .pointer_leave, .pointer_down, .pointer_up => b.repaint(),
+            else => {},
+        }
         switch (ev.kind) {
             .focus_in => b.out.focused = true,
             .focus_out => b.out.focused = false,
@@ -195,21 +239,17 @@ pub const Button = struct {
         ui.tree.get(self.node).?.flags.focusable = self.props.enabled;
     }
 
-    /// Verify raw prop writes, resolve the look through the theme's painter, and
-    /// keep the node's text in sync.
+    /// Verify raw prop writes and keep the node's text in sync. (The look is the
+    /// painter's job, at paint time.)
     pub fn update(self: *Button) void {
         const ui = self.ui;
-        const node = ui.tree.get(self.node).?;
         ui.verifyProps(self.node, &self.checker, &self.props, "button");
-        self.out.focus_visible = self.out.focused and ui.input.keyboard;
-
-        const look = ui.theme.button_painter(self, &ui.theme);
-        if (!std.mem.eql(u8, std.mem.asBytes(&look), std.mem.asBytes(&node.visual))) {
-            node.visual = look;
-            ui.tree.markDirty(self.node, DirtyFlags.paint_only);
+        const focus_visible = self.out.focused and ui.input.keyboard;
+        if (focus_visible != self.out.focus_visible) {
+            self.out.focus_visible = focus_visible;
+            self.repaint();
         }
-        const c = ui.theme.button_colors[@min(@intFromEnum(self.props.variant), ui.theme.button_colors.len - 1)];
-        ui.syncText(self.node, self.props.text, ui.theme.ui_font, ui.theme.font_size, if (self.props.enabled) c.text else c.text_disabled, self.props.text_align);
+        ui.syncText(self.node, self.props.text, ui.theme.ui_font, ui.theme.font_size, ui.theme.text_color, self.props.text_align);
     }
 
     pub fn endFrame(self: *Button) void {
@@ -217,9 +257,11 @@ pub const Button = struct {
     }
 };
 
-pub fn defaultPainter(b: *const Button, theme: *const Theme) Visual {
-    const idx: usize = @intFromEnum(b.props.variant);
-    const c = theme.button_colors[@min(idx, theme.button_colors.len - 1)];
+/// The default look: a rounded box tinted by state, with a focus ring after
+/// keyboard use, and text colored for enabled/disabled.
+pub fn defaultPainter(pc: *PaintCtx, b: *const Button) paint_ctx.Error!void {
+    const theme = &b.ui.theme;
+    const c = b.colors();
     const bg = if (!b.props.enabled)
         c.disabled
     else if (b.out.pressed)
@@ -229,10 +271,11 @@ pub fn defaultPainter(b: *const Button, theme: *const Theme) Visual {
     else
         c.normal;
     const ring = b.out.focus_visible and b.props.enabled;
-    return .{
+    try pc.box(.{
         .background = bg,
         .border_color = if (ring) theme.focus_ring else c.border,
         .border_width = if (ring) theme.focus_ring_width else c.border_width,
         .radius = theme.corner_radius,
-    };
+    });
+    pc.text_color = if (b.props.enabled) c.text else c.text_disabled;
 }

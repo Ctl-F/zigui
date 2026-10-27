@@ -88,7 +88,8 @@ src/core/
   style.zig            Style: size, flex, padding, margin, align; Visual (stopgap look)
   layout.zig           flex layout pass: measure (bottom-up) then place (top-down)
   draw_list.zig        fixed-capacity draw commands (tagged union), no allocation
-  paint.zig            paint pass: laid-out tree to draw list
+  paint_ctx.zig        PaintCtx: what a painter draws into (list, rect, text-color overrides)
+  paint.zig            paint pass: Visual, then painter, then text, then children
   keys.zig             Key, Mods, Chord; parse/format ("ctrl+shift+p")
   event.zig            Event, Callback, Listener: capture/target/bubble
   dispatch.zig         immediate dispatch; destroys deferred until it finishes
@@ -178,6 +179,15 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   is reclaimed in `update` once its node is destroyed. Polling flags are
   frame-scoped (`out.clicked`) with a monotonic counter (`out.click_count`), and
   callbacks and flags come from the same event path.
+- Painters and themes: a painter is `fn (*PaintCtx, *const Widget) Error!void` that
+  emits the widget's draw commands from its state (and may set the text color,
+  selection color, and caret color on the context). `Theme` holds one painter per
+  widget type (`button_painter`, `label_painter`, `field_painter`, `editor_painter`)
+  plus the color tables; a widget can override its colors (`props.colors`) or its
+  painter (`setPainter`). State changes that painters read (hover, press, focus)
+  mark the node paint-dirty where they happen. `Ui.setTheme` swaps the whole theme
+  and repaints everything; fonts and sizes that changed reshape on the next `update`.
+  The paint pass runs, per node: `Visual` (plain containers), painter, text, children.
 - Frame protocol (see `ui.zig`): input, app logic, `Ui.update` (settle focus, verify
   props, resolve looks), layout and paint if `isDirty`, then `endFrame`.
 - Text: `font.Backend` is the swappable layer (stb_truetype today). The text system
@@ -240,23 +250,21 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
 Ordered by the spec-drift notes (`NOTES/spec-drift-notes.md`); the notes are the
 authority for rationale, and a few items are recommendations, not requirements.
 
-1. Painters that emit draw commands (today the button painter returns a `Visual`),
-   swappable per widget type, plus `Ui.setTheme` and per-widget overrides.
-2. A renderer backend interface with the software renderer as its first
+1. A renderer backend interface with the software renderer as its first
    implementation (the atlas pages already track a dirty flag for GPU upload).
-3. Canvas node with `redraw_policy` and raw-key mode in key routing.
-4. Frame stats ring buffer and overlay, a handler time-budget warning, and a test
+2. Canvas node with `redraw_policy` and raw-key mode in key routing.
+3. Frame stats ring buffer and overlay, a handler time-budget warning, and a test
    that steady-state frames allocate nothing.
-5. Damage rects and per-repaint-boundary draw-record caching.
-6. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
+4. Damage rects and per-repaint-boundary draw-record caching.
+5. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
    focus scopes (modal traps), tab indices, IME preedit.
-7. Memory-mapped document open and an off-thread newline-index scan.
-8. Runtime schema generator (reflect over the widget interface), then forms and
+6. Memory-mapped document open and an off-thread newline-index scan.
+7. Runtime schema generator (reflect over the widget interface), then forms and
    wizards, then a ZON loader and the builder.
-9. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
-10. The C facade (`src/capi/`), once the core Zig library is done.
+8. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
+9. The C facade (`src/capi/`), once the core Zig library is done.
 
-Smaller gaps: layout follow-ups (width-constrained text measure, stack/absolute,
+Smaller gaps: theme metrics (padding, min sizes) and a painter measure override; layout follow-ups (width-constrained text measure, stack/absolute,
 split and scroll containers, wrap, grid, calc `Length`); draw commands for
 transforms, image quads, shadows, paths; a model interface for lists and trees;
 more languages, bracket matching, find/replace, soft wrap, and folding in the

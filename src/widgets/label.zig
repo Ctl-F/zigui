@@ -7,11 +7,16 @@ const DirtyFlags = @import("../core/dirty.zig").DirtyFlags;
 const Color = @import("../core/geometry.zig").Color;
 const block = @import("../text/block.zig");
 const Ui = @import("../core/ui.zig").Ui;
+const paint_ctx = @import("../core/paint_ctx.zig");
+const PaintCtx = paint_ctx.PaintCtx;
 const Style = @import("../core/style.zig").Style;
 const Node = @import("../core/tree.zig").Node;
 
 pub const Text = @import("common.zig").Text;
 pub const Align = block.Align;
+
+/// Draws a label (it has no box; the default just picks the text color).
+pub const Painter = *const fn (ctx: *PaintCtx, l: *const Label) paint_ctx.Error!void;
 
 pub const Font = enum {
     /// The theme's UI font.
@@ -36,6 +41,8 @@ pub const Label = struct {
         /// Fully transparent (alpha 0) uses the theme's text color.
         color: Color = Color.transparent,
         text_align: Align = .start,
+        /// Overrides the theme's label painter for this label (use `setPainter`).
+        painter: ?Painter = null,
 
         pub const dirty_map = .{
             .text = shadow.Category.layout,
@@ -59,6 +66,7 @@ pub const Label = struct {
         size: f32 = 0,
         color: Color = Color.transparent,
         text_align: Align = .start,
+        painter: ?Painter = null,
     };
 
     pub const listened_kinds = [_]@import("../core/event.zig").EventKind{};
@@ -72,6 +80,7 @@ pub const Label = struct {
         self.props.size = o.size;
         self.props.color = o.color;
         self.props.text_align = o.text_align;
+        self.props.painter = o.painter;
         if (o.text.len > 0) try self.setText(o.text);
         self.checker.sync(&self.props);
     }
@@ -95,6 +104,17 @@ pub const Label = struct {
     pub fn setText(self: *Label, text: []const u8) !void {
         try self.ui.replaceText(&self.props.text, text);
         self.ui.tree.markDirty(self.node, DirtyFlags.layout_and_paint);
+    }
+
+    /// The node's painter hook: runs this label's painter, else the theme's.
+    pub fn paintHook(self: *Label, pc: *PaintCtx) paint_ctx.Error!void {
+        const p = self.props.painter orelse self.ui.theme.label_painter;
+        try p(pc, self);
+    }
+
+    pub fn setPainter(self: *Label, p: ?Painter) void {
+        self.props.painter = p;
+        self.ui.tree.markDirty(self.node, DirtyFlags.paint_only);
     }
 
     pub fn prepare(self: *Label) void {
@@ -121,3 +141,8 @@ pub const Label = struct {
         _ = self;
     }
 };
+
+/// The default look: no box; text in `props.color`, or the theme's text color.
+pub fn defaultPainter(pc: *PaintCtx, l: *const Label) paint_ctx.Error!void {
+    pc.text_color = if (l.props.color.a != 0) l.props.color else l.ui.theme.text_color;
+}

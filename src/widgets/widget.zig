@@ -9,6 +9,9 @@
 //!   nodeTemplate(style) -> Node   the tree node it lives on
 //!   init(ui, node) -> W, deinit(*W), apply(*W, Options) !void
 //!   handleEvent(*W, *Event) void
+//!   paintHook(*W, *PaintCtx) Error!void   runs the widget's (theme or override) painter;
+//!                     each widget file also exports its `Painter` function type and
+//!                     `defaultPainter`, which `Theme` holds one of per widget type
 //!   prepare(*W), update(*W), endFrame(*W)   per-frame hooks (see `Ui.update`)
 //!   tick(*W, now) bool, msUntilBlink(*W, now) ?u64, caretRect(*W) ?Rect
 //!                     only for widgets that have a text caret
@@ -24,7 +27,7 @@ pub fn check(comptime W: type) void {
     const required = [_][]const u8{
         "Props",         "Out",    "Options",   "listened_kinds", "nodeTemplate",
         "init",          "deinit", "apply",     "handleEvent",    "prepare",
-        "update",        "endFrame",
+        "update",        "endFrame", "paintHook",
     };
     inline for (required) |name| {
         if (!@hasDecl(W, name)) @compileError("widget " ++ @typeName(W) ++ " is missing `" ++ name ++ "`");

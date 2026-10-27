@@ -1,9 +1,11 @@
 //! Paint pass: walks the laid-out tree and emits draw commands.
 //!
-//! Stopgap until painters and themes exist: every node draws its `Visual`
-//! (background, then border), and nodes flagged `clip_children` clip their
-//! subtree. Children paint after their parent, in sibling order. This is a full
-//! repaint; damage-rect culling comes later.
+//! Per node, in order: its `Visual` (plain containers use this), then its
+//! painter (`Node.paint_hook`, which widgets install to run the theme's
+//! painter), then its text, then its children in sibling order. Nodes flagged
+//! `clip_children` clip everything after their own box. The painter can recolor
+//! the text through the `PaintCtx`. This is a full repaint; damage-rect culling
+//! comes later.
 
 const std = @import("std");
 const Handle = @import("handle.zig").Handle;
@@ -12,6 +14,7 @@ const DrawList = @import("draw_list.zig").DrawList;
 const Paint = @import("draw_list.zig").Paint;
 const Rect = @import("geometry.zig").Rect;
 const layout_mod = @import("layout.zig");
+const PaintCtx = @import("paint_ctx.zig").PaintCtx;
 
 pub const Error = @import("draw_list.zig").Error;
 
@@ -26,23 +29,14 @@ fn paintNode(tree: *Tree, h: Handle, ox: f32, oy: f32, list: *DrawList) Error!vo
     if (node.flags.hidden) return;
 
     const abs: Rect = .{ .x = ox + node.rect.x, .y = oy + node.rect.y, .w = node.rect.w, .h = node.rect.h };
-    const v = node.visual;
-    if (v.background.a != 0) {
-        const paint = Paint.solid(v.background);
-        if (v.radius > 0) {
-            try list.fillRoundedRect(abs, .{ v.radius, v.radius, v.radius, v.radius }, paint);
-        } else {
-            try list.fillRect(abs, paint);
-        }
-    }
-    if (v.border_width > 0 and v.border_color.a != 0) {
-        try list.strokeRoundedRect(abs, v.border_width, v.radius, Paint.solid(v.border_color));
-    }
+    var pc: PaintCtx = .{ .list = list, .rect = abs };
+    try pc.box(node.visual);
 
     const clip = node.flags.clip_children;
     if (clip) try list.pushClip(abs);
-    if (node.text) |block| try paintText(block, node.style.padding, abs, list);
-    if (node.paint_hook) |hook| try hook.run(hook.ctx, abs, list);
+    // The painter draws the node's own commands; it may recolor the text.
+    if (node.paint_hook) |hook| try hook.run(hook.ctx, &pc);
+    if (node.text) |block| try paintText(block, node.style.padding, &pc);
     var it = tree.children(h);
     while (it.next()) |c| try paintNode(tree, c, abs.x, abs.y, list);
     if (clip) _ = try list.popClip();
@@ -50,7 +44,10 @@ fn paintNode(tree: *Tree, h: Handle, ox: f32, oy: f32, list: *DrawList) Error!vo
 
 /// Draw a node's text block in its content box: vertically centered, aligned
 /// horizontally per the block. Text wider than the box is clipped to it.
-fn paintText(block: *const @import("../text/block.zig").TextBlock, padding: @import("style.zig").Edges, abs: Rect, list: *DrawList) Error!void {
+/// Colors come from the painter's overrides, else from the block.
+fn paintText(block: *const @import("../text/block.zig").TextBlock, padding: @import("style.zig").Edges, pc: *const PaintCtx) Error!void {
+    const list = pc.list;
+    const abs = pc.rect;
     const decor = block.decor;
     if (block.glyphs.len == 0 and !decor.sel_on and !decor.caret_on) return;
     const pad = layout_mod.resolveEdges(padding, null);
@@ -75,14 +72,14 @@ fn paintText(block: *const @import("../text/block.zig").TextBlock, padding: @imp
     const clip = block.width > content.w or decor.active();
     if (clip) try list.pushClip(content);
     if (decor.sel_on and decor.sel_x1 > decor.sel_x0) {
-        try list.fillRect(.{ .x = origin_x + decor.sel_x0, .y = line_top, .w = decor.sel_x1 - decor.sel_x0, .h = block.line_height }, Paint.solid(decor.sel_color));
+        try list.fillRect(.{ .x = origin_x + decor.sel_x0, .y = line_top, .w = decor.sel_x1 - decor.sel_x0, .h = block.line_height }, Paint.solid(pc.selection_color));
     }
     if (block.glyphs.len > 0) {
-        try list.glyphRunAt(bounds, block.glyphs, .{ .x = origin_x, .y = baseline }, block.color, block.font, block.size, block.subpixel);
+        try list.glyphRunAt(bounds, block.glyphs, .{ .x = origin_x, .y = baseline }, pc.text_color orelse block.color, block.font, block.size, block.subpixel);
     }
     if (decor.caret_on) {
         // Whole logical pixels keep the caret crisp at 1x.
-        try list.fillRect(.{ .x = @round(origin_x + decor.caret_x), .y = line_top, .w = 1, .h = block.line_height }, Paint.solid(decor.caret_color));
+        try list.fillRect(.{ .x = @round(origin_x + decor.caret_x), .y = line_top, .w = 1, .h = block.line_height }, Paint.solid(pc.caret_color));
     }
     if (clip) _ = try list.popClip();
 }

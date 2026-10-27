@@ -20,18 +20,23 @@ const event = @import("../core/event.zig");
 const keys = @import("../core/keys.zig");
 const DirtyFlags = @import("../core/dirty.zig").DirtyFlags;
 const Rect = @import("../core/geometry.zig").Rect;
-const Visual = @import("../core/style.zig").Visual;
 const layout_mod = @import("../core/layout.zig");
 const text_block = @import("../text/block.zig");
 const Stop = @import("../text/system.zig").Stop;
 const LineEditor = @import("../text/line_editor.zig").LineEditor;
 const label = @import("label.zig");
 const Ui = @import("../core/ui.zig").Ui;
+const paint_ctx = @import("../core/paint_ctx.zig");
+const PaintCtx = paint_ctx.PaintCtx;
+const FieldColors = @import("theme.zig").FieldColors;
 const Style = @import("../core/style.zig").Style;
 const Node = @import("../core/tree.zig").Node;
 
 pub const Text = @import("common.zig").Text;
 pub const Font = label.Font;
+
+/// Draws a field's box and picks its text, selection, and caret colors.
+pub const Painter = *const fn (ctx: *PaintCtx, f: *const TextField) paint_ctx.Error!void;
 
 /// How long the caret stays on or off, in milliseconds.
 const blink_ms: u64 = 530;
@@ -65,8 +70,13 @@ pub const TextField = struct {
         size: f32 = 0,
         on_change: ?event.Callback = null,
         on_submit: ?event.Callback = null,
+        /// Overrides the theme's colors for this field.
+        colors: ?FieldColors = null,
+        /// Overrides the theme's painter for this field (use `setPainter`).
+        painter: ?Painter = null,
 
         pub const dirty_map = .{
+            .colors = shadow.Category.paint,
             .placeholder = shadow.Category.layout,
             .enabled = shadow.Category.paint,
             .read_only = shadow.Category.paint,
@@ -101,6 +111,8 @@ pub const TextField = struct {
         size: f32 = 0,
         on_change: ?event.Callback = null,
         on_submit: ?event.Callback = null,
+        colors: ?FieldColors = null,
+        painter: ?Painter = null,
     };
 
     pub const listened_kinds = [_]event.EventKind{
@@ -124,6 +136,8 @@ pub const TextField = struct {
         self.props.size = o.size;
         self.props.on_change = o.on_change;
         self.props.on_submit = o.on_submit;
+        self.props.colors = o.colors;
+        self.props.painter = o.painter;
         if (o.text.len > 0) try self.setText(o.text);
         if (o.placeholder.len > 0) try self.setPlaceholder(o.placeholder);
         self.checker.sync(&self.props);
@@ -162,6 +176,22 @@ pub const TextField = struct {
     pub fn setPlaceholder(self: *TextField, new_text: []const u8) !void {
         try self.ui.replaceText(&self.props.placeholder, new_text);
         self.ui.tree.markDirty(self.node, DirtyFlags.layout_and_paint);
+    }
+
+    /// The colors in effect: this field's override, else the theme's.
+    pub fn colors(self: *const TextField) FieldColors {
+        return self.props.colors orelse self.ui.theme.field;
+    }
+
+    /// The node's painter hook: runs this field's painter, else the theme's.
+    pub fn paintHook(self: *TextField, pc: *PaintCtx) paint_ctx.Error!void {
+        const p = self.props.painter orelse self.ui.theme.field_painter;
+        try p(pc, self);
+    }
+
+    pub fn setPainter(self: *TextField, p: ?Painter) void {
+        self.props.painter = p;
+        self.ui.tree.markDirty(self.node, DirtyFlags.paint_only);
     }
 
     fn touchText(self: *TextField) void {
@@ -328,7 +358,6 @@ pub const TextField = struct {
         const node = ui.tree.get(self.node).?;
         ui.verifyProps(self.node, &self.checker, &self.props, "text_field");
 
-        const colors = ui.theme.field;
         const f = switch (self.props.font) {
             .ui => ui.theme.ui_font,
             .mono => ui.theme.mono_font,
@@ -345,22 +374,10 @@ pub const TextField = struct {
         }
         const empty = content.len == 0;
         const shown: Text = if (empty) self.props.placeholder else .{ .bytes = content };
-        const color = if (!self.props.enabled) colors.text_disabled else if (empty) colors.placeholder else colors.text;
-        ui.syncTextEx(self.node, shown, f, size, color, .start, .{ .force = self.text_dirty, .keep_empty = true });
+        // Colors are the painter's job; this is only the shaped default.
+        ui.syncTextEx(self.node, shown, f, size, ui.theme.text_color, .start, .{ .force = self.text_dirty, .keep_empty = true });
         self.text_dirty = false;
-
-        // Look.
         const is_focused = self.out.focused and self.props.enabled;
-        const look: Visual = .{
-            .background = if (self.props.enabled) colors.background else colors.background_disabled,
-            .border_color = if (is_focused) colors.border_focus else colors.border,
-            .border_width = 1,
-            .radius = ui.theme.corner_radius,
-        };
-        if (!std.mem.eql(u8, std.mem.asBytes(&look), std.mem.asBytes(&node.visual))) {
-            node.visual = look;
-            ui.tree.markDirty(self.node, DirtyFlags.paint_only);
-        }
 
         // Out block.
         const sel = self.editor.selection();
@@ -385,11 +402,9 @@ pub const TextField = struct {
                 decor.sel_on = true;
                 decor.sel_x0 = stopX(self.stops.items, sel.start);
                 decor.sel_x1 = stopX(self.stops.items, sel.end);
-                decor.sel_color = colors.selection;
             } else if (self.blink_on and !self.props.read_only) {
                 decor.caret_on = true;
                 decor.caret_x = caret_x;
-                decor.caret_color = colors.caret;
             }
         }
         if (!std.mem.eql(u8, std.mem.asBytes(&decor), std.mem.asBytes(&text_node.decor))) {
@@ -431,3 +446,20 @@ pub const TextField = struct {
         return .{ .x = x, .y = abs.y, .w = 1, .h = abs.h };
     }
 };
+
+/// The default look: a rounded box (highlighted border when focused), with
+/// text colored for disabled / placeholder / normal, and selection and caret colors.
+pub fn defaultPainter(pc: *PaintCtx, f: *const TextField) paint_ctx.Error!void {
+    const c = f.colors();
+    const is_focused = f.out.focused and f.props.enabled;
+    try pc.box(.{
+        .background = if (f.props.enabled) c.background else c.background_disabled,
+        .border_color = if (is_focused) c.border_focus else c.border,
+        .border_width = 1,
+        .radius = f.ui.theme.corner_radius,
+    });
+    const empty = f.editor.buf.len() == 0;
+    pc.text_color = if (!f.props.enabled) c.text_disabled else if (empty) c.placeholder else c.text;
+    pc.selection_color = c.selection;
+    pc.caret_color = c.caret;
+}
