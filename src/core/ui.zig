@@ -2606,3 +2606,19 @@ test "renderFrame through the software backend draws the label's pixels" {
     try std.testing.expect(lit); // some text pixel is near white
     try std.testing.expectEqual(@as(u8, 10), img.rgba[(50 * 120 + 100) * 4]); // background, outside the text
 }
+
+test "replacing a label's text every frame never reads the freed copy" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const l = try ui.add(Label, ui.tree.root, .{ .text = "start" });
+    var i: usize = 0;
+    while (i < 300) : (i += 1) {
+        var buf: [24]u8 = undefined;
+        try l.setText(std.fmt.bufPrint(&buf, "status line number {d}", .{i}) catch unreachable);
+        ui.update();
+        if (ui.isDirty()) try ui.layoutAndPaint(.{ .w = 400, .h = 100 }, &t.h.list);
+        ui.endFrame();
+    }
+    try std.testing.expectEqualStrings("status line number 299", l.props.text.bytes);
+}

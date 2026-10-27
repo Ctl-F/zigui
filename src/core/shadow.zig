@@ -67,8 +67,11 @@ pub fn requiredFor(comptime Props: type, comptime field: []const u8) DirtyFlags 
 
 fn fieldEql(comptime T: type, a: T, b: T) bool {
     return switch (@typeInfo(T)) {
+        // Slices compare by identity, never by content: the snapshot's copy may
+        // point at memory the widget has since freed (replaced text), and reading
+        // it would be a use-after-free.
         .pointer => |p| if (p.size == .slice)
-            (a.len == b.len and (a.ptr == b.ptr or std.mem.eql(p.child, a, b)))
+            (a.len == b.len and a.ptr == b.ptr)
         else
             a == b,
         .optional => |o| if (a == null or b == null)
@@ -230,7 +233,7 @@ test "unlisted field defaults to layout and paint" {
     try std.testing.expect(dirty.layout and dirty.paint);
 }
 
-test "strings compare by content and callbacks are ignored" {
+test "callbacks are ignored, and an unchanged string slice needs nothing" {
     if (!enabled or strict) return error.SkipZigTest;
     var buf_a = "same".*;
     var buf_b = "same".*;
@@ -238,7 +241,7 @@ test "strings compare by content and callbacks are ignored" {
     var checker = Checker(TestProps).init(&props);
     var dirty = DirtyFlags.none;
 
-    props.text = &buf_b; // different pointer, same contents
+    _ = &buf_b;
     props.on_click = noop; // callbacks never need a dirty flag
     checker.verify(&props, &dirty, "test");
     try std.testing.expect(dirty.isClean());
@@ -276,4 +279,16 @@ test "changing a Callback prop needs no dirty flag" {
     props.enabled = false; // ordinary props are still checked
     checker.verify(&props, &dirty, "test");
     try std.testing.expect(!dirty.isClean());
+}
+
+test "slices compare by identity, so a snapshot of freed text is never read" {
+    const Probe = struct { s: []const u8 };
+    var one = [_]u8{ 'a', 'b' };
+    var two = [_]u8{ 'a', 'b' };
+    const x: Probe = .{ .s = &one };
+    try std.testing.expect(structEql(Probe, x, .{ .s = &one }));
+    // Same bytes in different storage counts as a change (the widget replaced
+    // its text), without comparing the bytes.
+    try std.testing.expect(!structEql(Probe, x, .{ .s = &two }));
+    try std.testing.expect(!structEql(Probe, x, .{ .s = one[0..1] }));
 }
