@@ -61,8 +61,13 @@ const CodeEditor = code_editor.CodeEditor;
 /// A unique address per widget type, stored on nodes so the registry can tell
 /// which widget a node carries.
 pub fn typeTag(comptime W: type) *const anyopaque {
+    // A mutable variable per type: identical constants may be merged by the
+    // optimizer, which would give different widget types the same tag.
     return &struct {
-        const unique: u8 = @sizeOf(W) & 0;
+        var unique: u8 = 0;
+        comptime {
+            _ = W;
+        }
     }.unique;
 }
 
@@ -2575,9 +2580,11 @@ test "per-widget colors override the theme's variant colors for that widget only
     try std.testing.expectEqual(ui.theme.button_colors[0].normal, fills[1]);
     try std.testing.expectEqual(geometry.Color.rgb(8, 8, 8), firstTextColor(&t.h.list).?);
 
-    other.props.colors = custom; // raw write: the shadow checker marks paint
-    ui.update();
-    try std.testing.expect(ui.isDirty());
+    if (comptime shadow.enabled) {
+        other.props.colors = custom; // raw write: the shadow checker marks paint
+        ui.update();
+        try std.testing.expect(ui.isDirty());
+    }
 }
 
 test "setTheme swaps colors, painters, and fonts and repaints everything" {
