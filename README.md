@@ -152,6 +152,13 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   nested values. Callbacks, painters, and slice strings are listed but not
   editable. Text writes go through the owner's `replace_text` hook so the toolkit
   keeps ownership.
+- Forms (`forms/form.zig`): `Form(T)` generates a non-blocking dialog body from
+  `T`'s schema (toggle, enum cycle button, text fields with parsing for numbers,
+  colors, lengths; optionals get a Set toggle and rebuild; structs and arrays
+  nest). `pub fn validate(*const T, *Report)` adds cross-field errors; parse and
+  validation errors show under the field and disable Submit. Typed strings are
+  form-owned; `take(allocator)` returns a deep copy (`freeOwned` frees it). The
+  blocking `prompt` belongs to the platform loop and is not built yet.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.
@@ -272,7 +279,7 @@ authority for rationale, and a few items are recommendations, not requirements.
 5. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
    focus scopes (modal traps), tab indices, IME preedit.
 6. Memory-mapped document open and an off-thread newline-index scan.
-7. Forms and wizards over the schema, then a ZON loader and the builder.
+7. Wizards, then a ZON loader and the builder.
 8. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
 9. The C facade (`src/capi/`), once the core Zig library is done.
 

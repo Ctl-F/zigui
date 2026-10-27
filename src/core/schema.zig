@@ -69,6 +69,9 @@ pub const Env = struct {
     /// Replace a text wrapper's contents with a copy of `bytes`. `text_ptr`
     /// points at the wrapper (a `Text`).
     replace_text: ?*const fn (ctx: ?*anyopaque, text_ptr: *anyopaque, bytes: []const u8) error{OutOfMemory}!void = null,
+    /// Replace a plain `[]const u8` field's contents with a copy of `bytes`.
+    /// `slot` points at the slice. Without this hook, string fields are read-only.
+    replace_string: ?*const fn (ctx: ?*anyopaque, slot: *[]const u8, bytes: []const u8) error{OutOfMemory}!void = null,
 };
 
 /// Presentation hints for editors and form generators.
@@ -128,6 +131,8 @@ pub const Type = struct {
     payload: ?*const fn (p: *anyopaque) ?*anyopaque = null,
     set_absent: ?*const fn (p: *anyopaque) void = null,
     set_present_from: ?*const fn (p: *anyopaque, template: *const anyopaque) void = null,
+    /// optional only: the payload type's default value (see `defaultOf`).
+    payload_default: ?*const anyopaque = null,
 
     pub fn field(self: *const Type, name: []const u8) ?*const Field {
         for (self.fields) |*f| if (std.mem.eql(u8, f.name, name)) return f;
@@ -145,7 +150,7 @@ pub const Type = struct {
     /// True for fields a user may edit through the schema.
     pub fn isEditable(self: *const Type) bool {
         return switch (self.kind) {
-            .callback, .unsupported, .string => false,
+            .callback, .unsupported => false,
             .optional => self.child.?.isEditable(),
             else => true,
         };
@@ -209,6 +214,7 @@ fn OptionalAccess(comptime T: type) type {
             if (x.*) |*inner| return @ptrCast(inner);
             return null;
         }
+        const default: C = defaultOf(C);
         fn setAbsent(p: *anyopaque) void {
             const x: *T = @ptrCast(@alignCast(p));
             x.* = null;
@@ -249,6 +255,7 @@ fn build(comptime T: type) Type {
                 .payload = O.payload,
                 .set_absent = O.setAbsent,
                 .set_present_from = O.setPresentFrom,
+                .payload_default = &O.default,
             };
         },
         .array => |a| return .{
@@ -260,7 +267,7 @@ fn build(comptime T: type) Type {
         },
         .pointer => |p| {
             if (@typeInfo(p.child) == .@"fn") return .{ .kind = .callback, .name = name };
-            if (p.size == .slice and p.child == u8) return .{ .kind = .string, .name = name, .get = A.get };
+            if (p.size == .slice and p.child == u8) return .{ .kind = .string, .name = name, .get = A.get, .set = A.set };
             return .{ .kind = .unsupported, .name = name };
         },
         .@"union" => {
@@ -372,7 +379,16 @@ fn assign(comptime T: type, ptr: *T, v: Value, env: *const Env) Error!void {
             try assign(o.child, &tmp, v, env);
             ptr.* = tmp;
         },
-        .pointer => return error.ReadOnly,
+        .pointer => |p| {
+            if (p.size == .slice and p.child == u8) {
+                const f = env.replace_string orelse return error.ReadOnly;
+                return switch (v) {
+                    .text => |bytes| f(env.ctx, @ptrCast(ptr), bytes),
+                    else => error.TypeMismatch,
+                };
+            }
+            return error.ReadOnly;
+        },
         .@"struct" => {
             if (comptime isText(T)) {
                 const f = env.replace_text orelse return error.ReadOnly;
@@ -384,6 +400,40 @@ fn assign(comptime T: type, ptr: *T, v: Value, env: *const Env) Error!void {
             ptr.* = try fromValue(T, v);
         },
         else => ptr.* = try fromValue(T, v),
+    }
+}
+
+/// A value of `T` built from field defaults; fields without one get the zero
+/// value of their type (first tag for enums, `null` for optionals, empty for
+/// strings). Used to make absent optionals present.
+pub fn defaultOf(comptime T: type) T {
+    switch (@typeInfo(T)) {
+        .bool => return false,
+        .int => return 0,
+        .float => return 0,
+        .@"enum" => |e| return @enumFromInt(e.field_values[0]),
+        .optional => return null,
+        .array => |a| return @splat(defaultOf(a.child)),
+        .pointer => |p| {
+            if (p.size == .slice and p.child == u8) return "";
+            if (@typeInfo(p.child) == .@"fn") return undefined;
+            return undefined;
+        },
+        .@"union" => |u| {
+            if (T == Length) return .auto;
+            return @unionInit(T, u.field_names[0], defaultOf(u.field_types[0]));
+        },
+        .@"struct" => |s| {
+            var out: T = undefined;
+            inline for (s.field_names, s.field_types, s.field_attrs) |n, FT, attrs| {
+                // Plain pointers have no meaningful default; leave them unset.
+                if (comptime @typeInfo(FT) == .pointer and @typeInfo(FT).pointer.size != .slice) continue;
+                @field(out, n) = attrs.defaultValue(FT) orelse defaultOf(FT);
+            }
+            return out;
+        },
+        .void => return {},
+        else => return undefined,
     }
 }
 
@@ -466,6 +516,13 @@ pub fn topField(root: *const Type, path: []const u8) Error!*const Field {
     const first = segs.next() orelse return error.BadPath;
     const parsed = try parseIndex(first);
     return root.field(parsed.name) orelse error.UnknownField;
+}
+
+/// Make the optional at `path` present with its payload type's default value.
+pub fn setPresentDefault(root: *const Type, base: *anyopaque, path: []const u8) Error!void {
+    const r = try resolve(root, base, path);
+    if (r.ty.kind != .optional) return error.TypeMismatch;
+    r.ty.set_present_from.?(r.ptr, r.ty.payload_default.?);
 }
 
 /// Whether the optional at `path` has a value.
@@ -672,6 +729,43 @@ test "arrays index with [n], and nested leaves chain" {
     try testing.expectError(error.NotALeaf, get(root, base, "palette.accents"));
     try testing.expectError(error.NotALeaf, get(root, base, "palette"));
     try testing.expectEqual(@as(u8, 1), (try get(root, base, "palette.accents[2]")).color.r);
+}
+
+fn replaceStringTest(_: ?*anyopaque, slot: *[]const u8, bytes: []const u8) error{OutOfMemory}!void {
+    slot.* = bytes;
+}
+
+test "plain strings write only through the replace_string hook" {
+    var p: Probe = .{};
+    const root, const base = rootOf(&p);
+    try testing.expectError(error.ReadOnly, set(root, base, "note", .{ .text = "x" }, &test_env));
+    const e: Env = .{ .replace_string = replaceStringTest };
+    try set(root, base, "note", .{ .text = "changed" }, &e);
+    try testing.expectEqualStrings("changed", p.note);
+    try testing.expectError(error.TypeMismatch, set(root, base, "note", .{ .int = 1 }, &e));
+}
+
+test "defaultOf honors field defaults and zeroes the rest" {
+    const d = defaultOf(Palette);
+    try testing.expectEqual(Color.black, d.accents[1]);
+    const q = defaultOf(Probe);
+    try testing.expectEqual(@as(u8, 3), q.count);
+    try testing.expectEqual(Mode.auto, q.mode);
+    try testing.expect(q.limit == null);
+    const e = defaultOf(struct { m: Tag, l: Length, s: []const u8 });
+    try testing.expectEqual(Tag.a, e.m);
+    try testing.expect(e.l == .auto);
+    try testing.expectEqualStrings("", e.s);
+}
+
+test "setPresentDefault makes optionals present with the payload default" {
+    var p: Probe = .{};
+    const root, const base = rootOf(&p);
+    try setPresentDefault(root, base, "palette");
+    try testing.expect(p.palette != null);
+    try testing.expectEqual(Color.black, p.palette.?.accents[2]);
+    try setPresentDefault(root, base, "limit");
+    try testing.expectEqual(@as(?u32, 0), p.limit);
 }
 
 test "path errors" {

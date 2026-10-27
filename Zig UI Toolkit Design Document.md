@@ -140,6 +140,8 @@ Two tiers overall: a portable draw context for most needs, and the backend escap
 - Returned slices are allocated through an allocator the caller passes in, so the caller owns them after the dialog closes.
 - Re-entrancy rules matter because the caller is on the stack while UI callbacks run in the nested loop.
 
+Implemented in `src/forms/form.zig` as the non-blocking form (`Form(T)`); enums are cycle buttons rather than dropdowns until a popup widget exists, and `prompt` waits for the platform loop.
+
 ### Wizards
 
 - A wizard is data: an ordered list of pages (forms or arbitrary subtrees) with a shared result type, optional per-page validation, and next and back conditions.
