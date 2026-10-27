@@ -164,6 +164,16 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   generated (named fields, or a `ui` `.group`; `generatedPages(T)` makes one per
   group) or custom (a build callback). `can_next` conditions and page-scoped
   validation gate Next; edits persist across pages.
+- UI documents (`uidoc/`): `zon.zig` reads and writes a dynamic ZON `Value` tree
+  (line/column errors); `doc.zig` is the document model (nodes with type, id,
+  sparse `style` and `props` records, `on` event-to-action bindings, children),
+  the same model the builder edits; `load.zig` instantiates it, applying style
+  and props through the runtime schema and binding events to an app-supplied
+  `Actions` table. Anything the document gets wrong is a `Problem` with a path
+  (`props.variant: unknown value 'huge' ...`), and the rest still builds.
+  Widgets whose text is content (text fields, code editors) take `.text` in
+  `.props` through the registry's `set_text`. `@embedFile` text loads the same way
+  at startup; comptime validation and declarative wizards are not built.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.
@@ -284,7 +294,7 @@ authority for rationale, and a few items are recommendations, not requirements.
 5. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
    focus scopes (modal traps), tab indices, IME preedit.
 6. Memory-mapped document open and an off-thread newline-index scan.
-7. A ZON loader and the builder.
+7. The builder (document editing with undo, outline, inspector, palette).
 8. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
 9. The C facade (`src/capi/`), once the core Zig library is done.
 

@@ -173,6 +173,8 @@ Implemented in `src/core/schema.zig` (`typeOf(T)`, path get/set, optional presen
 - Bindings in ZON are string paths or action names resolved against a registry at load time, with comptime validation for release builds. For example `on = .{ .click = "open_docs" }` works on any widget type.
 - The builder is written in the toolkit itself: canvas preview, outline tree, inspector, and palette, all editing a document model through undo/redo commands.
 
+Implemented so far: the ZON reader/writer, the document model, and the loader (`src/uidoc/`), with named actions and ids. Not yet: comptime validation for embedded documents, and declarative wizards in ZON.
+
 ## 14. Binding Model Decision
 
 - **Actions and callbacks** for events (builder friendly, nearly free).

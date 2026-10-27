@@ -13,6 +13,7 @@ const std = @import("std");
 const schema = @import("../core/schema.zig");
 const ui_mod = @import("../core/ui.zig");
 const Ui = ui_mod.Ui;
+const event = @import("../core/event.zig");
 const Handle = @import("../core/handle.zig").Handle;
 const DirtyFlags = @import("../core/dirty.zig").DirtyFlags;
 const Style = @import("../core/style.zig").Style;
@@ -36,7 +37,33 @@ pub const Info = struct {
     create: *const fn (ui: *Ui, parent: Handle) anyerror!Handle,
     propsPtr: *const fn (w: *anyopaque) *anyopaque,
     outPtr: *const fn (w: *anyopaque) *anyopaque,
+    /// Event names this widget can report (`on_click` is "click").
+    events: []const []const u8,
+    /// Attach `cb` to the named event; false if the widget has no such event.
+    setEvent: *const fn (w: *anyopaque, name: []const u8, cb: event.Callback) bool,
+    /// For widgets whose text is content rather than a prop (text fields, code
+    /// editors): set it. Null for widgets with a `text` prop.
+    set_text: ?*const fn (w: *anyopaque, text: []const u8) anyerror!void,
 };
+
+/// Props fields named `on_*` that hold an optional callback.
+fn eventFieldNames(comptime Props: type) []const []const u8 {
+    const names = comptime blk: {
+        const info = @typeInfo(Props).@"struct";
+        var out: [info.field_names.len][]const u8 = undefined;
+        var n: usize = 0;
+        for (info.field_names, info.field_types) |fname, FT| {
+            if (std.mem.startsWith(u8, fname, "on_") and FT == ?event.Callback) {
+                out[n] = fname;
+                n += 1;
+            }
+        }
+        var exact: [n][]const u8 = undefined;
+        for (out[0..n], 0..) |x, i| exact[i] = x;
+        break :blk exact;
+    };
+    return &names;
+}
 
 fn describe(comptime name: []const u8, comptime W: type) Info {
     const G = struct {
@@ -52,6 +79,30 @@ fn describe(comptime name: []const u8, comptime W: type) Info {
             const x: *W = @ptrCast(@alignCast(w));
             return @ptrCast(&x.out);
         }
+        fn setText(w: *anyopaque, text: []const u8) anyerror!void {
+            const x: *W = @ptrCast(@alignCast(w));
+            if (comptime @hasDecl(W, "loadText")) {
+                const copy = try x.ui.gpa.dupe(u8, text);
+                errdefer x.ui.gpa.free(copy);
+                try x.loadText(copy, true);
+            } else try x.setText(text);
+        }
+        const event_fields = eventFieldNames(W.Props);
+        const event_names = blk: {
+            var out: [event_fields.len][]const u8 = undefined;
+            for (event_fields, 0..) |f, i| out[i] = f[3..];
+            break :blk out;
+        };
+        fn setEvent(w: *anyopaque, ev_name: []const u8, cb: event.Callback) bool {
+            const x: *W = @ptrCast(@alignCast(w));
+            inline for (event_fields) |f| {
+                if (std.mem.eql(u8, ev_name, f[3..])) {
+                    @field(x.props, f) = cb;
+                    return true;
+                }
+            }
+            return false;
+        }
     };
     return .{
         .name = name,
@@ -61,6 +112,9 @@ fn describe(comptime name: []const u8, comptime W: type) Info {
         .create = G.create,
         .propsPtr = G.propsPtr,
         .outPtr = G.outPtr,
+        .events = &G.event_names,
+        .setEvent = G.setEvent,
+        .set_text = if (!@hasField(W.Props, "text") and (@hasDecl(W, "loadText") or @hasDecl(W, "setText"))) G.setText else null,
     };
 }
 
@@ -232,6 +286,42 @@ test "enums set by index and read back by name" {
     };
     try setProp(&ui, b.node, "variant", .{ .choice = idx });
     try testing.expectEqual(@TypeOf(b.props.variant).primary, b.props.variant);
+}
+
+test "events are the on_* callbacks of Props, by short name" {
+    const b = find("button").?;
+    try testing.expectEqual(@as(usize, 1), b.events.len);
+    try testing.expectEqualStrings("click", b.events[0]);
+    const tf = find("text_field").?;
+    try testing.expectEqual(@as(usize, 2), tf.events.len);
+    try testing.expectEqual(@as(usize, 0), find("label").?.events.len);
+
+    var ui = try Ui.init(testing.allocator);
+    defer ui.deinit();
+    const btn = try ui.add(Button, ui.tree.root, .{});
+    const cb = event.Callback.fromFn(struct {
+        fn noop(_: *event.Event) void {}
+    }.noop);
+    try testing.expect(b.setEvent(btn, "click", cb));
+    try testing.expect(btn.props.on_click != null);
+    try testing.expect(!b.setEvent(btn, "bogus", cb));
+}
+
+test "content widgets expose set_text; widgets with a text prop do not" {
+    try testing.expect(find("button").?.set_text == null);
+    try testing.expect(find("label").?.set_text == null);
+    try testing.expect(find("text_field").?.set_text != null);
+    try testing.expect(find("code_editor").?.set_text != null);
+    var ui = try Ui.init(testing.allocator);
+    defer ui.deinit();
+    const f = try ui.add(TextField, ui.tree.root, .{});
+    try find("text_field").?.set_text.?(f, "hello");
+    try testing.expectEqualStrings("hello", f.text());
+    const e = try ui.add(CodeEditor, ui.tree.root, .{});
+    try find("code_editor").?.set_text.?(e, "fn main() {}");
+    const got = try e.textAlloc(testing.allocator);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("fn main() {}", got);
 }
 
 test "outputs read through the registry; they have no setter" {
