@@ -93,6 +93,18 @@ pub const Atlas = struct {
         return n;
     }
 
+    /// The next page whose contents changed since it was last taken (clearing its
+    /// flag), for a GPU backend to upload. Call until null.
+    pub fn takeDirtyPage(self: *Atlas) ?u8 {
+        for (&self.pages, 0..) |*p, i| if (p.*) |*page| {
+            if (page.dirty) {
+                page.dirty = false;
+                return @intCast(i);
+            }
+        };
+        return null;
+    }
+
     pub fn pagePixels(self: *const Atlas, page: u8) []const u8 {
         return self.pages[page].?.pixels;
     }
@@ -308,4 +320,14 @@ test "a full atlas evicts the least recently used page, never one used this fram
     atlas.beginFrame();
     try std.testing.expect(atlas.getOrAdd(key, b, size) != null);
     try std.testing.expectEqual(@as(u32, 1), atlas.evictions);
+}
+
+test "takeDirtyPage reports each changed page once" {
+    var a = Atlas.init(std.testing.allocator);
+    defer a.deinit();
+    try std.testing.expect(a.takeDirtyPage() == null);
+    try a.ensurePage(0);
+    a.pages[0].?.dirty = true;
+    try std.testing.expectEqual(@as(?u8, 0), a.takeDirtyPage());
+    try std.testing.expect(a.takeDirtyPage() == null);
 }

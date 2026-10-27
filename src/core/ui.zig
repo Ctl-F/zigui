@@ -29,6 +29,7 @@ const keys = @import("keys.zig");
 const paint = @import("paint.zig");
 const DrawList = @import("draw_list.zig").DrawList;
 const shadow = @import("shadow.zig");
+const render_backend = @import("../render/backend.zig");
 const event_types = @import("event.zig");
 const commands_mod = @import("commands.zig");
 const shortcuts_mod = @import("shortcuts.zig");
@@ -489,6 +490,37 @@ pub const Ui = struct {
         self.text.atlas.beginFrame();
         try self.layout.run(&self.tree, size);
         try paint.build(&self.tree, list);
+    }
+
+    pub const RenderOptions = struct {
+        /// Target size in device pixels.
+        pixel_w: u32,
+        pixel_h: u32,
+        /// Device pixels per logical pixel.
+        scale: f32 = 1,
+        clear: ?geometry.Color = null,
+    };
+
+    /// Lay out for the target size, rebuild `list`, and draw it through `be`
+    /// (begin, atlas upload if the backend wants it, submit, present). Call it
+    /// when `isDirty()` or the platform asks for a redraw.
+    pub fn renderFrame(self: *Ui, be: render_backend.Backend, list: *DrawList, o: RenderOptions) !void {
+        const scale = if (o.scale > 0) o.scale else 1;
+        const logical: geometry.Size = .{
+            .w = @as(f32, @floatFromInt(o.pixel_w)) / scale,
+            .h = @as(f32, @floatFromInt(o.pixel_h)) / scale,
+        };
+        try self.layoutAndPaint(logical, list);
+        const provider = self.glyphProvider();
+        if (be.caps().atlas_upload) {
+            render_backend.prepareGlyphs(list, scale, provider);
+            while (self.text.atlas.takeDirtyPage()) |page| {
+                try be.uploadAtlasPage(page, self.text.atlas.pagePixels(page), @import("../text/atlas.zig").page_size);
+            }
+        }
+        try be.beginFrame(.{ .pixel_w = o.pixel_w, .pixel_h = o.pixel_h, .scale = scale });
+        try be.submit(.{ .list = list, .clear = o.clear, .glyphs = provider });
+        try be.endFrame();
     }
 
     // ---- frame ------------------------------------------------------------
@@ -2455,4 +2487,122 @@ test "plain nodes still draw their Visual, then their children" {
     try t.frame();
     try std.testing.expectEqual(geometry.Color.rgb(1, 2, 3), firstFill(&t.list).?);
     try std.testing.expectEqual(geometry.Color.rgb(4, 5, 6), firstStroke(&t.list).?);
+}
+
+/// A backend that records what the engine asks of it, shaped like a GPU backend
+/// (it wants atlas uploads before it draws).
+const FakeGpu = struct {
+    log: [32]u8 = undefined,
+    n: usize = 0,
+    pages_uploaded: u32 = 0,
+    glyph_cmds: u32 = 0,
+    last: render_backend.FrameInfo = .{ .pixel_w = 0, .pixel_h = 0 },
+
+    fn note(self: *FakeGpu, c: u8) void {
+        if (self.n < self.log.len) {
+            self.log[self.n] = c;
+            self.n += 1;
+        }
+    }
+
+    fn me(ctx: *anyopaque) *FakeGpu {
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn begin(ctx: *anyopaque, info: render_backend.FrameInfo) render_backend.Error!void {
+        me(ctx).note('B');
+        me(ctx).last = info;
+    }
+
+    fn submit(ctx: *anyopaque, s: render_backend.Submit) render_backend.Error!void {
+        const self = me(ctx);
+        self.note('S');
+        for (s.list.items()) |c| if (c == .glyph_run) {
+            self.glyph_cmds += 1;
+        };
+    }
+
+    fn end(ctx: *anyopaque) render_backend.Error!void {
+        me(ctx).note('E');
+    }
+
+    fn create(_: *anyopaque, _: render_backend.TextureDesc) render_backend.Error!render_backend.TextureId {
+        return error.Unsupported;
+    }
+
+    fn update(_: *anyopaque, _: render_backend.TextureId, _: render_backend.URect, _: []const u8, _: usize) render_backend.Error!void {
+        return error.Unsupported;
+    }
+
+    fn destroy(_: *anyopaque, _: render_backend.TextureId) void {}
+
+    fn upload(ctx: *anyopaque, _: u8, pixels: []const u8, size: u32) render_backend.Error!void {
+        const self = me(ctx);
+        self.note('U');
+        self.pages_uploaded += 1;
+        std.debug.assert(pixels.len == @as(usize, size) * size);
+    }
+
+    fn readback(_: *anyopaque, _: std.mem.Allocator) render_backend.Error!render_backend.Image {
+        return error.Unsupported;
+    }
+
+    const vtable: render_backend.VTable = .{
+        .caps = .{ .name = "fake-gpu", .atlas_upload = true },
+        .begin_frame = begin,
+        .submit = submit,
+        .end_frame = end,
+        .create_texture = create,
+        .update_texture = update,
+        .destroy_texture = destroy,
+        .upload_atlas_page = upload,
+        .readback = readback,
+    };
+
+    fn backend(self: *FakeGpu) render_backend.Backend {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+};
+
+test "renderFrame uploads changed atlas pages before submit, for backends that want them" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    _ = try ui.add(Label, ui.tree.root, .{ .text = "Hello" });
+    var gpu: FakeGpu = .{};
+    ui.update();
+    try ui.renderFrame(gpu.backend(), &t.h.list, .{ .pixel_w = 200, .pixel_h = 100, .scale = 2 });
+    try std.testing.expectEqualStrings("UBSE", gpu.log[0..gpu.n]); // upload, begin, submit, end
+    try std.testing.expectEqual(@as(u32, 1), gpu.pages_uploaded);
+    try std.testing.expect(gpu.glyph_cmds >= 1);
+    try std.testing.expectEqual(@as(u32, 200), gpu.last.pixel_w);
+    try std.testing.expectEqual(@as(f32, 2), gpu.last.scale);
+
+    // Nothing changed: the next frame uploads nothing.
+    gpu.n = 0;
+    try ui.renderFrame(gpu.backend(), &t.h.list, .{ .pixel_w = 200, .pixel_h = 100, .scale = 2 });
+    try std.testing.expectEqualStrings("BSE", gpu.log[0..gpu.n]);
+}
+
+test "renderFrame through the software backend draws the label's pixels" {
+    const sw = @import("../render/software_backend.zig");
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.tree.get(ui.tree.root).?.visual = .{ .background = geometry.Color.rgb(10, 20, 30) };
+    _ = try ui.add(Label, ui.tree.root, .{ .text = "Hello", .color = geometry.Color.white });
+    var sb = try sw.SoftwareBackend.init(std.testing.allocator, null);
+    defer sb.deinit();
+    ui.update();
+    try ui.renderFrame(sb.backend(), &t.h.list, .{ .pixel_w = 120, .pixel_h = 60, .clear = geometry.Color.black });
+    try std.testing.expectEqual(@as(u32, 0), sb.atlas_uploads); // reads the atlas directly
+    const img = try sb.backend().readback(std.testing.allocator);
+    defer img.deinit(std.testing.allocator);
+    var lit = false;
+    var px: usize = 0;
+    while (px < img.rgba.len) : (px += 4) {
+        if (img.rgba[px] > 200 and img.rgba[px + 1] > 200) lit = true;
+    }
+    try std.testing.expect(lit); // some text pixel is near white
+    try std.testing.expectEqual(@as(u8, 10), img.rgba[(50 * 120 + 100) * 4]); // background, outside the text
 }

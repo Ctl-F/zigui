@@ -286,6 +286,7 @@ SDL3 provides windows and input, SDL3 GPU is the default renderer, and a softwar
 - **Text interface:** other SDL libraries (TTF, image) are acceptable, but text stays behind our own interface so the glyph cache and monospace fast path are under our control. FreeType or SDL's TTF layer can sit underneath it.
 - **Build:** Zig imports the SDL C headers directly, and SDL can be linked statically through the build system.
 - **Shaders:** the build only needs to receive named shader binaries per backend, so the source language is an implementation detail. Start with HLSL converted per platform by SDL\_shadercross. Zig-compiled SPIR-V shaders are a later, minor-priority exploration that would remove the need for an external shader compiler; the state of Zig's SPIR-V backend for graphics shaders in 0.17 must be verified before relying on it.
+- **Backend contract (implemented):** `src/render/backend.zig` defines it: begin frame, submit (draw list, optional clear and damage rect, glyph provider), end frame, texture create/update/destroy through opaque handles, atlas page upload, and readback, plus capability flags. The software rasterizer is the first backend; backends that keep glyphs in their own memory set `atlas_upload` and get changed atlas pages before each submit.
 - **Shader needs are small:** textured quads, rounded-rectangle coverage, gradients, and glyph blits.
 
 ## 23. Focus, Input and Accessibility

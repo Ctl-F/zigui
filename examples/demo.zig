@@ -402,6 +402,20 @@ const Script = struct {
     }
 };
 
+/// Shows software frames in the SDL window.
+const WindowPresenter = struct {
+    window: *sdl.Window,
+
+    fn present(ctx: ?*anyopaque, rgba: []const u8, w: u32, h: u32) zigui.render_backend.Error!void {
+        const self: *WindowPresenter = @ptrCast(@alignCast(ctx.?));
+        self.window.present(rgba, w, h) catch return error.PresentFailed;
+    }
+
+    fn presenter(self: *WindowPresenter) zigui.software_backend.Presenter {
+        return .{ .ctx = self, .present = present };
+    }
+};
+
 fn clipGet(_: ?*anyopaque, gpa: std.mem.Allocator) ?[]u8 {
     return sdl.clipboardGet(gpa);
 }
@@ -478,8 +492,10 @@ pub fn main(init: std.process.Init) !void {
     var list = zigui.DrawList.init(commands, glyphs);
     var prewarmed_scale: f32 = 0;
 
-    var fb = try zigui.software.Framebuffer.init(gpa, 1, 1);
-    defer fb.deinit(gpa);
+    var presenter: WindowPresenter = .{ .window = &window };
+    var renderer = try zigui.software_backend.SoftwareBackend.init(gpa, presenter.presenter());
+    defer renderer.deinit();
+    const backend = renderer.backend();
 
     var force = true; // first frame, resize, or expose: redraw even if the tree is clean
 
@@ -521,11 +537,6 @@ pub fn main(init: std.process.Init) !void {
         if (force or ui.isDirty()) {
             const px = window.pixelSize();
             const scale = window.scale();
-            try fb.resize(gpa, px.w, px.h);
-            const logical: zigui.geometry.Size = .{
-                .w = @as(f32, @floatFromInt(px.w)) / scale,
-                .h = @as(f32, @floatFromInt(px.h)) / scale,
-            };
             if (scale != prewarmed_scale) {
                 // Rasterize common glyphs up front so first draw does not stall.
                 prewarmed_scale = scale;
@@ -534,9 +545,7 @@ pub fn main(init: std.process.Init) !void {
                     ui.text.prewarmAscii(@intCast(f), 13 * scale);
                 }
             }
-            try ui.layoutAndPaint(logical, &list);
-            zigui.software.render(&fb, &list, .{ .scale = scale, .clear = background, .glyphs = ui.glyphProvider() });
-            try window.present(fb.bytes(), fb.width, fb.height);
+            try ui.renderFrame(backend, &list, .{ .pixel_w = px.w, .pixel_h = px.h, .scale = scale, .clear = background });
             force = false;
             frames_drawn += 1;
         }
@@ -551,11 +560,13 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             }
             const path = screenshot.?;
-            const png = try zigui.png.encodeRgba(gpa, fb.bytes(), fb.width, fb.height);
+            const img = try backend.readback(gpa);
+            defer img.deinit(gpa);
+            const png = try zigui.png.encodeRgba(gpa, img.rgba, img.width, img.height);
             defer gpa.free(png);
             try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = png });
             std.log.info("wrote {s}: {d}x{d}, {d} frames drawn, {d} clicks, {d} cards", .{
-                path, fb.width, fb.height, frames_drawn, state.clicks, state.card_count,
+                path, img.width, img.height, frames_drawn, state.clicks, state.card_count,
             });
             return;
         }

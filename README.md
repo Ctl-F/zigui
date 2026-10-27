@@ -16,7 +16,7 @@ atlas, fields), commands and scoped shortcuts, a piece-table editor core with
 undo/redo and multi-cursor, a code editor widget with incremental syntax
 highlighting, a software renderer, an SDL3 platform shim, a runtime widget
 schema and registry, generated forms and wizards, ZON UI documents, and a visual
-builder. About 415 tests.
+builder. About 420 tests.
 
 Not built yet (largest first): a renderer backend interface and GPU path, canvas
 and frame scheduling, damage tracking, list/tree widgets and a model interface,
@@ -187,6 +187,17 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   structural edits, undo, and redo do. Limits: no scroll container yet, so the
   inspector shows Props, Style, or Events one at a time; no drag-and-drop or
   clicking in the preview to select; enums are cycle buttons.
+- Renderer backend (`render/backend.zig`): a `Backend` vtable (begin frame,
+  submit a draw list with optional clear and damage rect, end frame/present,
+  create/update/destroy texture, upload atlas page, readback) with caps. Textures
+  are opaque generational handles the backend owns. The software renderer is the
+  first implementation (`render/software_backend.zig`, with an optional
+  `Presenter` that shows frames, e.g. in the SDL window). `Ui.renderFrame` lays
+  out and draws through any backend; for backends with `caps.atlas_upload` it
+  first makes sure every glyph is in the atlas (`prepareGlyphs`) and uploads
+  changed pages, so a GPU backend never sees a missing glyph. No draw command
+  samples textures yet, and no GPU backend exists; `software.render` remains as
+  the rasterizer underneath.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.
@@ -298,17 +309,15 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
 Ordered by the spec-drift notes (`NOTES/spec-drift-notes.md`); the notes are the
 authority for rationale, and a few items are recommendations, not requirements.
 
-1. A renderer backend interface with the software renderer as its first
-   implementation (the atlas pages already track a dirty flag for GPU upload).
-2. Canvas node with `redraw_policy` and raw-key mode in key routing.
-3. Frame stats ring buffer and overlay, a handler time-budget warning, and a test
+1. Canvas node with `redraw_policy` and raw-key mode in key routing.
+2. Frame stats ring buffer and overlay, a handler time-budget warning, and a test
    that steady-state frames allocate nothing.
-4. Damage rects and per-repaint-boundary draw-record caching.
-5. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
+3. Damage rects and per-repaint-boundary draw-record caching.
+4. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
    focus scopes (modal traps), tab indices, IME preedit.
-6. Memory-mapped document open and an off-thread newline-index scan.
-7. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
-8. The C facade (`src/capi/`), once the core Zig library is done.
+5. Memory-mapped document open and an off-thread newline-index scan.
+6. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
+7. The C facade (`src/capi/`), once the core Zig library is done.
 
 Smaller gaps: theme metrics (padding, min sizes) and a painter measure override; layout follow-ups (width-constrained text measure, stack/absolute,
 split and scroll containers, wrap, grid, calc `Length`); draw commands for
