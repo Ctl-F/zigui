@@ -1,5 +1,11 @@
 //! Ui: ties the tree, layout, input, widgets, and theme together.
 //!
+//! !!! DO NOT MOVE a `Ui` once you have added widgets. !!!
+//! Widgets keep a pointer back to their `Ui`. Keep it on the stack or on the
+//! heap (`gpa.create(Ui)`), but never return it from a function, copy it, or
+//! store it in something that can reallocate after the first `add`. Debug
+//! builds (the same gate as the shadow checker) panic if it moves.
+//!
 //! Frame protocol (what an app's loop does):
 //!
 //!   1. Feed input:      ui.pointerMove / pointerButton / wheel
@@ -48,6 +54,9 @@ pub const Label = label.Label;
 pub const TextField = text_field.TextField;
 pub const CodeEditor = code_editor.CodeEditor;
 
+/// The UI context: tree, layout, input, theme, and every widget.
+///
+/// DO NOT MOVE a `Ui` after the first widget is added (see the file header).
 pub const Ui = struct {
     gpa: std.mem.Allocator,
     text: TextSystem,
@@ -64,7 +73,13 @@ pub const Ui = struct {
     now_ms: u64 = 0,
     commands: commands_mod.Commands,
     shortcuts: shortcuts_mod.Shortcuts,
+    /// Where the `Ui` lived when its first widget was created. Only tracked
+    /// when `ui_checks` is on; it exists to catch a moved `Ui` (see `isPinned`).
+    pinned: if (shadow.enabled) ?*const Ui else void = if (shadow.enabled) null else {},
 
+    /// Create a `Ui`. It is returned by value, so assign it straight to its
+    /// final home (`var ui = try Ui.init(gpa);` or `heap.* = try Ui.init(gpa);`).
+    /// DO NOT MOVE it after adding widgets.
     pub fn init(gpa: std.mem.Allocator) !Ui {
         var tree = try Tree.init(gpa);
         errdefer tree.deinit();
@@ -80,6 +95,19 @@ pub const Ui = struct {
             .commands = commands_mod.Commands.init(gpa),
             .shortcuts = shortcuts_mod.Shortcuts.init(gpa),
         };
+    }
+
+    /// True unless this `Ui` was moved after its first widget was created.
+    /// Always true when `ui_checks` is off.
+    pub fn isPinned(self: *const Ui) bool {
+        if (comptime shadow.enabled) return self.pinned == null or self.pinned.? == self;
+        return true;
+    }
+
+    fn checkPinned(self: *const Ui) void {
+        if (!self.isPinned()) {
+            @panic("zigui: the Ui was moved after widgets were added; widgets hold a pointer back to it (see Ui docs)");
+        }
     }
 
     pub fn deinit(self: *Ui) void {
@@ -118,6 +146,10 @@ pub const Ui = struct {
     ///     });
     pub fn add(self: *Ui, comptime W: type, parent: Handle, opts: W.Options) !*W {
         comptime widget.check(W);
+        if (comptime shadow.enabled) {
+            if (self.pinned == null) self.pinned = self;
+        }
+        self.checkPinned();
         const pool = self.poolFor(W);
 
         const node_h = try self.tree.create(W.nodeTemplate(opts.style));
@@ -430,6 +462,7 @@ pub const Ui = struct {
 
     /// Lay out for a window of `size` (logical pixels) and rebuild `list`.
     pub fn layoutAndPaint(self: *Ui, size: geometry.Size, list: *DrawList) !void {
+        self.checkPinned();
         self.text.atlas.beginFrame();
         try self.layout.run(&self.tree, size);
         try paint.build(&self.tree, list);
@@ -467,6 +500,7 @@ pub const Ui = struct {
     /// writes against the shadow copies (debug builds), and bring every
     /// widget's look and text up to date.
     pub fn update(self: *Ui) void {
+        self.checkPinned();
         self.sweep(&self.buttons);
         self.sweep(&self.labels);
         self.sweep(&self.fields);
@@ -483,6 +517,7 @@ pub const Ui = struct {
 
     /// End of frame: clear frame-scoped flags and dirty bits.
     pub fn endFrame(self: *Ui) void {
+        self.checkPinned();
         self.forEachWidget("endFrame");
         self.tree.clearDirty(self.tree.root);
     }
@@ -2098,4 +2133,21 @@ test "add cleans up when allocation fails at any point" {
         _ = ui.add(CodeEditor, root, .{ .text = "one\ntwo", .language = &syntax_mod.zig }) catch {};
         ui.update();
     }
+}
+
+test "the pin check stays quiet through normal use and notices a copy" {
+    if (!shadow.enabled) return error.SkipZigTest;
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    try std.testing.expect(ui.isPinned()); // before any widget: nothing to protect
+    _ = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30) });
+    try std.testing.expect(ui.pinned == ui);
+    try t.frame(); // update, layoutAndPaint, endFrame all check
+    try std.testing.expect(ui.isPinned());
+
+    // A bitwise copy lives at a different address: the check sees that. (Read
+    // only; the copy must never be used or deinitialized.)
+    const moved = ui.*;
+    try std.testing.expect(!moved.isPinned());
 }

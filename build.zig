@@ -36,6 +36,23 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // Boundary check: no C calling conventions or extern types in the Zig core.
+    const boundary = b.addExecutable(.{
+        .name = "check_boundary",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_boundary.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run_boundary = b.addRunArtifact(boundary);
+    run_boundary.setCwd(b.path("."));
+    const boundary_step = b.step("check-boundary", "Fail if C-convention code appears in the Zig core");
+    boundary_step.dependOn(&run_boundary.step);
+    test_step.dependOn(&run_boundary.step);
+    const boundary_tests = b.addTest(.{ .root_module = boundary.root_module });
+    test_step.dependOn(&b.addRunArtifact(boundary_tests).step);
+
     // SDL3 platform shim. Kept out of the core module so core and its tests
     // never need SDL. Requires the SDL3 development files on the system.
     const sdl_c = b.addTranslateC(.{
