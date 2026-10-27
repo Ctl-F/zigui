@@ -1,4 +1,4 @@
-//! Basic geometry and color types. All extern: they cross the C ABI boundary.
+//! Basic geometry and color types. Kept `extern` (like `Handle`) so a C facade can pass them by value.
 //! Coordinates are floats in logical pixels; the renderer applies scale.
 
 const std = @import("std");

@@ -2,7 +2,7 @@
 //! stale handle (one whose slot was freed and reused) is detected instead of
 //! silently aliasing a different object.
 //!
-//! This is part of the C ABI boundary: it is an extern struct of two u32s.
+//! An extern struct of two u32s, so a C facade can pass it by value.
 
 const std = @import("std");
 

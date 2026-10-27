@@ -684,13 +684,24 @@ test "variant setter marks paint and swaps colors" {
 
 const event_mod = @import("event.zig");
 
+/// The rect and color of a solid-filled rectangle command, if `c` is one.
+fn solidFill(c: draw_list.Command) ?struct { rect: geometry.Rect, color: geometry.Color } {
+    switch (c) {
+        .fill_rect => |f| switch (f.paint) {
+            .color => |col| return .{ .rect = f.rect, .color = col },
+            else => return null,
+        },
+        else => return null,
+    }
+}
+
 test "buttons paint into the draw list" {
     const t = try Harness.init();
     defer t.deinit();
     _ = try t.ui.createButton(t.ui.tree.root, box(80, 30));
     try t.frame();
     try std.testing.expect(t.list.items().len >= 1);
-    try std.testing.expectEqual(Color.rgb(0x4a, 0x4d, 0x52), t.list.items()[0].paint.color);
+    try std.testing.expectEqual(Color.rgb(0x4a, 0x4d, 0x52), t.list.items()[0].fill_rounded_rect.paint.color);
 }
 
 test "setHidden relays out the parent" {
@@ -783,14 +794,14 @@ test "an auto-sized button wraps its label plus padding, and paints centered tex
 
     var found = false;
     for (t.h.list.items()) |cmd| {
-        if (cmd.kind != .glyph_run) continue;
+        if (cmd != .glyph_run) continue;
         found = true;
-        try std.testing.expectEqual(@as(u32, 2), cmd.b);
-        const g = t.h.list.glyphItems()[cmd.a];
+        try std.testing.expectEqual(@as(u32, 2), cmd.glyph_run.count);
+        const g = t.h.list.glyphItems()[cmd.glyph_run.offset];
         try std.testing.expectApproxEqAbs(@as(f32, 10), g.x, 0.01); // content-box left
         // Baseline: padding 5 + half the 2px line gap + ascent 16.
         try std.testing.expectApproxEqAbs(@as(f32, 22), g.y, 0.01);
-        try std.testing.expectEqual(ui.theme.button_colors[0].text, cmd.paint.color);
+        try std.testing.expectEqual(ui.theme.button_colors[0].text, cmd.glyph_run.color);
     }
     try std.testing.expect(found);
 }
@@ -1204,18 +1215,22 @@ test "selection is drawn as a highlight and the caret as a thin rect" {
 
     var carets: usize = 0;
     for (t.h.list.items()) |c| {
-        if (c.kind == .fill_rect and c.rect.w == 1 and std.meta.eql(c.paint.color, ui.theme.field.caret)) carets += 1;
+        if (solidFill(c)) |f| {
+            if (f.rect.w == 1 and std.meta.eql(f.color, ui.theme.field.caret)) carets += 1;
+        }
     }
     try std.testing.expectEqual(@as(usize, 1), carets);
 
     try press(t, .a, .{ .ctrl = true });
-    var highlight: ?draw_list.Command = null;
+    var highlight: ?geometry.Rect = null;
     for (t.h.list.items()) |c| {
-        if (c.kind == .fill_rect and std.meta.eql(c.paint.color, ui.theme.field.selection)) highlight = c;
+        if (solidFill(c)) |f| {
+            if (std.meta.eql(f.color, ui.theme.field.selection)) highlight = f.rect;
+        }
     }
     try std.testing.expect(highlight != null);
-    try std.testing.expectApproxEqAbs(@as(f32, 44), highlight.?.rect.w, 0.01); // four letters
-    try std.testing.expectApproxEqAbs(@as(f32, 6), highlight.?.rect.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 44), highlight.?.w, 0.01); // four letters
+    try std.testing.expectApproxEqAbs(@as(f32, 6), highlight.?.x, 0.01);
     _ = tf;
 }
 
@@ -1726,7 +1741,7 @@ test "only the lines in view are painted, with balanced clips" {
     try t.h.frame();
 
     var runs: usize = 0;
-    for (t.h.list.items()) |c| runs += @intFromBool(c.kind == .glyph_run);
+    for (t.h.list.items()) |c| runs += @intFromBool(c == .glyph_run);
     // ~7 rows visible, each with a text run and a gutter number.
     try std.testing.expect(runs > 0 and runs <= 2 * 8);
     try std.testing.expect(t.h.list.isBalanced());
@@ -1745,7 +1760,9 @@ test "selections, the current line, and carets are drawn; the caret blinks" {
         fn of(list: *const DrawList, color: geometry.Color) usize {
             var n: usize = 0;
             for (list.items()) |c| {
-                if (c.kind == .fill_rect and std.meta.eql(c.paint.color, color)) n += 1;
+                if (solidFill(c)) |f| {
+                    if (std.meta.eql(f.color, color)) n += 1;
+                }
             }
             return n;
         }
@@ -1891,11 +1908,11 @@ fn rowRuns(list: *const DrawList, row: usize, out: *[32]RowRun) usize {
     var n: usize = 0;
     const y = @as(f32, @floatFromInt(row)) * line_px;
     for (list.items()) |c| {
-        if (c.kind != .glyph_run or @abs(c.rect.y - y) > 0.5) continue;
-        const first = list.glyphItems()[c.a];
+        if (c != .glyph_run or @abs(c.glyph_run.bounds.y - y) > 0.5) continue;
+        const first = list.glyphItems()[c.glyph_run.offset];
         if (first.x < gutter_px) continue; // the gutter's line number
         if (n < out.len) {
-            out[n] = .{ .color = c.paint.color, .glyphs = c.b, .first_x = first.x };
+            out[n] = .{ .color = c.glyph_run.color, .glyphs = c.glyph_run.count, .first_x = first.x };
             n += 1;
         }
     }

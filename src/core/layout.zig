@@ -51,11 +51,11 @@ fn pick(horizontal: bool, a: anytype, b: @TypeOf(a)) @TypeOf(a) {
 }
 
 fn minOf(len: Length, ctx: length.ResolveCtx) f32 {
-    return if (len.unit == .auto) 0 else length.resolve(len, ctx).value;
+    return if (len == .auto) 0 else length.resolve(len, ctx).value;
 }
 
 fn maxOf(len: Length, ctx: length.ResolveCtx) f32 {
-    return if (len.unit == .auto) std.math.inf(f32) else length.resolve(len, ctx).value;
+    return if (len == .auto) std.math.inf(f32) else length.resolve(len, ctx).value;
 }
 
 pub const Layout = struct {
@@ -178,8 +178,8 @@ pub const Layout = struct {
         const ch = @max(node.rect.h - pad.t - pad.b, 0);
         const main_avail = pick(row, cw, ch);
         const cross_avail = pick(row, ch, cw);
-        const main_definite = pick(row, st.width, st.height).unit != .fit_content;
-        const cross_definite = pick(row, st.height, st.width).unit != .fit_content;
+        const main_definite = pick(row, st.width, st.height) != .fit;
+        const cross_definite = pick(row, st.height, st.width) != .fit;
         const gap = length.resolve(st.gap, .{ .parent = if (main_definite) main_avail else null, .content = 0 }).value;
 
         // Scratch is free again once the rects are written, so the recursion
@@ -221,7 +221,7 @@ pub const Layout = struct {
                 .basis = basis.value + mm,
                 .min = minOf(pick(row, cs.min_width, cs.min_height), ctx) + mm,
                 .max = maxOf(pick(row, cs.max_width, cs.max_height), ctx) + mm,
-                .grow = if (len.unit == .fill) @max(cs.grow, 1) else cs.grow,
+                .grow = if (len == .fill) @max(cs.grow, 1) else cs.grow,
                 .shrink = cs.shrink,
             };
             i += 1;
@@ -258,7 +258,7 @@ pub const Layout = struct {
             const lo = minOf(pick(row, cs.min_height, cs.min_width), cctx);
             const hi = maxOf(pick(row, cs.max_height, cs.max_width), cctx);
             var cross_size: f32 = undefined;
-            if (clen.unit == .fill or (clen.unit == .auto and al == .stretch)) {
+            if (clen == .fill or (clen == .auto and al == .stretch)) {
                 cross_size = length.clampSize(@max(cross_avail - cross_margin, 0), lo, hi);
             } else {
                 const r = length.resolve(clen, cctx);
@@ -430,7 +430,7 @@ test "column fill takes the remaining height" {
     var t = try Harness.init(.{ .direction = .column });
     defer t.deinit();
     const a = try t.add(t.tree.root, .{ .style = .{ .height = Length.px(50) } });
-    const b = try t.add(t.tree.root, .{ .style = .{ .height = Length.fill } });
+    const b = try t.add(t.tree.root, .{ .style = .{ .height = .fill } });
     try t.run(100, 300);
     try expectRect(t.rect(a), 0, 0, 100, 50);
     try expectRect(t.rect(b), 0, 50, 100, 250);
@@ -478,7 +478,7 @@ test "container padding adds to its natural size" {
 test "percent inside a fit-content parent falls back to auto and is counted" {
     var t = try Harness.init(.{ .align_items = .start });
     defer t.deinit();
-    const box = try t.add(t.tree.root, .{ .style = .{ .width = Length.fit } });
+    const box = try t.add(t.tree.root, .{ .style = .{ .width = .fit } });
     const a = try t.add(box, .{ .style = .{ .width = Length.pct(50) }, .intrinsic = .{ .w = 10, .h = 10 } });
     try t.run(400, 400);
     try expectRect(t.rect(box), 0, 0, 10, 10);
@@ -514,7 +514,7 @@ test "nested layout works for column inside row" {
     defer t.deinit();
     const side = try t.add(t.tree.root, .{ .style = .{ .width = Length.px(100), .direction = .column, .height = Length.pct(100) } });
     const s1 = try t.add(side, .{ .style = .{ .height = Length.px(30) } });
-    const s2 = try t.add(side, .{ .style = .{ .height = Length.fill } });
+    const s2 = try t.add(side, .{ .style = .{ .height = .fill } });
     const main = try t.add(t.tree.root, .{ .style = .{ .grow = 1, .height = Length.pct(100) } });
     try t.run(400, 200);
     try expectRect(t.rect(side), 0, 0, 100, 200);

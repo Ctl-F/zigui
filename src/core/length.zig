@@ -6,39 +6,33 @@
 
 const std = @import("std");
 
-pub const Unit = enum(u32) {
+/// A size on one axis (also used for padding, margin, gap, min, and max).
+///
+/// Construct with the decl literals `.px(100)` and `.pct(20)`, or the tags
+/// `.auto`, `.fill`, `.fit` (write `.{ .pixels = 100 }` if you prefer).
+pub const Length = union(enum) {
     /// Logical pixels.
-    px = 0,
+    pixels: f32,
     /// Percent (0-100) of the parent's content box on this axis.
-    percent = 1,
+    percent: f32,
     /// Size to content, then flex rules apply.
-    auto = 2,
+    auto,
     /// Take remaining space (basis 0, grow 1).
-    fill = 3,
+    fill,
     /// Shrink-wrap children, clamped by constraints.
-    fit_content = 4,
-};
-
-/// C-compatible tagged length: a tag plus one float.
-pub const Length = extern struct {
-    unit: Unit = .auto,
-    value: f32 = 0,
+    fit,
 
     pub fn px(v: f32) Length {
-        return .{ .unit = .px, .value = v };
+        return .{ .pixels = v };
     }
 
     /// `v` is in percent: pct(10) means 10 percent.
     pub fn pct(v: f32) Length {
-        return .{ .unit = .percent, .value = v };
+        return .{ .percent = v };
     }
 
-    pub const auto: Length = .{ .unit = .auto, .value = 0 };
-    pub const fill: Length = .{ .unit = .fill, .value = 0 };
-    pub const fit: Length = .{ .unit = .fit_content, .value = 0 };
-
     pub fn isFixed(self: Length) bool {
-        return self.unit == .px or self.unit == .percent;
+        return self == .pixels or self == .percent;
     }
 };
 
@@ -47,7 +41,7 @@ pub const ResolveCtx = struct {
     /// Parent's content-box size on this axis, or null if the parent is itself
     /// sized by its contents (a percent against it is circular).
     parent: ?f32,
-    /// The node's own content size on this axis (for auto / fit_content).
+    /// The node's own content size on this axis (for auto / fit).
     content: f32,
     /// Space left over for `fill`.
     remaining: f32 = 0,
@@ -61,13 +55,13 @@ pub const Resolved = struct {
 };
 
 pub fn resolve(len: Length, ctx: ResolveCtx) Resolved {
-    return switch (len.unit) {
-        .px => .{ .value = len.value },
-        .percent => if (ctx.parent) |p|
-            .{ .value = p * len.value / 100.0 }
+    return switch (len) {
+        .pixels => |v| .{ .value = v },
+        .percent => |v| if (ctx.parent) |p|
+            .{ .value = p * v / 100.0 }
         else
             .{ .value = ctx.content, .circular_percent = true },
-        .auto, .fit_content => .{ .value = ctx.content },
+        .auto, .fit => .{ .value = ctx.content },
         .fill => .{ .value = @max(ctx.remaining, 0) },
     };
 }
@@ -81,8 +75,8 @@ pub fn clampSize(preferred: f32, min: f32, max: f32) f32 {
 /// `max` to unbounded when given as `auto`.
 pub fn resolveClamped(preferred: Length, min: Length, max: Length, ctx: ResolveCtx) Resolved {
     var out = resolve(preferred, ctx);
-    const lo = if (min.unit == .auto) 0.0 else resolve(min, ctx).value;
-    const hi = if (max.unit == .auto) std.math.inf(f32) else resolve(max, ctx).value;
+    const lo = if (min == .auto) 0.0 else resolve(min, ctx).value;
+    const hi = if (max == .auto) std.math.inf(f32) else resolve(max, ctx).value;
     out.value = clampSize(out.value, lo, hi);
     return out;
 }
@@ -91,7 +85,7 @@ test "px and percent resolve" {
     const ctx: ResolveCtx = .{ .parent = 800, .content = 50 };
     try std.testing.expectEqual(@as(f32, 120), resolve(Length.px(120), ctx).value);
     try std.testing.expectEqual(@as(f32, 160), resolve(Length.pct(20), ctx).value);
-    try std.testing.expectEqual(@as(f32, 50), resolve(Length.auto, ctx).value);
+    try std.testing.expectEqual(@as(f32, 50), resolve(.auto, ctx).value);
 }
 
 test "percent against content-sized parent falls back to auto and flags it" {
@@ -125,15 +119,23 @@ test "min wins when min is greater than max" {
 }
 
 test "auto min and max are unbounded" {
-    const r = resolveClamped(Length.px(77), Length.auto, Length.auto, .{ .parent = 100, .content = 0 });
+    const r = resolveClamped(Length.px(77), .auto, .auto, .{ .parent = 100, .content = 0 });
     try std.testing.expectEqual(@as(f32, 77), r.value);
 }
 
 test "fill uses remaining space and never goes negative" {
-    try std.testing.expectEqual(@as(f32, 30), resolve(Length.fill, .{ .parent = 100, .content = 0, .remaining = 30 }).value);
-    try std.testing.expectEqual(@as(f32, 0), resolve(Length.fill, .{ .parent = 100, .content = 0, .remaining = -5 }).value);
+    try std.testing.expectEqual(@as(f32, 30), resolve(.fill, .{ .parent = 100, .content = 0, .remaining = 30 }).value);
+    try std.testing.expectEqual(@as(f32, 0), resolve(.fill, .{ .parent = 100, .content = 0, .remaining = -5 }).value);
 }
 
-test "length is a small fixed-size extern struct" {
-    try std.testing.expectEqual(@as(usize, 8), @sizeOf(Length));
+test "length stays small" {
+    try std.testing.expect(@sizeOf(Length) <= 8);
+}
+
+test "decl literals build lengths" {
+    const l: Length = .px(12);
+    try std.testing.expectEqual(@as(f32, 12), l.pixels);
+    const p: Length = .pct(30);
+    try std.testing.expectEqual(@as(f32, 30), p.percent);
+    try std.testing.expect(Length.isFixed(l) and !Length.isFixed(.fill));
 }

@@ -1,8 +1,9 @@
 //! zigui: a lightweight, retained-mode, cross-platform UI toolkit for Zig.
 //!
-//! Boundary rule: anything the app sees or touches is `extern` (handles,
-//! geometry, lengths, draw records). Anything only the engine touches (the
-//! node tree, pool internals) is plain Zig.
+//! The API is plain Zig: slices, optionals, tagged unions, error unions, and
+//! methods. Only a few small value types (`Handle`, `Rect`, `Vec2`, `Size`,
+//! `Color`) are `extern` so a future C facade can pass them directly; C
+//! interop itself will be a separate layer over this API.
 
 pub const handle = @import("core/handle.zig");
 pub const pool = @import("core/pool.zig");

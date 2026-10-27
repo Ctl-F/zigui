@@ -1,7 +1,7 @@
 //! The draw list: a flat, append-only buffer of fixed-size command records.
 //!
 //! - Every record is the same size, so the list is cheap to build, cache per
-//!   repaint boundary, replay into a damage rect, and hand across the C ABI.
+//!   repaint boundary, replay into a damage rect, and hand to a renderer backend.
 //! - Variable-size data (glyphs) lives in a side array that commands refer to
 //!   by offset and count.
 //! - Capacity is fixed at startup. Appending never allocates, which keeps the
@@ -20,84 +20,86 @@ const Rect = geometry.Rect;
 const Vec2 = geometry.Vec2;
 const Color = geometry.Color;
 
-pub const CommandKind = enum(u32) {
-    fill_rect = 0,
-    stroke_rect,
-    fill_rounded_rect,
-    line,
-    push_clip,
-    pop_clip,
-    push_opacity,
-    pop_opacity,
-    glyph_run,
-    _,
+/// Colors and the line (or center and radius vector) of a gradient.
+pub const Gradient = struct {
+    from: Vec2,
+    to: Vec2,
+    color: Color,
+    color2: Color,
 };
 
-pub const PaintKind = enum(u32) {
-    solid = 0,
-    linear_gradient,
-    radial_gradient,
-    image_pattern,
-    _,
-};
-
-/// What a shape is filled with. For gradients, `color`/`color2` are the end
-/// colors and `p0`/`p1` the gradient line (or center and radius vector).
-/// For image patterns, `aux` is an opaque texture handle from the backend.
-pub const Paint = extern struct {
-    kind: PaintKind = .solid,
-    color: Color = Color.black,
-    color2: Color = Color.transparent,
-    p0: Vec2 = .{},
-    p1: Vec2 = .{},
-    aux: u32 = 0,
+/// What a shape is filled with. For a linear gradient, `from`/`to` is the
+/// gradient line; for a radial one, `from` is the center and `to` a point at
+/// the radius. An image pattern holds an opaque texture handle from the backend.
+pub const Paint = union(enum) {
+    color: Color,
+    linear_gradient: Gradient,
+    radial_gradient: Gradient,
+    image_pattern: u32,
 
     pub fn solid(c: Color) Paint {
-        return .{ .kind = .solid, .color = c };
+        return .{ .color = c };
     }
 
     pub fn linear(from: Vec2, to: Vec2, c0: Color, c1: Color) Paint {
-        return .{ .kind = .linear_gradient, .color = c0, .color2 = c1, .p0 = from, .p1 = to };
+        return .{ .linear_gradient = .{ .from = from, .to = to, .color = c0, .color2 = c1 } };
+    }
+
+    pub fn radial(center: Vec2, edge: Vec2, c0: Color, c1: Color) Paint {
+        return .{ .radial_gradient = .{ .from = center, .to = edge, .color = c0, .color2 = c1 } };
     }
 };
 
-/// One positioned glyph in the side array.
-pub const Glyph = extern struct {
+/// One positioned glyph in the side array. `x`/`y` are the baseline pen
+/// position in logical pixels (relative to a run origin until it is drawn).
+pub const Glyph = struct {
     id: u32,
     x: f32,
     y: f32,
 };
 
-/// Fixed-size command record.
-///
-/// Field use by kind:
-///   fill_rect:         rect, paint
-///   stroke_rect:       rect, paint, params[0] = stroke width (drawn inside the rect),
-///                      params[1] = uniform corner radius
-///   fill_rounded_rect: rect, paint, params = corner radii (tl, tr, br, bl)
-///   line:              rect.x/y = start, rect.w/h = end point, params[0] = width
-///   push_clip:         rect
-///   push_opacity:      params[0] = opacity 0..1
-///   glyph_run:         a = glyph offset, b = glyph count, rect = bounds,
-///                      paint = text color, params[0] = font id,
-///                      params[1] = font size (logical px),
-///                      params[2] = 1 for subpixel glyph positioning, else
-///                      positions snap to whole device pixels.
-///                      Glyph x/y are baseline pen positions in logical pixels.
-pub const Command = extern struct {
-    kind: CommandKind,
-    a: u32 = 0,
-    b: u32 = 0,
-    rect: Rect = .{},
-    paint: Paint = .{},
-    params: [4]f32 = .{ 0, 0, 0, 0 },
+pub const Fill = struct { rect: Rect, paint: Paint };
+
+/// A border drawn inside `rect`.
+pub const Stroke = struct { rect: Rect, paint: Paint, width: f32, radius: f32 = 0 };
+
+/// `radii` is top-left, top-right, bottom-right, bottom-left.
+pub const RoundedFill = struct { rect: Rect, paint: Paint, radii: [4]f32 };
+
+pub const Line = struct { from: Vec2, to: Vec2, paint: Paint, width: f32 };
+
+/// A run of pre-shaped glyphs, referenced by offset and count into the side
+/// array. Glyph positions are baseline pen positions in logical pixels.
+pub const GlyphRun = struct {
+    offset: u32,
+    count: u32,
+    bounds: Rect,
+    color: Color,
+    font: u32,
+    /// Font size in logical pixels.
+    size: f32,
+    /// Subpixel glyph positioning (proportional text); otherwise positions
+    /// snap to whole device pixels.
+    subpixel: bool,
+};
+
+/// One draw command. Records stay fixed-size, so the list is cheap to build,
+/// cache, and replay.
+pub const Command = union(enum) {
+    fill_rect: Fill,
+    stroke_rect: Stroke,
+    fill_rounded_rect: RoundedFill,
+    line: Line,
+    push_clip: Rect,
+    pop_clip,
+    push_opacity: f32,
+    pop_opacity,
+    glyph_run: GlyphRun,
 };
 
 comptime {
-    // The record size is part of the ABI. Change deliberately.
-    std.debug.assert(@sizeOf(Command) == 76);
-    std.debug.assert(@sizeOf(Glyph) == 12);
-    std.debug.assert(@sizeOf(Paint) == 32);
+    // Records are copied around constantly: keep them small. Raise deliberately.
+    std.debug.assert(@sizeOf(Command) <= 96);
 }
 
 pub const Error = error{
@@ -144,7 +146,7 @@ pub const DrawList = struct {
     pub const pop_reserve = 16;
 
     pub fn push(self: *DrawList, cmd: Command) Error!void {
-        const is_pop = cmd.kind == .pop_clip or cmd.kind == .pop_opacity;
+        const is_pop = cmd == .pop_clip or cmd == .pop_opacity;
         const reserve: usize = if (is_pop or self.commands.len <= 64) 0 else pop_reserve;
         if (self.len + reserve >= self.commands.len) return error.DrawListFull;
         self.commands[self.len] = cmd;
@@ -152,7 +154,7 @@ pub const DrawList = struct {
     }
 
     pub fn fillRect(self: *DrawList, rect: Rect, paint: Paint) Error!void {
-        try self.push(.{ .kind = .fill_rect, .rect = rect, .paint = paint });
+        try self.push(.{ .fill_rect = .{ .rect = rect, .paint = paint } });
     }
 
     pub fn strokeRect(self: *DrawList, rect: Rect, width: f32, paint: Paint) Error!void {
@@ -160,44 +162,39 @@ pub const DrawList = struct {
     }
 
     pub fn strokeRoundedRect(self: *DrawList, rect: Rect, width: f32, radius: f32, paint: Paint) Error!void {
-        try self.push(.{ .kind = .stroke_rect, .rect = rect, .paint = paint, .params = .{ width, radius, 0, 0 } });
+        try self.push(.{ .stroke_rect = .{ .rect = rect, .paint = paint, .width = width, .radius = radius } });
     }
 
     /// `radii` is top-left, top-right, bottom-right, bottom-left.
     pub fn fillRoundedRect(self: *DrawList, rect: Rect, radii: [4]f32, paint: Paint) Error!void {
-        try self.push(.{ .kind = .fill_rounded_rect, .rect = rect, .paint = paint, .params = radii });
+        try self.push(.{ .fill_rounded_rect = .{ .rect = rect, .paint = paint, .radii = radii } });
     }
 
     pub fn line(self: *DrawList, from: Vec2, to: Vec2, width: f32, paint: Paint) Error!void {
-        try self.push(.{
-            .kind = .line,
-            .rect = .{ .x = from.x, .y = from.y, .w = to.x, .h = to.y },
-            .paint = paint,
-            .params = .{ width, 0, 0, 0 },
-        });
+        try self.push(.{ .line = .{ .from = from, .to = to, .paint = paint, .width = width } });
     }
 
     pub fn pushClip(self: *DrawList, rect: Rect) Error!void {
-        try self.push(.{ .kind = .push_clip, .rect = rect });
+        try self.push(.{ .push_clip = rect });
         self.clip_depth += 1;
     }
 
     /// Returns false (and records nothing) if there is no clip to pop.
     pub fn popClip(self: *DrawList) Error!bool {
         if (self.clip_depth == 0) return false;
-        try self.push(.{ .kind = .pop_clip });
+        try self.push(.pop_clip);
         self.clip_depth -= 1;
         return true;
     }
 
     pub fn pushOpacity(self: *DrawList, opacity: f32) Error!void {
-        try self.push(.{ .kind = .push_opacity, .params = .{ opacity, 0, 0, 0 } });
+        try self.push(.{ .push_opacity = opacity });
         self.opacity_depth += 1;
     }
 
     pub fn popOpacity(self: *DrawList) Error!bool {
         if (self.opacity_depth == 0) return false;
-        try self.push(.{ .kind = .pop_opacity });
+        try self.push(.pop_opacity);
         self.opacity_depth -= 1;
         return true;
     }
@@ -249,14 +246,15 @@ pub const DrawList = struct {
         }
         self.glyph_len += run.len;
 
-        try self.push(.{
-            .kind = .glyph_run,
-            .a = @intCast(offset),
-            .b = @intCast(run.len),
-            .rect = bounds,
-            .paint = Paint.solid(color),
-            .params = .{ @floatFromInt(font_id), font_size, if (subpixel) 1 else 0, 0 },
-        });
+        try self.push(.{ .glyph_run = .{
+            .offset = @intCast(offset),
+            .count = @intCast(run.len),
+            .bounds = bounds,
+            .color = color,
+            .font = font_id,
+            .size = font_size,
+            .subpixel = subpixel,
+        } });
     }
 };
 
@@ -297,10 +295,10 @@ test "records are appended in order" {
 
     const cmds = dl.items();
     try std.testing.expectEqual(@as(usize, 3), cmds.len);
-    try std.testing.expectEqual(CommandKind.fill_rect, cmds[0].kind);
-    try std.testing.expectEqual(CommandKind.stroke_rect, cmds[1].kind);
-    try std.testing.expectEqual(@as(f32, 2), cmds[1].params[0]);
-    try std.testing.expectEqual(@as(f32, 4), cmds[2].params[0]);
+    try std.testing.expect(cmds[0] == .fill_rect);
+    try std.testing.expect(cmds[1] == .stroke_rect);
+    try std.testing.expectEqual(@as(f32, 2), cmds[1].stroke_rect.width);
+    try std.testing.expectEqual(@as(f32, 4), cmds[2].fill_rounded_rect.radii[0]);
 }
 
 test "full list returns an error instead of allocating" {
@@ -309,9 +307,9 @@ test "full list returns an error instead of allocating" {
     var dl = storage.list();
 
     const r: Rect = .{ .w = 1, .h = 1 };
-    try dl.fillRect(r, .{});
-    try dl.fillRect(r, .{});
-    try std.testing.expectError(error.DrawListFull, dl.fillRect(r, .{}));
+    try dl.fillRect(r, Paint.solid(Color.black));
+    try dl.fillRect(r, Paint.solid(Color.black));
+    try std.testing.expectError(error.DrawListFull, dl.fillRect(r, Paint.solid(Color.black)));
     try std.testing.expectEqual(@as(usize, 2), dl.items().len);
 }
 
@@ -357,10 +355,10 @@ test "glyph runs copy into the side array and reference it by offset" {
     try dl.glyphRun(.{ .y = 20, .w = 8, .h = 16 }, &run2, Color.black, 0, 14);
 
     const cmds = dl.items();
-    try std.testing.expectEqual(@as(u32, 0), cmds[0].a);
-    try std.testing.expectEqual(@as(u32, 2), cmds[0].b);
-    try std.testing.expectEqual(@as(u32, 2), cmds[1].a);
-    try std.testing.expectEqual(@as(u32, 1), cmds[1].b);
+    try std.testing.expectEqual(@as(u32, 0), cmds[0].glyph_run.offset);
+    try std.testing.expectEqual(@as(u32, 2), cmds[0].glyph_run.count);
+    try std.testing.expectEqual(@as(u32, 2), cmds[1].glyph_run.offset);
+    try std.testing.expectEqual(@as(u32, 1), cmds[1].glyph_run.count);
     try std.testing.expectEqual(@as(u32, 3), dl.glyphItems()[2].id);
 }
 

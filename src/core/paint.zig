@@ -112,11 +112,11 @@ test "paints backgrounds in tree order with absolute coordinates" {
     try build(&tree, &list);
     const items = list.items();
     try std.testing.expectEqual(@as(usize, 3), items.len);
-    try std.testing.expectEqual(@as(f32, 300), items[0].rect.w);
-    try std.testing.expectEqual(@as(f32, 100), items[1].rect.w);
-    try std.testing.expectEqual(@as(f32, 10), items[2].rect.x); // panel x + padding
-    try std.testing.expectEqual(@as(f32, 80), items[2].rect.w);
-    try std.testing.expectEqual(@as(f32, 4), items[2].params[0]);
+    try std.testing.expectEqual(@as(f32, 300), items[0].fill_rect.rect.w);
+    try std.testing.expectEqual(@as(f32, 100), items[1].fill_rect.rect.w);
+    try std.testing.expectEqual(@as(f32, 10), items[2].fill_rounded_rect.rect.x); // panel x + padding
+    try std.testing.expectEqual(@as(f32, 80), items[2].fill_rounded_rect.rect.w);
+    try std.testing.expectEqual(@as(f32, 4), items[2].fill_rounded_rect.radii[0]);
 }
 
 test "clip_children brackets the subtree" {

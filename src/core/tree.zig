@@ -1,8 +1,7 @@
 //! The node tree: nodes live in a stable-address pool and link to each other
 //! through generational handles (parent, first/last child, prev/next sibling).
 //!
-//! Internal engine type (plain Zig). Widget state blocks, which the app reads
-//! and writes directly, are separate extern structs that hold a node `Handle`.
+//! Internal engine type. Widgets are separate structs that hold a node `Handle`.
 
 const std = @import("std");
 const Handle = @import("handle.zig").Handle;

@@ -10,7 +10,7 @@ pub const Direction = enum { row, column };
 pub const Align = enum { start, center, end, stretch };
 
 /// Four sides, each a `Length` (px, or percent of the parent's content width).
-pub const Edges = extern struct {
+pub const Edges = struct {
     left: Length = Length.px(0),
     top: Length = Length.px(0),
     right: Length = Length.px(0),
@@ -28,12 +28,12 @@ pub const Edges = extern struct {
 
 /// Width, height, min, and max describe the border box (padding included).
 pub const Style = struct {
-    width: Length = Length.auto,
-    height: Length = Length.auto,
-    min_width: Length = Length.auto,
-    max_width: Length = Length.auto,
-    min_height: Length = Length.auto,
-    max_height: Length = Length.auto,
+    width: Length = .auto,
+    height: Length = .auto,
+    min_width: Length = .auto,
+    max_width: Length = .auto,
+    min_height: Length = .auto,
+    max_height: Length = .auto,
     grow: f32 = 0,
     shrink: f32 = 1,
 
@@ -51,8 +51,8 @@ pub const Style = struct {
 };
 
 /// Stopgap built-in look until painters and themes exist: a filled, optionally
-/// rounded, optionally bordered box. App-visible, so extern.
-pub const Visual = extern struct {
+/// rounded, optionally bordered box.
+pub const Visual = struct {
     background: Color = Color.transparent,
     border_color: Color = Color.black,
     border_width: f32 = 0,

@@ -232,28 +232,28 @@ const Renderer = struct {
     }
 
     fn paintAt(paint: Paint, scale: f32, px: f32, py: f32) Color {
-        switch (paint.kind) {
-            .solid => return paint.color,
-            .linear_gradient => {
-                const ax = paint.p0.x * scale;
-                const ay = paint.p0.y * scale;
-                const dx = paint.p1.x * scale - ax;
-                const dy = paint.p1.y * scale - ay;
+        switch (paint) {
+            .color => |c| return c,
+            .linear_gradient => |g| {
+                const ax = g.from.x * scale;
+                const ay = g.from.y * scale;
+                const dx = g.to.x * scale - ax;
+                const dy = g.to.y * scale - ay;
                 const len2 = dx * dx + dy * dy;
                 const t = if (len2 > 0) std.math.clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1) else 0;
-                return lerpColor(paint.color, paint.color2, t);
+                return lerpColor(g.color, g.color2, t);
             },
-            .radial_gradient => {
-                const ax = paint.p0.x * scale;
-                const ay = paint.p0.y * scale;
-                const rx = paint.p1.x * scale - ax;
-                const ry = paint.p1.y * scale - ay;
+            .radial_gradient => |g| {
+                const ax = g.from.x * scale;
+                const ay = g.from.y * scale;
+                const rx = g.to.x * scale - ax;
+                const ry = g.to.y * scale - ay;
                 const radius = @sqrt(rx * rx + ry * ry);
                 const dist = @sqrt((px - ax) * (px - ax) + (py - ay) * (py - ay));
                 const t = if (radius > 0) std.math.clamp(dist / radius, 0, 1) else 0;
-                return lerpColor(paint.color, paint.color2, t);
+                return lerpColor(g.color, g.color2, t);
             },
-            else => return Color.transparent,
+            .image_pattern => return Color.transparent,
         }
     }
 
@@ -261,7 +261,10 @@ const Renderer = struct {
     fn draw(self: *Renderer, bounds: IRect, shape: Shape, paint: Paint) void {
         const b = bounds.intersect(self.clip);
         if (b.isEmpty()) return;
-        const solid_opaque = paint.kind == .solid and paint.color.a == 255 and self.opacity >= 0.999;
+        const solid: ?Color = switch (paint) {
+            .color => |c| if (c.a == 255 and self.opacity >= 0.999) c else null,
+            else => null,
+        };
         const w: usize = self.fb.width;
 
         var y = b.y0;
@@ -274,8 +277,8 @@ const Renderer = struct {
                 const cov = shape.coverage(px, py);
                 if (cov <= 0) continue;
                 const dst = &row[@intCast(x)];
-                if (solid_opaque and cov >= 0.999) {
-                    dst.* = paint.color;
+                if (solid != null and cov >= 0.999) {
+                    dst.* = solid.?;
                 } else {
                     blend(dst, paintAt(paint, self.scale, px, py), cov * self.opacity);
                 }
@@ -301,17 +304,17 @@ const Renderer = struct {
         }
     }
 
-    fn drawGlyphRun(self: *Renderer, cmd: Command) void {
+    fn drawGlyphRun(self: *Renderer, run: draw_list.GlyphRun) void {
         const provider = self.glyphs orelse return;
-        const end = @as(usize, cmd.a) + cmd.b;
+        const end = @as(usize, run.offset) + run.count;
         if (end > self.glyph_items.len) return;
-        const font_id: u32 = @intFromFloat(@max(cmd.params[0], 0));
-        const size_px = cmd.params[1] * self.scale;
-        const subpixel = cmd.params[2] != 0;
-        const color = cmd.paint.color;
+        const font_id = run.font;
+        const size_px = run.size * self.scale;
+        const subpixel = run.subpixel;
+        const color = run.color;
         const w: usize = self.fb.width;
 
-        for (self.glyph_items[cmd.a..end]) |g| {
+        for (self.glyph_items[run.offset..end]) |g| {
             const dx = g.x * self.scale;
             var ix: i32 = undefined;
             var sub: u8 = 0;
@@ -346,42 +349,42 @@ const Renderer = struct {
     }
 
     fn execute(self: *Renderer, cmd: Command) void {
-        switch (cmd.kind) {
-            .fill_rect => self.fillRoundBox(cmd.rect, .{ 0, 0, 0, 0 }, cmd.paint),
-            .fill_rounded_rect => self.fillRoundBox(cmd.rect, cmd.params, cmd.paint),
-            .stroke_rect => {
-                const d = self.scaled(cmd.rect);
-                const width = cmd.params[0] * self.scale;
+        switch (cmd) {
+            .fill_rect => |f| self.fillRoundBox(f.rect, .{ 0, 0, 0, 0 }, f.paint),
+            .fill_rounded_rect => |f| self.fillRoundBox(f.rect, f.radii, f.paint),
+            .stroke_rect => |st| {
+                const d = self.scaled(st.rect);
+                const width = st.width * self.scale;
                 if (d.w <= 0 or d.h <= 0 or width <= 0) return;
                 self.draw(IRect.covering(d, 1), .{ .ring = .{
                     .cx = d.x + d.w / 2,
                     .cy = d.y + d.h / 2,
                     .hw = d.w / 2,
                     .hh = d.h / 2,
-                    .radius = cmd.params[1] * self.scale,
+                    .radius = st.radius * self.scale,
                     .width = width,
-                } }, cmd.paint);
+                } }, st.paint);
             },
-            .line => {
-                const hw = @max(cmd.params[0] * self.scale, 0) / 2;
-                const a: Vec2 = .{ .x = cmd.rect.x * self.scale, .y = cmd.rect.y * self.scale };
-                const b: Vec2 = .{ .x = cmd.rect.w * self.scale, .y = cmd.rect.h * self.scale };
+            .line => |ln| {
+                const hw = @max(ln.width * self.scale, 0) / 2;
+                const a: Vec2 = .{ .x = ln.from.x * self.scale, .y = ln.from.y * self.scale };
+                const b: Vec2 = .{ .x = ln.to.x * self.scale, .y = ln.to.y * self.scale };
                 const box: Rect = .{
                     .x = @min(a.x, b.x),
                     .y = @min(a.y, b.y),
                     .w = @abs(b.x - a.x),
                     .h = @abs(b.y - a.y),
                 };
-                self.draw(IRect.covering(box, hw + 1), .{ .segment = .{ .a = a, .b = b, .half_width = hw } }, cmd.paint);
+                self.draw(IRect.covering(box, hw + 1), .{ .segment = .{ .a = a, .b = b, .half_width = hw } }, ln.paint);
             },
-            .push_clip => {
+            .push_clip => |rect| {
                 if (self.clip_n == max_clip_depth) {
                     self.clip_overflow += 1;
                     return;
                 }
                 self.clips[self.clip_n] = self.clip;
                 self.clip_n += 1;
-                self.clip = self.clip.intersect(IRect.covering(self.scaled(cmd.rect), 0));
+                self.clip = self.clip.intersect(IRect.covering(self.scaled(rect), 0));
             },
             .pop_clip => {
                 if (self.clip_overflow > 0) {
@@ -391,14 +394,14 @@ const Renderer = struct {
                     self.clip = self.clips[self.clip_n];
                 }
             },
-            .push_opacity => {
+            .push_opacity => |opacity| {
                 if (self.opacity_n == max_opacity_depth) {
                     self.opacity_overflow += 1;
                     return;
                 }
                 self.opacities[self.opacity_n] = self.opacity;
                 self.opacity_n += 1;
-                self.opacity *= std.math.clamp(cmd.params[0], 0, 1);
+                self.opacity *= std.math.clamp(opacity, 0, 1);
             },
             .pop_opacity => {
                 if (self.opacity_overflow > 0) {
@@ -408,9 +411,7 @@ const Renderer = struct {
                     self.opacity = self.opacities[self.opacity_n];
                 }
             },
-            .glyph_run => self.drawGlyphRun(cmd),
-            // Image paints and unknown kinds are skipped.
-            _ => {},
+            .glyph_run => |run| self.drawGlyphRun(run),
         }
     }
 };

@@ -1,5 +1,4 @@
-//! Event records and listeners. Everything here is `extern`: it crosses the
-//! app boundary (handlers receive an `*Event`, and may be plain C functions).
+//! Event records and listeners (`Callback`).
 //!
 //! Flow follows the DOM model: capture (root toward target), target, then
 //! bubble (target toward root). A handler may call `stopPropagation` (finish
