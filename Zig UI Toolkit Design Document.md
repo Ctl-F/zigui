@@ -7,7 +7,7 @@
 - Lightweight, retained mode, with custom-rendered widgets and efficient refresh.
 - Complete enough for IDEs, paint programs, and editors.
 - Builder-friendly: a UI that builds UIs, with layouts described as data.
-- Zig first, with a C ABI so C and C++ projects can use it too.
+- Zig first, with a C facade (built once the core is done) so C and C++ projects can use it too.
 
 ## 2. Layered Architecture
 
@@ -19,24 +19,17 @@ Each layer depends only on the layers below it.
 4. **widgets**: built-in widget set.
 5. **builder**: the visual UI designer, written in the toolkit itself.
 
-## 3. The ABI Boundary Rule
+## 3. Zig First, C as a Facade
 
-- Anything the app can see or touch is `extern`: state blocks, events, draw commands, handles, the allocator vtable, schema descriptors, and callback signatures. Functions crossing the boundary use `callconv(.c)`.
-- Anything only the engine touches is plain Zig: node pool internals, layout solver, dirty tracking, damage tracker, text shaper, platform and render backends.
-- The engine cannot tell whether data came from a Zig builder or a C++ client.
-- One public module defines the boundary. A comptime check walks public signatures and fails the build if a non-extern type appears.
-- A small C test program in the build includes the generated header and opens a window with a button, so the ABI never silently breaks.
-- Public API hands out generational handles for nodes. Raw pointers are exposed only where stability is guaranteed (widget state blocks).
+*(Supersedes the earlier "ABI boundary rule", under which every app-visible type was `extern`. That rule forced `callconv(.c)` handlers, `?*anyopaque` user-data pairs, `Text{ptr,len}`, and setters hung off the context, all to pay for a C surface the Zig API did not need.)*
 
-### Zig conversion layer
-
-Zig users keep using idiomatic types and call a small lowering function at the edge.
-
-- **Slices**: a generic `Span(T)` extern struct (pointer plus length) with `fromSlice` and `toSlice`.
-- **Allocators**: an extern vtable (alloc, resize, remap, free, plus a context pointer). It must carry alignment, because Zig allocator calls take it. `fromZig(allocator)` and `toZig(vtable)` convert in both directions.
-- **Structs for forms**: a comptime `schemaOf(T)` reflects the struct into a runtime schema (field descriptors, offsets, metadata) plus a pointer to the struct memory.
-- Lowered slices are only valid while the source memory is. Comptime-generated schemas are constants and live for the whole program.
-- Form structs used with the schema path must come from the same compilation. A struct crossing to C must be an `extern struct`.
+- The core API is idiomatic Zig: slices, optionals, tagged unions, error unions, `std.mem.Allocator`, methods, and comptime generics. Callbacks are `event.Callback` (a function plus a typed context, built with `Callback.bind`).
+- Only a few small value types stay `extern` (`Handle`, `Rect`, `Vec2`, `Size`, `Color`) so a facade can pass them by value.
+- C interop is a separate facade layered over the Zig API (`src/capi/`, **deferred until the core is done**): opaque handles, setter and getter functions, status codes, and `(ptr, len)` strings. C never gets raw struct access; direct `props`/`out` access is a Zig-only feature. The core never imports the facade.
+- `callconv(.c)`, `export`, and non-allow-listed `extern` types are banned outside the facade and the C-import modules (`src/platform/`, `src/text/stb*`). `zig build check-boundary` (part of `zig build test`) enforces it.
+- Public API hands out generational handles for nodes. Widgets are addressed by stable pointers (pool slots that never move).
+- A `Ui` keeps widgets pointing back at it, so it **must not move** after the first widget is added. Debug builds assert this.
+- Planned facade shape: heap-allocated `Ui`; handle-addressed widgets with accessor functions generated from the widget interface; an allocator vtable that carries alignment; a `zui_event` mirror; a frame protocol that lets a C host that owns its window drive zigui with no SDL dependency; a headless C smoke test run from the build.
 
 ## 4. Node Tree and Retained Engine
 
@@ -52,33 +45,29 @@ Zig users keep using idiomatic types and call a small lowering function at the e
 - Split, dock, and tab containers come early, since IDEs need them.
 - Text measurement goes through a callback into the text system.
 
-## 6. Widget State Blocks
+## 6. Widgets
 
-Every widget has a state block with a stable address. The app can hold a pointer or handle to it and read or write it at any time, before or after a frame is rendered.
+Every widget is one struct with a stable address (a pool slot that never moves). The app can hold a pointer to it and read or write it at any time, before or after a frame is rendered.
 
 - **props**: written by the app (text, enabled, callbacks, colors).
 - **out**: written by the toolkit (clicked, hovered, pressed, value).
-- Blocks come from a pool or arena that never moves them. Use generational handles where blocks can be destroyed.
-- Polling flags (such as `clicked`) are frame-scoped, plus a counter or timestamp for apps that poll less often than they render. Callbacks and flags come from the same event path so they never disagree.
-- Strings set through setters are copied into toolkit-owned storage, so the app can free or reuse its own memory immediately.
+- Widgets also hold a pointer back to their `Ui`, so they have methods (`button.setText(...)`), and their own per-frame hooks and event handling. The comptime widget interface (`widgets/widget.zig`: `Props`, `Out`, `Options`, `listened_kinds`, `nodeTemplate`, `init`, `deinit`, `apply`, `handleEvent`, `prepare`, `update`, `endFrame`) is what a runtime schema and widget registry will reflect over.
+- Created with `ui.add(Button, parent, .{ options })`. The state is reclaimed once its node is destroyed (use generational node handles where a widget can disappear).
+- Polling flags (such as `clicked`) are frame-scoped, plus a counter for apps that poll less often than they render. Callbacks and flags come from the same event path so they never disagree.
+- Strings set through setters are copied into toolkit-owned storage, so the app can free or reuse its own memory immediately. The `Text` wrapper exists so a string literal assigned straight into `props.text` is not mistaken for owned storage.
 - Callbacks are optional. Polling and callbacks are equal citizens.
 
 Sketch:
 
 ```zig
-pub const Button = extern struct {
-    props: extern struct {
-        text: Text = .{},
-        enabled: bool = true,
-        on_click: ?Callback = null,
-    } = .{},
-    out: extern struct {
-        clicked: bool = false,
-        hovered: bool = false,
-        pressed: bool = false,
-    } = .{},
-    node: NodeHandle,
-};
+const save = try ui.add(Button, root, .{
+    .style = .{ .width = .px(120) },
+    .text = "Save",
+    .on_click = .bind(&app, App.save),
+});
+if (save.out.clicked) { ... }     // polling
+try save.setText("Saved");        // setter: copies, marks dirty
+save.props.enabled = false;       // raw write: allowed; the shadow checker verifies it
 ```
 
 ## 7. Dirty Tracking
@@ -165,7 +154,7 @@ One runtime schema format (field name, type tag, offset, metadata) serves four c
 
 - the form and wizard generator,
 - the builder's inspector,
-- the C ABI (C callers pass schemas directly),
+- the C facade (descriptors are mirrored for C callers),
 - ZON serialization.
 
 Comptime reflection generates it on the Zig side. The engine only ever consumes runtime schemas.
@@ -205,9 +194,12 @@ Design this as its own subsystem, since it is the hardest part.
 3. Text system and virtualized list.
 4. Runtime schema, ZON loader, widget registry, hot reload.
 5. Canvas modes, redraw policies, GPU backend.
-6. Form generation and wizards, C ABI header and C test program.
+6. Form generation and wizards.
 7. Builder app.
 8. Docking and multi-window panels, tabs, tree view, text editor widget, accessibility.
+9. C facade over the finished Zig API (`src/capi/`, header, C smoke test).
+
+Status (see `README.md` for detail): steps 1 and 2 are done; step 3 has the text system, the single-line field, and the editor core with syntax highlighting (the virtualized list and model interface are not built); commands and scoped shortcuts, which this list did not name, are done. Steps 4 to 9 have not started.
 
 ## 18. Risks and Open Questions
 
@@ -222,7 +214,7 @@ Design this as its own subsystem, since it is the hardest part.
 
 The draw list is a flat, append-only buffer of fixed-size C-style tagged records, and widgets get their look from swappable painters.
 
-- **Record format:** each command is an extern struct with a small tag up front. Variable-size data (text runs, path points, gradient stops) lives in side arrays that commands reference by offset and length.
+- **Record format:** each command is a tagged union with one named payload per kind, kept fixed-size. Variable-size data (text runs, path points, gradient stops) lives in side arrays that commands reference by offset and length.
 - **Shapes:** filled rectangle, rounded rectangle with per-corner radii, stroked rectangle, line, circle or ellipse, and general path fill and stroke.
 - **Content:** text run, image or texture quad with a source rect, and nine-slice image.
 - **State:** push and pop clip, transform, and opacity. Rectangular clips are cheap; arbitrary-shape clips come later.
