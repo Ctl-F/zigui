@@ -18,6 +18,8 @@ const Visual = @import("../core/style.zig").Visual;
 const Theme = @import("theme.zig").Theme;
 const Align = @import("../text/block.zig").Align;
 const Ui = @import("../core/ui.zig").Ui;
+const Style = @import("../core/style.zig").Style;
+const Node = @import("../core/tree.zig").Node;
 
 pub const Variant = enum { normal, primary, danger, flat };
 
@@ -67,7 +69,33 @@ pub const Button = struct {
         click_count: u32 = 0,
     };
 
+    /// What `Ui.add(Button, parent, .{ ... })` accepts.
+    pub const Options = struct {
+        style: Style = .{},
+        text: []const u8 = "",
+        variant: Variant = .normal,
+        enabled: bool = true,
+        text_align: Align = .center,
+        on_click: ?event.Callback = null,
+        /// Run this command when clicked (see `setCommand`).
+        command: ?[]const u8 = null,
+    };
+
     pub const listened_kinds = [_]event.EventKind{ .pointer_enter, .pointer_leave, .pointer_down, .pointer_up, .click, .focus_in, .focus_out, .key_down };
+
+    pub fn nodeTemplate(style: Style) Node {
+        return .{ .role = .button, .flags = .{ .focusable = true }, .style = style };
+    }
+
+    pub fn apply(self: *Button, o: Options) !void {
+        self.props.variant = o.variant;
+        self.props.enabled = o.enabled;
+        self.props.text_align = o.text_align;
+        self.props.on_click = o.on_click;
+        if (o.text.len > 0) try self.setText(o.text);
+        if (o.command) |c| try self.setCommand(c);
+        self.checker.sync(&self.props);
+    }
 
     pub fn init(ui: *Ui, node: Handle) Button {
         const props: Props = .{};

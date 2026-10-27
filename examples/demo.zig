@@ -80,9 +80,7 @@ fn addCard(a: *App) !void {
     a.card_count += 1;
     var buf: [32]u8 = undefined;
     const name = std.fmt.bufPrint(&buf, "Card {d}", .{a.card_serial}) catch "Card";
-    const l = try a.ui.createLabel(card, .{}, name);
-    l.props.size = 18;
-    l.props.color = Color.white;
+    _ = try a.ui.add(zigui.Label, card, .{ .text = name, .size = 18, .color = Color.white });
 }
 
 /// Load the file behind sidebar row `index` into the editor.
@@ -178,16 +176,14 @@ fn cmdPrevFile(a: *App, _: *zigui.Event) void {
 
 fn setupCommands(a: *App) !void {
     const ui = a.ui;
-    _ = try ui.registerCommand("cards.add", "+ Card", .bind(a, cmdAddCard));
-    _ = try ui.registerCommand("cards.remove", "- Card", .bind(a, cmdRemoveCard));
-    _ = try ui.registerCommand("cards.clear", "Clear cards", .bind(a, cmdClearCards));
-    _ = try ui.registerCommand("view.sidebar", "Sidebar", .bind(a, cmdToggleSidebar));
-    _ = try ui.registerCommand("filter.focus", "Filter", .bind(a, cmdFocusFilter));
-    _ = try ui.registerCommand("filter.clear", "Clear filter", .bind(a, cmdClearFilter));
-    _ = try ui.registerCommand("file.next", "Next file", .bind(a, cmdNextFile));
-    _ = try ui.registerCommand("file.prev", "Previous file", .bind(a, cmdPrevFile));
-    _ = ui.setCommandRepeat("file.next", true);
-    _ = ui.setCommandRepeat("file.prev", true);
+    _ = try ui.registerCommand("cards.add", .{ .title = "+ Card", .run = .bind(a, cmdAddCard) });
+    _ = try ui.registerCommand("cards.remove", .{ .title = "- Card", .run = .bind(a, cmdRemoveCard) });
+    _ = try ui.registerCommand("cards.clear", .{ .title = "Clear cards", .run = .bind(a, cmdClearCards) });
+    _ = try ui.registerCommand("view.sidebar", .{ .title = "Sidebar", .run = .bind(a, cmdToggleSidebar) });
+    _ = try ui.registerCommand("filter.focus", .{ .title = "Filter", .run = .bind(a, cmdFocusFilter) });
+    _ = try ui.registerCommand("filter.clear", .{ .title = "Clear filter", .run = .bind(a, cmdClearFilter) });
+    _ = try ui.registerCommand("file.next", .{ .title = "Next file", .run = .bind(a, cmdNextFile), .repeat = true });
+    _ = try ui.registerCommand("file.prev", .{ .title = "Previous file", .run = .bind(a, cmdPrevFile), .repeat = true });
 
     // App-wide bindings come from keymap text, like a user's keymap file.
     const report = ui.loadKeymap(
@@ -263,19 +259,23 @@ fn buildUi(a: *App) !void {
     }, .{ .background = rgb(0x2b2d30) });
     const variants = [_]zigui.button.Variant{ .primary, .normal, .normal };
     for (&a.buttons, variants) |*slot, variant| {
-        const b = try ui.createButton(header, .{ .padding = Edges.xy(14, 0), .shrink = 0 });
-        b.setVariant(variant);
-        slot.* = b;
+        slot.* = try ui.add(zigui.Button, header, .{
+            .style = .{ .padding = Edges.xy(14, 0), .shrink = 0 },
+            .variant = variant,
+        });
     }
     _ = try a.addNode(header, .{ .grow = 1 }, .{});
-    const filter = try ui.createTextField(header, .{ .width = Length.px(220), .padding = Edges.xy(8, 0), .shrink = 0 });
-    try filter.setPlaceholder("Filter files...");
-    filter.props.on_change = .bind(a, onFilterChanged);
-    filter.props.on_submit = .bind(a, onFilterSubmit);
-    a.filter = filter;
-    const disabled = try ui.createButton(header, .{ .padding = Edges.xy(14, 0), .shrink = 0 });
-    try disabled.setText("Disabled");
-    disabled.setEnabled(false);
+    a.filter = try ui.add(zigui.TextField, header, .{
+        .style = .{ .width = .px(220), .padding = Edges.xy(8, 0), .shrink = 0 },
+        .placeholder = "Filter files...",
+        .on_change = .bind(a, onFilterChanged),
+        .on_submit = .bind(a, onFilterSubmit),
+    });
+    _ = try ui.add(zigui.Button, header, .{
+        .style = .{ .padding = Edges.xy(14, 0), .shrink = 0 },
+        .text = "Disabled",
+        .enabled = false,
+    });
 
     // Body.
     a.body = try a.addNode(tree.root, .{
@@ -297,36 +297,37 @@ fn buildUi(a: *App) !void {
     const paths = [9][]const u8{ "src/editor/editor.zig", "src/editor/piece_table.zig", "src/editor/document.zig", "src/widgets/code_editor.zig", "src/core/layout.zig", "src/core/ui.zig", "src/core/shortcuts.zig", "examples/demo.zig", "README.md" };
     for (0..a.items.len) |i| {
         const indent: f32 = @floatFromInt((i % 3) * 10);
-        const b = try ui.createButton(a.sidebar, .{
-            .height = Length.px(28),
-            .shrink = 0,
-            .padding = Edges.xy(10, 0),
-            .margin = .{ .left = Length.px(indent) },
-        });
-        try b.setText(names[i]);
         a.names[i] = names[i];
         a.paths[i] = paths[i];
-        b.props.text_align = .start;
-        b.setVariant(if (i == a.selected) .primary else .flat);
-        a.items[i] = b;
         a.item_ctx[i] = .{ .app = a, .index = i };
-        b.props.on_click = .bind(&a.item_ctx[i], onSelectItem);
+        a.items[i] = try ui.add(zigui.Button, a.sidebar, .{
+            .style = .{
+                .height = .px(28),
+                .shrink = 0,
+                .padding = Edges.xy(10, 0),
+                .margin = .{ .left = .px(indent) },
+            },
+            .text = names[i],
+            .text_align = .start,
+            .variant = if (i == a.selected) .primary else .flat,
+            .on_click = .bind(&a.item_ctx[i], onSelectItem),
+        });
     }
 
     const content = try a.addNode(a.body, .{ .direction = .column, .grow = 1, .gap = Length.px(8) }, .{});
     a.cards = try a.addNode(content, .{ .direction = .row, .height = Length.px(120), .gap = Length.px(8), .shrink = 0 }, .{});
     for (0..4) |_| try addCard(a);
-    const ed = try ui.createCodeEditor(content, .{ .grow = 1 });
-    ed.props.size = 13;
-    a.editor = ed;
+    a.editor = try ui.add(zigui.CodeEditor, content, .{ .style = .{ .grow = 1 }, .size = 13 });
     openFile(a, a.selected);
 
     // Status bar.
     const status_bar = try a.addNode(tree.root, .{ .height = Length.px(24), .shrink = 0, .padding = Edges.xy(10, 0) }, .{ .background = rgb(0x3574f0) });
-    const status = try ui.createLabel(status_bar, .{ .grow = 1 }, "Ready");
-    status.props.size = 12;
-    status.props.color = Color.white;
-    a.status = status;
+    a.status = try ui.add(zigui.Label, status_bar, .{
+        .style = .{ .grow = 1 },
+        .text = "Ready",
+        .size = 12,
+        .color = Color.white,
+    });
 }
 
 const Script = struct {

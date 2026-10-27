@@ -401,7 +401,7 @@ const Fixture = struct {
     }
 
     fn cmd(self: *Fixture, name: []const u8) !Handle {
-        return self.cmds.register(name, name, .{ .call = Log.handler });
+        return self.cmds.register(name, .{ .title = name, .run = .{ .call = Log.handler } });
     }
 
     fn node(self: *Fixture, parent: Handle) !Handle {

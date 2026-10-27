@@ -27,6 +27,8 @@ const Stop = @import("../text/system.zig").Stop;
 const LineEditor = @import("../text/line_editor.zig").LineEditor;
 const label = @import("label.zig");
 const Ui = @import("../core/ui.zig").Ui;
+const Style = @import("../core/style.zig").Style;
+const Node = @import("../core/tree.zig").Node;
 
 pub const Text = @import("common.zig").Text;
 pub const Font = label.Font;
@@ -88,10 +90,44 @@ pub const TextField = struct {
         sel_end: u32 = 0,
     };
 
+    pub const Options = struct {
+        style: Style = .{},
+        /// Initial content (not counted as an edit).
+        text: []const u8 = "",
+        placeholder: []const u8 = "",
+        enabled: bool = true,
+        read_only: bool = false,
+        font: Font = .ui,
+        size: f32 = 0,
+        on_change: ?event.Callback = null,
+        on_submit: ?event.Callback = null,
+    };
+
     pub const listened_kinds = [_]event.EventKind{
         .focus_in, .focus_out, .pointer_enter, .pointer_leave,
         .pointer_down, .pointer_move, .pointer_up, .key_down, .text_input,
     };
+
+    pub fn nodeTemplate(style: Style) Node {
+        return .{
+            .role = .text_field,
+            .cursor = .text,
+            .flags = .{ .focusable = true, .clip_children = true, .accepts_text = true },
+            .style = style,
+        };
+    }
+
+    pub fn apply(self: *TextField, o: Options) !void {
+        self.props.enabled = o.enabled;
+        self.props.read_only = o.read_only;
+        self.props.font = o.font;
+        self.props.size = o.size;
+        self.props.on_change = o.on_change;
+        self.props.on_submit = o.on_submit;
+        if (o.text.len > 0) try self.setText(o.text);
+        if (o.placeholder.len > 0) try self.setPlaceholder(o.placeholder);
+        self.checker.sync(&self.props);
+    }
 
     pub fn init(ui: *Ui, node: Handle) TextField {
         const props: Props = .{};

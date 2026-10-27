@@ -7,6 +7,8 @@ const DirtyFlags = @import("../core/dirty.zig").DirtyFlags;
 const Color = @import("../core/geometry.zig").Color;
 const block = @import("../text/block.zig");
 const Ui = @import("../core/ui.zig").Ui;
+const Style = @import("../core/style.zig").Style;
+const Node = @import("../core/tree.zig").Node;
 
 pub const Text = @import("common.zig").Text;
 pub const Align = block.Align;
@@ -50,7 +52,35 @@ pub const Label = struct {
         text_height: f32 = 0,
     };
 
+    pub const Options = struct {
+        style: Style = .{},
+        text: []const u8 = "",
+        font: Font = .ui,
+        size: f32 = 0,
+        color: Color = Color.transparent,
+        text_align: Align = .start,
+    };
+
     pub const listened_kinds = [_]@import("../core/event.zig").EventKind{};
+
+    pub fn nodeTemplate(style: Style) Node {
+        return .{ .role = .label, .style = style };
+    }
+
+    pub fn apply(self: *Label, o: Options) !void {
+        self.props.font = o.font;
+        self.props.size = o.size;
+        self.props.color = o.color;
+        self.props.text_align = o.text_align;
+        if (o.text.len > 0) try self.setText(o.text);
+        self.checker.sync(&self.props);
+    }
+
+    /// Labels have no events.
+    pub fn handleEvent(self: *Label, ev: *@import("../core/event.zig").Event) void {
+        _ = self;
+        _ = ev;
+    }
 
     pub fn init(ui: *Ui, node: Handle) Label {
         const props: Props = .{};

@@ -36,6 +36,7 @@ const button = @import("../widgets/button.zig");
 const label = @import("../widgets/label.zig");
 const text_field = @import("../widgets/text_field.zig");
 const code_editor = @import("../widgets/code_editor.zig");
+const widget = @import("../widgets/widget.zig");
 
 pub const Scope = shortcuts_mod.Scope;
 pub const BindError = shortcuts_mod.BindError;
@@ -97,62 +98,47 @@ pub const Ui = struct {
 
     // ---- creating widgets --------------------------------------------------------
 
-    /// Create a widget of type `W` (any of `Button`, `Label`, `TextField`,
-    /// `CodeEditor`): its node, its state, and its event listeners. The
-    /// returned pointer is stable until the widget's node is destroyed (the
-    /// state is reclaimed in `update`).
-    fn createWidget(self: *Ui, comptime W: type, pool: anytype, parent: Handle, node: tree_mod.Node) !*W {
-        const node_h = try self.tree.create(node);
+    fn poolFor(self: *Ui, comptime W: type) *Pool(W, if (W == CodeEditor) 16 else 64) {
+        if (W == Button) return &self.buttons;
+        if (W == Label) return &self.labels;
+        if (W == TextField) return &self.fields;
+        if (W == CodeEditor) return &self.editors;
+        @compileError("not a widget type: " ++ @typeName(W));
+    }
+
+    /// Create a widget of type `W` (`Button`, `Label`, `TextField`, or
+    /// `CodeEditor`) under `parent`: its node, its state, and its event
+    /// listeners, configured from `opts`. The returned pointer is stable until
+    /// the widget's node is destroyed (the state is reclaimed in `update`).
+    ///
+    ///     const save = try ui.add(Button, root, .{
+    ///         .style = .{ .width = .px(120) },
+    ///         .text = "Save",
+    ///         .on_click = .bind(&app, App.save),
+    ///     });
+    pub fn add(self: *Ui, comptime W: type, parent: Handle, opts: W.Options) !*W {
+        comptime widget.check(W);
+        const pool = self.poolFor(W);
+
+        const node_h = try self.tree.create(W.nodeTemplate(opts.style));
         errdefer _ = self.tree.destroySubtree(node_h);
         try self.tree.appendChild(parent, node_h);
 
-        const h = try pool.create(W.init(self, node_h));
+        // `init` may allocate, so the value needs cleanup if it never reaches the pool.
+        const h = blk: {
+            var value = W.init(self, node_h);
+            errdefer value.deinit();
+            break :blk try pool.create(value);
+        };
         errdefer _ = pool.destroy(h);
         const w = pool.get(h).?;
         errdefer w.deinit();
         for (W.listened_kinds) |kind| {
             try self.tree.addListener(node_h, .{ .kind = kind, .callback = event_types.Callback.bind(w, W.handleEvent) });
         }
+        if (@hasDecl(W, "paintHook")) self.tree.get(node_h).?.paint_hook = .{ .ctx = w, .run = W.paintHook };
+        try w.apply(opts);
         return w;
-    }
-
-    pub fn createButton(self: *Ui, parent: Handle, style: Style) !*Button {
-        return self.createWidget(Button, &self.buttons, parent, .{ .role = .button, .flags = .{ .focusable = true }, .style = style });
-    }
-
-    pub fn createLabel(self: *Ui, parent: Handle, style: Style, text: []const u8) !*Label {
-        const node_h = try self.tree.create(.{ .role = .label, .style = style });
-        errdefer _ = self.tree.destroySubtree(node_h);
-        try self.tree.appendChild(parent, node_h);
-        const h = try self.labels.create(Label.init(self, node_h));
-        errdefer _ = self.labels.destroy(h);
-        const l = self.labels.get(h).?;
-        errdefer l.deinit();
-        try l.setText(text);
-        l.checker.sync(&l.props);
-        return l;
-    }
-
-    /// Create a single-line text field.
-    pub fn createTextField(self: *Ui, parent: Handle, style: Style) !*TextField {
-        return self.createWidget(TextField, &self.fields, parent, .{
-            .role = .text_field,
-            .cursor = .text,
-            .flags = .{ .focusable = true, .clip_children = true, .accepts_text = true },
-            .style = style,
-        });
-    }
-
-    /// Create a multi-line code editor. It fills the style's size.
-    pub fn createCodeEditor(self: *Ui, parent: Handle, style: Style) !*CodeEditor {
-        const ed = try self.createWidget(CodeEditor, &self.editors, parent, .{
-            .role = .text_field,
-            .cursor = .text,
-            .flags = .{ .focusable = true, .clip_children = true, .accepts_text = true },
-            .style = style,
-        });
-        self.tree.get(ed.node).?.paint_hook = .{ .ctx = ed, .run = CodeEditor.paintHook };
-        return ed;
     }
 
     // ---- shared widget helpers (used by widget implementations) ---------------------
@@ -366,8 +352,8 @@ pub const Ui = struct {
     /// Register a named command. `handler` receives a `command` event whose
     /// text is the command name; it may be null for commands that only exist to
     /// be enabled/disabled or listed.
-    pub fn registerCommand(self: *Ui, name: []const u8, title: []const u8, run: ?event_types.Callback) !Handle {
-        return self.commands.register(name, title, run);
+    pub fn registerCommand(self: *Ui, name: []const u8, opts: commands_mod.Options) !Handle {
+        return self.commands.register(name, opts);
     }
 
     /// Run a command by name. The event targets the focused node, or the root.
@@ -555,7 +541,7 @@ test "a click sets flags, bumps the counter, and runs the callback" {
         }
     };
     Count.n = 0;
-    const b = try t.ui.createButton(t.ui.tree.root, box(80, 30));
+    const b = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
     b.props.on_click = .{ .ctx = &Count.n, .call = Count.cb };
     try t.frame();
 
@@ -574,8 +560,8 @@ test "a click sets flags, bumps the counter, and runs the callback" {
 test "clicking outside, or on a disabled button, does nothing" {
     const t = try Harness.init();
     defer t.deinit();
-    const a = try t.ui.createButton(t.ui.tree.root, box(80, 30));
-    const b = try t.ui.createButton(t.ui.tree.root, box(80, 30));
+    const a = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
+    const b = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
     b.setEnabled(false);
     try t.frame();
 
@@ -589,7 +575,7 @@ test "clicking outside, or on a disabled button, does nothing" {
 test "hover and press change the look and mark paint dirty" {
     const t = try Harness.init();
     defer t.deinit();
-    const b = try t.ui.createButton(t.ui.tree.root, box(80, 30));
+    const b = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
     try t.frame();
     const node = t.ui.tree.get(b.node).?;
     const c = t.ui.theme.button_colors[0];
@@ -614,7 +600,7 @@ test "hover and press change the look and mark paint dirty" {
 test "setButtonText copies, so the caller can free; and frees on deinit" {
     const t = try Harness.init();
     defer t.deinit(); // the testing allocator reports leaks
-    const b = try t.ui.createButton(t.ui.tree.root, box(80, 30));
+    const b = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
     var buf = [_]u8{ 'h', 'i' };
     try b.setText(&buf);
     buf[0] = 'X';
@@ -626,7 +612,7 @@ test "setButtonText copies, so the caller can free; and frees on deinit" {
 test "destroying a button's node reclaims its block" {
     const t = try Harness.init();
     defer t.deinit();
-    const b = try t.ui.createButton(t.ui.tree.root, box(80, 30));
+    const b = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
     try b.setText("bye");
     try std.testing.expectEqual(@as(u32, 1), t.ui.buttons.count());
     _ = t.ui.tree.destroySubtree(b.node);
@@ -645,8 +631,8 @@ test "a handler may destroy buttons and add nodes mid-click" {
             _ = c.ui.tree.destroySubtree(c.victim);
         }
     };
-    const a = try t.ui.createButton(t.ui.tree.root, box(80, 30));
-    const victim = try t.ui.createButton(t.ui.tree.root, box(80, 30));
+    const a = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
+    const victim = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
     var ctx: Ctx = .{ .ui = &t.ui, .victim = victim.node };
     a.props.on_click = .{ .ctx = &ctx, .call = Ctx.cb };
     try t.frame();
@@ -661,7 +647,7 @@ test "raw prop writes are caught by the shadow checker and still repaint" {
     if (!shadow.enabled or shadow.strict) return error.SkipZigTest;
     const t = try Harness.init();
     defer t.deinit();
-    const b = try t.ui.createButton(t.ui.tree.root, box(80, 30));
+    const b = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
     try t.frame();
     try std.testing.expect(!t.ui.isDirty());
 
@@ -674,7 +660,7 @@ test "raw prop writes are caught by the shadow checker and still repaint" {
 test "variant setter marks paint and swaps colors" {
     const t = try Harness.init();
     defer t.deinit();
-    const b = try t.ui.createButton(t.ui.tree.root, box(80, 30));
+    const b = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
     try t.frame();
     b.setVariant(.danger);
     try std.testing.expect(t.ui.isDirty());
@@ -698,7 +684,7 @@ fn solidFill(c: draw_list.Command) ?struct { rect: geometry.Rect, color: geometr
 test "buttons paint into the draw list" {
     const t = try Harness.init();
     defer t.deinit();
-    _ = try t.ui.createButton(t.ui.tree.root, box(80, 30));
+    _ = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
     try t.frame();
     try std.testing.expect(t.list.items().len >= 1);
     try std.testing.expectEqual(Color.rgb(0x4a, 0x4d, 0x52), t.list.items()[0].fill_rounded_rect.paint.color);
@@ -707,8 +693,8 @@ test "buttons paint into the draw list" {
 test "setHidden relays out the parent" {
     const t = try Harness.init();
     defer t.deinit();
-    const a = try t.ui.createButton(t.ui.tree.root, box(80, 30));
-    const b = try t.ui.createButton(t.ui.tree.root, box(80, 30));
+    const a = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
+    const b = try t.ui.add(Button, t.ui.tree.root, .{ .style = box(80, 30) });
     try t.frame();
     try std.testing.expectEqual(@as(f32, 90), t.ui.tree.get(b.node).?.rect.x);
     t.ui.setHidden(a.node, true);
@@ -744,7 +730,7 @@ const TextHarness = struct {
 test "a label measures its text and lays out at that size" {
     const t = try TextHarness.init();
     defer t.deinit();
-    const l = try t.h.ui.createLabel(t.h.ui.tree.root, .{}, "Mi");
+    const l = try t.h.ui.add(Label, t.h.ui.tree.root, .{ .text = "Mi" });
     try t.h.frame();
     const node = t.h.ui.tree.get(l.node).?;
     // M = 0.9em, i = 0.25em at 20px; line height = (0.8 + 0.2 + 0.1) * 20.
@@ -757,7 +743,7 @@ test "labels reshape when text, size, or font change, and keep their text copy" 
     const t = try TextHarness.init();
     defer t.deinit();
     const ui = &t.h.ui;
-    const l = try ui.createLabel(ui.tree.root, .{}, "ab");
+    const l = try ui.add(Label, ui.tree.root, .{ .text = "ab" });
     try t.h.frame();
     const w1 = l.out.text_width;
 
@@ -784,7 +770,7 @@ test "an auto-sized button wraps its label plus padding, and paints centered tex
     defer t.deinit();
     const ui = &t.h.ui;
     ui.tree.get(ui.tree.root).?.style = .{ .align_items = .start };
-    const b = try ui.createButton(ui.tree.root, .{ .padding = Edges.xy(10, 5) });
+    const b = try ui.add(Button, ui.tree.root, .{ .style = .{ .padding = Edges.xy(10, 5) } });
     try b.setText("MM"); // 2 * 0.9 * 20 = 36 wide
     try t.h.frame();
 
@@ -810,7 +796,7 @@ test "disabled buttons use the disabled text color" {
     const t = try TextHarness.init();
     defer t.deinit();
     const ui = &t.h.ui;
-    const b = try ui.createButton(ui.tree.root, .{ .padding = Edges.all(4) });
+    const b = try ui.add(Button, ui.tree.root, .{ .style = .{ .padding = Edges.all(4) } });
     try b.setText("x");
     b.setEnabled(false);
     try t.h.frame();
@@ -821,8 +807,8 @@ test "destroying a node frees its text, and text outlives nothing" {
     const t = try TextHarness.init();
     defer t.deinit(); // leak-checked
     const ui = &t.h.ui;
-    const l = try ui.createLabel(ui.tree.root, .{}, "temporary");
-    const b = try ui.createButton(ui.tree.root, .{});
+    const l = try ui.add(Label, ui.tree.root, .{ .text = "temporary" });
+    const b = try ui.add(Button, ui.tree.root, .{});
     try b.setText("also temporary");
     try t.h.frame();
     _ = ui.tree.destroySubtree(l.node);
@@ -837,7 +823,7 @@ test "text renders through the software renderer" {
     defer t.deinit();
     const ui = &t.h.ui;
     ui.tree.get(ui.tree.root).?.visual.background = Color.white;
-    const l = try ui.createLabel(ui.tree.root, .{}, "MMM");
+    const l = try ui.add(Label, ui.tree.root, .{ .text = "MMM" });
     l.props.color = Color.black;
     try t.h.frame();
 
@@ -863,8 +849,8 @@ test "Tab walks buttons, Enter and Space activate, and the ring shows after keyb
         }
     };
     Count.n = 0;
-    const a = try ui.createButton(ui.tree.root, box(80, 30));
-    const b = try ui.createButton(ui.tree.root, box(80, 30));
+    const a = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30) });
+    const b = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30) });
     b.props.on_click = .{ .call = Count.cb };
     try t.frame();
 
@@ -895,9 +881,9 @@ test "disabled buttons are skipped by Tab and cannot be activated by key" {
     const t = try Harness.init();
     defer t.deinit();
     const ui = &t.ui;
-    const a = try ui.createButton(ui.tree.root, box(80, 30));
-    const dis = try ui.createButton(ui.tree.root, box(80, 30));
-    const c = try ui.createButton(ui.tree.root, box(80, 30));
+    const a = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30) });
+    const dis = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30) });
+    const c = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30) });
     dis.setEnabled(false);
     try t.frame();
 
@@ -919,7 +905,7 @@ test "removing the focused button falls back and never leaves a stale focus" {
     const t = try Harness.init();
     defer t.deinit();
     const ui = &t.ui;
-    const a = try ui.createButton(ui.tree.root, box(80, 30));
+    const a = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30) });
     try t.frame();
     ui.key(.tab, .{}, true, false);
     try t.frame();
@@ -973,7 +959,7 @@ fn focusedField(t: *TextHarness) !*TextField {
     FakeClip.len = 0;
     FieldCounts.changes = 0;
     FieldCounts.submits = 0;
-    const tf = try ui.createTextField(ui.tree.root, .{ .width = Length.px(200), .height = Length.px(28), .padding = Edges.xy(6, 0) });
+    const tf = try ui.add(TextField, ui.tree.root, .{ .style = .{ .width = Length.px(200), .height = Length.px(28), .padding = Edges.xy(6, 0) } });
     tf.props.on_change = .{ .call = FieldCounts.onChange };
     tf.props.on_submit = .{ .call = FieldCounts.onSubmit };
     try t.h.frame();
@@ -1101,7 +1087,7 @@ test "text only reaches the focused field" {
     defer t.deinit();
     const ui = &t.h.ui;
     const a = try focusedField(t);
-    const b = try ui.createTextField(ui.tree.root, .{ .width = Length.px(100), .height = Length.px(28) });
+    const b = try ui.add(TextField, ui.tree.root, .{ .style = .{ .width = Length.px(100), .height = Length.px(28) } });
     try t.h.frame();
     try type_(t, "to a");
     try std.testing.expectEqualStrings("to a", a.text());
@@ -1323,7 +1309,7 @@ const CmdLog = struct {
 };
 
 fn regCmd(ui: *Ui, name: []const u8) !void {
-    _ = try ui.registerCommand(name, name, .{ .call = CmdLog.handler });
+    _ = try ui.registerCommand(name, .{ .title = name, .run = .{ .call = CmdLog.handler } });
 }
 
 test "a bound shortcut runs its command with the focused node as target" {
@@ -1333,7 +1319,7 @@ test "a bound shortcut runs its command with the focused node as target" {
     CmdLog.reset();
     try regCmd(ui, "file.s");
     try ui.bindShortcut("ctrl+s", "file.s", .app, null);
-    const b = try ui.createButton(ui.tree.root, box(80, 30));
+    const b = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30) });
     try t.frame();
 
     try std.testing.expect(ui.keyHandled(.s, .{ .ctrl = true }, true, false));
@@ -1355,7 +1341,7 @@ test "widgets get the key first: a button's Enter beats an Enter shortcut" {
     CmdLog.reset();
     try regCmd(ui, "x.e");
     try ui.bindShortcut("enter", "x.e", .app, null);
-    const b = try ui.createButton(ui.tree.root, box(80, 30));
+    const b = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30) });
     try t.frame();
 
     // Nothing focused: the shortcut fires.
@@ -1374,7 +1360,7 @@ test "a Tab shortcut beats focus movement; unbound Tab still moves focus" {
     const ui = &t.ui;
     CmdLog.reset();
     try regCmd(ui, "x.t");
-    const b = try ui.createButton(ui.tree.root, box(80, 30));
+    const b = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30) });
     try t.frame();
     _ = ui.keyHandled(.tab, .{}, true, false);
     try std.testing.expect(Handle.eql(ui.focused().?, b.node));
@@ -1427,8 +1413,8 @@ test "panel and widget scopes follow focus" {
     try regCmd(ui, "x.w"); // widget
     const panel = try ui.tree.create(.{});
     try ui.tree.appendChild(ui.tree.root, panel);
-    const inside = try ui.createButton(panel, box(80, 30));
-    const outside = try ui.createButton(ui.tree.root, box(80, 30));
+    const inside = try ui.add(Button, panel, .{ .style = box(80, 30) });
+    const outside = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30) });
     try ui.bindShortcut("f2", "x.g", .app, null);
     try ui.bindShortcut("f2", "x.p", .panel, panel);
     try ui.bindShortcut("f2", "x.w", .widget, inside.node);
@@ -1490,7 +1476,7 @@ test "a command-linked button runs the command, mirrors its enabled state, and f
     defer t.deinit(); // leak-checked
     const ui = &t.ui;
     CmdLog.reset();
-    const b = try ui.createButton(ui.tree.root, box(80, 30));
+    const b = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30) });
     try b.setCommand("view.v"); // the command does not exist yet
     try t.frame();
     try std.testing.expect(!b.props.enabled);
@@ -1572,7 +1558,7 @@ fn editorBox(t: *TextHarness) !*CodeEditor {
     ui.clipboard = .{ .get = FakeClip.get, .set = FakeClip.set };
     FakeClip.len = 0;
     FieldCounts.changes = 0;
-    const ed = try ui.createCodeEditor(ui.tree.root, .{ .width = Length.px(300), .height = Length.px(100) });
+    const ed = try ui.add(CodeEditor, ui.tree.root, .{ .style = .{ .width = Length.px(300), .height = Length.px(100) } });
     ed.props.on_change = .{ .call = FieldCounts.onChange };
     try t.h.frame();
     ui.setFocus(ed.node);
@@ -2036,4 +2022,80 @@ test "no highlighter, no cost: plain editors never create one" {
     try t.h.frame();
     var runs: [32]RowRun = undefined;
     try std.testing.expectEqual(@as(usize, 1), rowRuns(&t.h.list, 0, &runs));
+}
+
+// ---- Ui.add and widget options ------------------------------------------------------------
+
+test "add configures widgets from their options" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const Count = struct {
+        var n: u32 = 0;
+        fn cb(_: ?*anyopaque, _: *event_mod.Event) void {
+            n += 1;
+        }
+    };
+    Count.n = 0;
+
+    _ = try ui.registerCommand("view.x", .{ .title = "X", .run = .{ .call = Count.cb } });
+    const b = try ui.add(Button, ui.tree.root, .{
+        .style = box(80, 30),
+        .text = "Go",
+        .variant = .danger,
+        .text_align = .start,
+    });
+    try std.testing.expectEqualStrings("Go", b.props.text.slice());
+    try std.testing.expect(b.props.variant == .danger and b.props.text_align == .start);
+
+    const linked = try ui.add(Button, ui.tree.root, .{ .style = box(80, 30), .command = "view.x" });
+    try std.testing.expect(linked.link != null);
+
+    const l = try ui.add(Label, ui.tree.root, .{ .text = "hello", .size = 30, .font = .mono });
+    try std.testing.expectEqualStrings("hello", l.props.text.slice());
+    try std.testing.expectEqual(@as(f32, 30), l.props.size);
+
+    const tf = try ui.add(TextField, ui.tree.root, .{ .text = "start", .placeholder = "type", .read_only = true });
+    try std.testing.expectEqualStrings("start", tf.text());
+    try std.testing.expect(tf.props.read_only);
+    try std.testing.expectEqual(@as(u32, 0), tf.out.change_count); // initial text is not an edit
+
+    const ed = try ui.add(CodeEditor, ui.tree.root, .{
+        .text = "const x = 1;\n",
+        .language = &syntax_mod.zig,
+        .tab_width = 2,
+        .line_numbers = false,
+    });
+    try t.h.frame();
+    try std.testing.expectEqual(@as(u32, 2), ed.out.line_count);
+    try std.testing.expect(!ed.props.line_numbers and ed.props.tab_width == 2);
+    try std.testing.expect(ed.highlighter != null);
+}
+
+test "registerCommand options set title, repeat, and enabled; the name is the default title" {
+    const t = try Harness.init();
+    defer t.deinit();
+    const ui = &t.ui;
+    _ = try ui.registerCommand("a.b", .{});
+    _ = try ui.registerCommand("c.d", .{ .title = "Do C", .repeat = true, .enabled = false });
+    const ab = ui.commands.get(ui.commands.find("a.b").?).?;
+    const cd = ui.commands.get(ui.commands.find("c.d").?).?;
+    try std.testing.expectEqualStrings("a.b", ab.title);
+    try std.testing.expectEqualStrings("Do C", cd.title);
+    try std.testing.expect(cd.repeat and !cd.enabled and ab.enabled and !ab.repeat);
+}
+
+test "add cleans up when allocation fails at any point" {
+    var fail_at: usize = 0;
+    while (fail_at < 400) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at });
+        var ui = Ui.init(failing.allocator()) catch continue;
+        defer ui.deinit();
+        const root = ui.tree.root;
+        _ = ui.add(Button, root, .{ .text = "text", .command = "c" }) catch {};
+        _ = ui.add(Label, root, .{ .text = "label" }) catch {};
+        _ = ui.add(TextField, root, .{ .text = "field", .placeholder = "ph" }) catch {};
+        _ = ui.add(CodeEditor, root, .{ .text = "one\ntwo", .language = &syntax_mod.zig }) catch {};
+        ui.update();
+    }
 }

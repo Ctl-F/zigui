@@ -27,6 +27,16 @@ pub const Command = struct {
 
 pub const Error = error{ DuplicateCommand, OutOfMemory };
 
+/// What `register` accepts.
+pub const Options = struct {
+    /// Shown in menus and palettes; the name is used if empty.
+    title: []const u8 = "",
+    run: ?event.Callback = null,
+    enabled: bool = true,
+    /// Whether holding the shortcut key re-runs it (arrow navigation yes, save no).
+    repeat: bool = false,
+};
+
 pub const Commands = struct {
     gpa: std.mem.Allocator,
     pool: Pool(Command, 64),
@@ -53,21 +63,18 @@ pub const Commands = struct {
         return self.pool.count();
     }
 
-    pub fn register(
-        self: *Commands,
-        name: []const u8,
-        title: []const u8,
-        run: ?event.Callback,
-    ) Error!Handle {
+    pub fn register(self: *Commands, name: []const u8, opts: Options) Error!Handle {
         if (self.by_name.contains(name)) return error.DuplicateCommand;
         const owned_name = try self.gpa.dupe(u8, name);
         errdefer self.gpa.free(owned_name);
-        const owned_title = try self.gpa.dupe(u8, title);
+        const owned_title = try self.gpa.dupe(u8, if (opts.title.len > 0) opts.title else name);
         errdefer self.gpa.free(owned_title);
         const h = try self.pool.create(.{
             .name = owned_name,
             .title = owned_title,
-            .run = run,
+            .run = opts.run,
+            .enabled = opts.enabled,
+            .repeat = opts.repeat,
         });
         errdefer _ = self.pool.destroy(h);
         try self.by_name.put(self.gpa, owned_name, h);
@@ -160,7 +167,7 @@ test "register, find, and invoke by handle or name" {
     defer cmds.deinit();
     Probe.reset();
     var token: u32 = 7;
-    const h = try cmds.register("file.save", "Save", .{ .ctx = &token, .call = Probe.handler });
+    const h = try cmds.register("file.save", .{ .title = "Save", .run = .{ .ctx = &token, .call = Probe.handler } });
     try testing.expect(cmds.find("file.save").?.eql(h));
     try testing.expect(cmds.find("file.open") == null);
 
@@ -176,10 +183,10 @@ test "duplicate names are rejected; titles and names are copied" {
     var cmds = Commands.init(testing.allocator);
     defer cmds.deinit(); // leak-checked
     var buf = [_]u8{ 'a', 'b' };
-    _ = try cmds.register(&buf, &buf, null);
+    _ = try cmds.register(&buf, .{ .title = &buf });
     buf[0] = 'z'; // the registry made its own copy
     try testing.expect(cmds.find("ab") != null);
-    try testing.expectError(error.DuplicateCommand, cmds.register("ab", "Other", null));
+    try testing.expectError(error.DuplicateCommand, cmds.register("ab", .{ .title = "Other" }));
     try testing.expectEqualStrings("ab", cmds.get(cmds.find("ab").?).?.title);
 }
 
@@ -187,8 +194,8 @@ test "disabled commands and commands without handlers do not run" {
     var cmds = Commands.init(testing.allocator);
     defer cmds.deinit();
     Probe.reset();
-    const h = try cmds.register("a", "A", .{ .call = Probe.handler });
-    const bare = try cmds.register("b", "B", null);
+    const h = try cmds.register("a", .{ .title = "A", .run = .{ .call = Probe.handler } });
+    const bare = try cmds.register("b", .{ .title = "B" });
     cmds.setEnabled(h, false);
     try testing.expect(!cmds.isEnabled(h));
     try testing.expect(!cmds.invoke(h, Handle.invalid));
@@ -202,12 +209,12 @@ test "unregistering frees the name for reuse and stales the old handle" {
     var cmds = Commands.init(testing.allocator);
     defer cmds.deinit();
     Probe.reset();
-    const h = try cmds.register("x", "X", .{ .call = Probe.handler });
+    const h = try cmds.register("x", .{ .title = "X", .run = .{ .call = Probe.handler } });
     try testing.expect(cmds.unregister(h));
     try testing.expect(!cmds.unregister(h));
     try testing.expect(cmds.find("x") == null);
     try testing.expect(!cmds.invoke(h, Handle.invalid));
-    const h2 = try cmds.register("x", "X again", .{ .call = Probe.handler });
+    const h2 = try cmds.register("x", .{ .title = "X again", .run = .{ .call = Probe.handler } });
     try testing.expect(!h2.eql(h));
     try testing.expect(!cmds.invoke(h, Handle.invalid)); // still stale
     try testing.expect(cmds.invoke(h2, Handle.invalid));
@@ -224,7 +231,7 @@ test "a handler can unregister its own command" {
         }
     };
     Self.registry = &cmds;
-    Self.me = try cmds.register("once", "Once", .{ .call = Self.run });
+    Self.me = try cmds.register("once", .{ .title = "Once", .run = .{ .call = Self.run } });
     try testing.expect(cmds.invoke(Self.me, Handle.invalid));
     try testing.expectEqual(@as(u32, 0), cmds.count());
 }

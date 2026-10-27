@@ -39,6 +39,8 @@ const Stop = text_sys.Stop;
 const Glyph = text_sys.Glyph;
 const Theme = @import("theme.zig").Theme;
 const Ui = @import("../core/ui.zig").Ui;
+const Style = @import("../core/style.zig").Style;
+const Node = @import("../core/tree.zig").Node;
 const label = @import("label.zig");
 const Editor = @import("../editor/editor.zig").Editor;
 const Selection = @import("../editor/selection.zig").Selection;
@@ -124,10 +126,51 @@ pub const CodeEditor = struct {
         };
     }
 
+    pub const Options = struct {
+        style: Style = .{},
+        /// Initial text, borrowed: it must outlive the editor (use `loadText`
+        /// with `owned = true` to hand over an allocation instead).
+        text: []const u8 = "",
+        language: ?*const syntax.Language = null,
+        font: Font = .mono,
+        size: f32 = 0,
+        tab_width: u32 = 4,
+        enabled: bool = true,
+        read_only: bool = false,
+        line_numbers: bool = true,
+        auto_indent: bool = true,
+        on_change: ?event.Callback = null,
+    };
+
     pub const listened_kinds = [_]event.EventKind{
         .focus_in, .focus_out, .pointer_enter, .pointer_leave,
         .pointer_down, .pointer_move, .pointer_up, .wheel, .key_down, .text_input,
     };
+
+    pub fn nodeTemplate(style: Style) Node {
+        return .{
+            .role = .text_field,
+            .cursor = .text,
+            .flags = .{ .focusable = true, .clip_children = true, .accepts_text = true },
+            .style = style,
+        };
+    }
+
+    pub fn apply(self: *CodeEditor, o: Options) !void {
+        self.props = .{
+            .font = o.font,
+            .size = o.size,
+            .tab_width = o.tab_width,
+            .enabled = o.enabled,
+            .read_only = o.read_only,
+            .line_numbers = o.line_numbers,
+            .auto_indent = o.auto_indent,
+            .on_change = o.on_change,
+        };
+        if (o.text.len > 0) try self.loadText(o.text, false);
+        if (o.language) |l| try self.setLanguage(l);
+        self.checker.sync(&self.props);
+    }
 
     // ---- API ------------------------------------------------------------------
 

@@ -36,9 +36,12 @@ fn buildUi(a: *App) !void {
         .gap = zigui.Length.px(8),
         .shrink = 0,
     }, .{ .background = zigui.Color.rgb(80, 80, 80) });
-    const label = try ui.createLabel(header, .{ .grow = 1 }, "Hello World");
-    label.props.size = 12;
-    label.props.color = zigui.Color.white;
+    _ = try ui.add(zigui.Label, header, .{
+        .style = .{ .grow = 1 },
+        .text = "Hello World",
+        .size = 12,
+        .color = zigui.Color.white,
+    });
 }
 
 pub fn main(init: std.process.Init) !void {
