@@ -84,6 +84,7 @@ pub const Layout = struct {
             if (root.rect.w != root_size.w or root.rect.h != root_size.h) {
                 root.rect.w = root_size.w;
                 root.rect.h = root_size.h;
+                tree.damage.markAll();
                 tree.markDirty(tree.root, .{ .layout = true, .paint = true });
             }
         }
@@ -285,7 +286,12 @@ pub const Layout = struct {
             cn.rect = new;
             const size_changed = new.w != old.w or new.h != old.h;
             if (size_changed or new.x != old.x or new.y != old.y) {
-                tree.markDirty(c, .{ .paint = true });
+                // The area it used to cover needs redrawing too (`markDirty`
+                // adds the new area).
+                if (tree.absoluteRect(h)) |pa| {
+                    tree.damage.add(Tree.withTextOverhang(cn, .{ .x = pa.x + old.x, .y = pa.y + old.y, .w = old.w, .h = old.h }));
+                }
+                if (size_changed) tree.markDirty(c, .{ .paint = true }) else tree.markMoved(c);
             }
             cn.place_pending = size_changed or cn.dirty.needsLayout() or cn.dirty.child_layout;
             i += 1;

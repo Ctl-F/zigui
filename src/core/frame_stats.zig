@@ -24,6 +24,8 @@ pub const Frame = struct {
     total_ns: u64 = 0,
     commands: u32 = 0,
     glyphs: u32 = 0,
+    /// Repaint-boundary subtrees replayed from the paint cache.
+    cached_subtrees: u32 = 0,
 };
 
 pub const capacity = 120;
@@ -85,6 +87,13 @@ pub const FrameStats = struct {
             .avg_commands = @intCast(cmds / n),
             .missed = self.missed,
         };
+    }
+
+    /// Where `drawOverlay` draws, for damage tracking.
+    pub fn overlayRect(window_w: f32) Rect {
+        const width = @as(f32, @floatFromInt(capacity)) * 3;
+        const x0 = @max(window_w - width - 8, 0);
+        return .{ .x = x0 - 4, .y = 4, .w = width + 8, .h = 56 };
     }
 
     /// Draw a bar chart of recent frame times into the top-right corner of a

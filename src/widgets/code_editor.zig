@@ -160,7 +160,7 @@ pub const CodeEditor = struct {
         return .{
             .role = .text_field,
             .cursor = .text,
-            .flags = .{ .focusable = true, .clip_children = true, .accepts_text = true },
+            .flags = .{ .focusable = true, .clip_children = true, .accepts_text = true, .repaint_boundary = true },
             .style = style,
         };
     }

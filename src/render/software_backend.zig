@@ -62,7 +62,7 @@ pub const SoftwareBackend = struct {
     }
 
     const vtable: backend_mod.VTable = .{
-        .caps = .{ .name = "software", .textures = true, .readback = true, .atlas_upload = false, .max_texture_size = max_texture_size },
+        .caps = .{ .name = "software", .textures = true, .readback = true, .atlas_upload = false, .partial_redraw = true, .max_texture_size = max_texture_size },
         .begin_frame = beginFrame,
         .submit = submit,
         .end_frame = endFrame,

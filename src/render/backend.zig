@@ -77,6 +77,9 @@ pub const Caps = struct {
     readback: bool = false,
     /// The backend keeps glyphs in its own memory: upload atlas pages.
     atlas_upload: bool = false,
+    /// The target keeps its contents between frames, so `Submit.damage` may
+    /// redraw only part of it. Backends without this are always given full frames.
+    partial_redraw: bool = false,
     max_texture_size: u32 = 0,
 };
 

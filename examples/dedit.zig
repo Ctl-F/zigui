@@ -44,6 +44,19 @@ fn buildUi(a: *App) !void {
     });
 }
 
+const WindowPresenter = struct {
+    window: *sdl.Window,
+
+    fn present(ctx: ?*anyopaque, rgba: []const u8, w: u32, h: u32) zigui.render_backend.Error!void {
+        const self: *WindowPresenter = @ptrCast(@alignCast(ctx.?));
+        self.window.present(rgba, w, h) catch return error.PresentFailed;
+    }
+
+    fn presenter(self: *WindowPresenter) zigui.software_backend.Presenter {
+        return .{ .ctx = self, .present = present };
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -90,8 +103,13 @@ pub fn main(init: std.process.Init) !void {
     var list = zigui.DrawList.init(commands, glyphs);
     var prewarmed_scale: f32 = 0;
 
-    var fb = try zigui.software.Framebuffer.init(gpa, 1, 1);
-    defer fb.deinit(gpa);
+    var presenter = WindowPresenter{ .window = &window };
+    var renderer = try zigui.software_backend.SoftwareBackend.init(gpa, presenter.presenter());
+    defer renderer.deinit();
+    const backend = renderer.backend();
+
+    // var fb = try zigui.software.Framebuffer.init(gpa, 1, 1);
+    // defer fb.deinit(gpa);
 
     var force = true;
     var frames_drawn: u64 = 0;
@@ -104,11 +122,7 @@ pub fn main(init: std.process.Init) !void {
         if (force or ui.isDirty()) {
             const px = window.pixelSize();
             const scale = window.scale();
-            try fb.resize(gpa, px.w, px.h);
-            const logical: zigui.geometry.Size = .{
-                .w = @as(f32, @floatFromInt(px.w)) / scale,
-                .h = @as(f32, @floatFromInt(px.h)) / scale,
-            };
+
             if (scale != prewarmed_scale) {
                 prewarmed_scale = scale;
                 for (0..ui.text.fonts.items.len) |f| {
@@ -117,9 +131,7 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
 
-            try ui.layoutAndPaint(logical, &list);
-            zigui.software.render(&fb, &list, .{ .scale = scale, .clear = zigui.Color.black, .glyphs = ui.glyphProvider() });
-            try window.present(fb.bytes(), fb.width, fb.height);
+            try ui.renderFrame(backend, &list, .{ .pixel_w = px.w, .pixel_h = px.h, .scale = scale, .clear = zigui.Color.black });
 
             force = false;
             frames_drawn += 1;

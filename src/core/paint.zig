@@ -4,8 +4,12 @@
 //! painter (`Node.paint_hook`, which widgets install to run the theme's
 //! painter), then its text, then its children in sibling order. Nodes flagged
 //! `clip_children` clip everything after their own box. The painter can recolor
-//! the text through the `PaintCtx`. This is a full repaint; damage-rect culling
-//! comes later.
+//! the text through the `PaintCtx`.
+//!
+//! The list is always rebuilt in full (the renderer redraws only damaged areas;
+//! see `damage.zig`), but a subtree rooted at a repaint boundary (`NodeFlags.
+//! repaint_boundary`: code editors and canvases set it) is recorded once and
+//! replayed, translated, until something inside it is dirty. See `Cache`.
 
 const std = @import("std");
 const Handle = @import("handle.zig").Handle;
@@ -18,17 +22,230 @@ const PaintCtx = @import("paint_ctx.zig").PaintCtx;
 
 pub const Error = @import("paint_ctx.zig").Error;
 
-/// Rebuild `list` from `tree`. Resets the list first.
+/// Rebuild `list` from `tree`, with no caching. Resets the list first.
 pub fn build(tree: *Tree, list: *DrawList) Error!void {
     list.reset();
-    try paintNode(tree, tree.root, 0, 0, list);
+    try paintNode(tree, tree.root, 0, 0, list, null);
 }
 
-fn paintNode(tree: *Tree, h: Handle, ox: f32, oy: f32, list: *DrawList) Error!void {
+/// Like `build`, replaying clean repaint-boundary subtrees from `cache`.
+pub fn buildCached(tree: *Tree, list: *DrawList, cache: *Cache) Error!void {
+    list.reset();
+    cache.beginFrame(tree);
+    try paintNode(tree, tree.root, 0, 0, list, cache);
+}
+
+const Command = draw_list.Command;
+const Glyph = draw_list.Glyph;
+const draw_list = @import("draw_list.zig");
+
+/// Recorded draw commands for repaint-boundary subtrees, kept as drawn (window
+/// coordinates) with the origin they were drawn at: replayed at the same origin
+/// they are bit-identical, and elsewhere they are moved by the difference.
+/// Buffers grow to what the subtree needs and are then reused, so steady-state
+/// frames do not allocate.
+pub const Cache = struct {
+    gpa: std.mem.Allocator,
+    entries: std.AutoHashMapUnmanaged(u64, Entry) = .empty,
+    /// Subtrees replayed / re-recorded since `beginFrame`.
+    hits: u32 = 0,
+    misses: u32 = 0,
+
+    const Entry = struct {
+        cmds: std.ArrayListUnmanaged(Command) = .empty,
+        glyphs: std.ArrayListUnmanaged(Glyph) = .empty,
+        ox: f32 = 0,
+        oy: f32 = 0,
+        w: f32 = 0,
+        h: f32 = 0,
+        valid: bool = false,
+    };
+
+    pub fn init(gpa: std.mem.Allocator) Cache {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(self: *Cache) void {
+        var it = self.entries.valueIterator();
+        while (it.next()) |e| {
+            e.cmds.deinit(self.gpa);
+            e.glyphs.deinit(self.gpa);
+        }
+        self.entries.deinit(self.gpa);
+    }
+
+    fn key(h: Handle) u64 {
+        return (@as(u64, h.index) << 32) | h.generation;
+    }
+
+    fn fromKey(k: u64) Handle {
+        return .{ .index = @intCast(k >> 32), .generation = @intCast(k & 0xffff_ffff) };
+    }
+
+    /// Reset the counters and drop entries of nodes that no longer exist.
+    fn beginFrame(self: *Cache, tree: *Tree) void {
+        self.hits = 0;
+        self.misses = 0;
+        var stale: [16]u64 = undefined;
+        var n: usize = 0;
+        var it = self.entries.iterator();
+        while (it.next()) |kv| {
+            if (n == stale.len) break;
+            if (!tree.isValid(fromKey(kv.key_ptr.*))) {
+                stale[n] = kv.key_ptr.*;
+                n += 1;
+            }
+        }
+        for (stale[0..n]) |k| {
+            if (self.entries.fetchRemove(k)) |kv| {
+                var e = kv.value;
+                e.cmds.deinit(self.gpa);
+                e.glyphs.deinit(self.gpa);
+            }
+        }
+    }
+
+    pub fn count(self: *const Cache) usize {
+        return self.entries.count();
+    }
+};
+
+fn shift(r: Rect, dx: f32, dy: f32) Rect {
+    return .{ .x = r.x + dx, .y = r.y + dy, .w = r.w, .h = r.h };
+}
+
+fn shiftPaint(p: draw_list.Paint, dx: f32, dy: f32) draw_list.Paint {
+    return switch (p) {
+        .linear_gradient => |g| .{ .linear_gradient = shiftGradient(g, dx, dy) },
+        .radial_gradient => |g| .{ .radial_gradient = shiftGradient(g, dx, dy) },
+        else => p,
+    };
+}
+
+fn shiftGradient(g: anytype, dx: f32, dy: f32) @TypeOf(g) {
+    var out = g;
+    out.from = .{ .x = g.from.x + dx, .y = g.from.y + dy };
+    out.to = .{ .x = g.to.x + dx, .y = g.to.y + dy };
+    return out;
+}
+
+/// `cmd` moved by (dx, dy). Glyph runs keep their `offset` (the caller fixes it
+/// up) and only their bounds move.
+fn translate(cmd: Command, dx: f32, dy: f32) Command {
+    return switch (cmd) {
+        .fill_rect => |f| .{ .fill_rect = .{ .rect = shift(f.rect, dx, dy), .paint = shiftPaint(f.paint, dx, dy) } },
+        .stroke_rect => |s| blk: {
+            var o = s;
+            o.rect = shift(s.rect, dx, dy);
+            o.paint = shiftPaint(s.paint, dx, dy);
+            break :blk .{ .stroke_rect = o };
+        },
+        .fill_rounded_rect => |f| blk: {
+            var o = f;
+            o.rect = shift(f.rect, dx, dy);
+            o.paint = shiftPaint(f.paint, dx, dy);
+            break :blk .{ .fill_rounded_rect = o };
+        },
+        .line => |l| blk: {
+            var o = l;
+            o.from = .{ .x = l.from.x + dx, .y = l.from.y + dy };
+            o.to = .{ .x = l.to.x + dx, .y = l.to.y + dy };
+            o.paint = shiftPaint(l.paint, dx, dy);
+            break :blk .{ .line = o };
+        },
+        .push_clip => |r| .{ .push_clip = shift(r, dx, dy) },
+        .glyph_run => |g| blk: {
+            var o = g;
+            o.bounds = shift(g.bounds, dx, dy);
+            break :blk .{ .glyph_run = o };
+        },
+        .image => |im| blk: {
+            var o = im;
+            o.rect = shift(im.rect, dx, dy);
+            break :blk .{ .image = o };
+        },
+        .pop_clip, .push_opacity, .pop_opacity => cmd,
+    };
+}
+
+/// Append `entry`'s commands to `list`, moved by (dx, dy).
+fn replay(list: *DrawList, entry: *const Cache.Entry, dx: f32, dy: f32) Error!void {
+    for (entry.cmds.items) |c| {
+        var cmd = if (dx == 0 and dy == 0) c else translate(c, dx, dy);
+        switch (cmd) {
+            .push_clip => |r| try list.pushClip(r),
+            .pop_clip => _ = try list.popClip(),
+            .push_opacity => |o| try list.pushOpacity(o),
+            .pop_opacity => _ = try list.popOpacity(),
+            .glyph_run => |*g| {
+                const src = entry.glyphs.items[g.offset..][0..g.count];
+                if (list.glyph_len + src.len > list.glyphs.len) return error.GlyphBufferFull;
+                const at = list.glyph_len;
+                for (src, list.glyphs[at .. at + src.len]) |s, *d| d.* = if (dx == 0 and dy == 0) s else .{ .id = s.id, .x = s.x + dx, .y = s.y + dy };
+                list.glyph_len += src.len;
+                g.offset = @intCast(at);
+                try list.push(cmd);
+            },
+            else => try list.push(cmd),
+        }
+    }
+}
+
+/// Copy what was appended to `list` since (`c0`, `g0`) into `entry`, drawn with
+/// its origin at (ox, oy).
+fn record(cache: *Cache, entry: *Cache.Entry, list: *const DrawList, c0: usize, g0: usize, ox: f32, oy: f32, w: f32, h: f32) Error!void {
+    entry.valid = false;
+    entry.cmds.clearRetainingCapacity();
+    entry.glyphs.clearRetainingCapacity();
+    try entry.cmds.ensureTotalCapacity(cache.gpa, list.len - c0);
+    try entry.glyphs.ensureTotalCapacity(cache.gpa, list.glyph_len - g0);
+    for (list.commands[c0..list.len]) |c| {
+        var cmd = c;
+        if (cmd == .glyph_run) cmd.glyph_run.offset -= @intCast(g0);
+        entry.cmds.appendAssumeCapacity(cmd);
+    }
+    entry.glyphs.appendSliceAssumeCapacity(list.glyphs[g0..list.glyph_len]);
+    entry.ox = ox;
+    entry.oy = oy;
+    entry.w = w;
+    entry.h = h;
+    entry.valid = true;
+}
+
+fn paintNode(tree: *Tree, h: Handle, ox: f32, oy: f32, list: *DrawList, cache: ?*Cache) Error!void {
     const node = tree.get(h) orelse return;
     if (node.flags.hidden) return;
 
     const abs: Rect = .{ .x = ox + node.rect.x, .y = oy + node.rect.y, .w = node.rect.w, .h = node.rect.h };
+
+    // A repaint boundary: replay the recording while nothing inside changed.
+    if (cache) |c| {
+        if (node.flags.repaint_boundary and !Handle.eql(h, tree.root)) {
+            const k = Cache.key(h);
+            const dirty = node.dirty.needsPaint() or node.dirty.child_paint;
+            if (c.entries.getPtr(k)) |e| {
+                if (e.valid and !dirty and e.w == abs.w and e.h == abs.h) {
+                    try replay(list, e, abs.x - e.ox, abs.y - e.oy);
+                    c.hits += 1;
+                    return;
+                }
+            }
+            const c0 = list.len;
+            const g0 = list.glyph_len;
+            try paintSubtree(tree, h, node, abs, list, cache);
+            // (Painting may have added entries for nested boundaries, so look up again.)
+            const gop = try c.entries.getOrPut(c.gpa, k);
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            const entry = gop.value_ptr;
+            try record(c, entry, list, c0, g0, abs.x, abs.y, abs.w, abs.h);
+            c.misses += 1;
+            return;
+        }
+    }
+    try paintSubtree(tree, h, node, abs, list, cache);
+}
+
+fn paintSubtree(tree: *Tree, h: Handle, node: *@import("tree.zig").Node, abs: Rect, list: *DrawList, cache: ?*Cache) Error!void {
     var pc: PaintCtx = .{ .list = list, .rect = abs };
     try pc.box(node.visual);
 
@@ -38,7 +255,7 @@ fn paintNode(tree: *Tree, h: Handle, ox: f32, oy: f32, list: *DrawList) Error!vo
     if (node.paint_hook) |hook| try hook.run(hook.ctx, &pc);
     if (node.text) |block| try paintText(block, node.style.padding, &pc);
     var it = tree.children(h);
-    while (it.next()) |c| try paintNode(tree, c, abs.x, abs.y, list);
+    while (it.next()) |c| try paintNode(tree, c, abs.x, abs.y, list, cache);
     if (clip) _ = try list.popClip();
 }
 
@@ -128,4 +345,32 @@ test "clip_children brackets the subtree" {
     try build(&tree, &list);
     try std.testing.expect(list.isBalanced());
     try std.testing.expectEqual(@as(usize, 3), list.items().len); // push, fill, pop
+}
+
+/// Equality for draw commands and glyphs that tolerates the rounding a move
+/// introduces (floats within 1/1000 px).
+pub fn approxEql(a: anytype, b: anytype) bool {
+    const T = @TypeOf(a);
+    switch (@typeInfo(T)) {
+        .float => return @abs(a - b) <= 1e-3,
+        .@"struct" => |s| {
+            inline for (s.field_names) |n| if (!approxEql(@field(a, n), @field(b, n))) return false;
+            return true;
+        },
+        .@"union" => {
+            if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+            switch (a) {
+                inline else => |payload, tag| return approxEql(payload, @field(b, @tagName(tag))),
+            }
+        },
+        .array => {
+            for (a, b) |x, y| if (!approxEql(x, y)) return false;
+            return true;
+        },
+        .optional => {
+            if (a == null or b == null) return a == null and b == null;
+            return approxEql(a.?, b.?);
+        },
+        else => return std.meta.eql(a, b),
+    }
 }

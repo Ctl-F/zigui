@@ -16,7 +16,7 @@ atlas, fields), commands and scoped shortcuts, a piece-table editor core with
 undo/redo and multi-cursor, a code editor widget with incremental syntax
 highlighting, a software renderer, an SDL3 platform shim, a runtime widget
 schema and registry, generated forms and wizards, ZON UI documents, and a visual
-builder. About 440 tests.
+builder. About 445 tests.
 
 Not built yet (largest first): a renderer backend interface and GPU path, canvas
 and frame scheduling, damage tracking, list/tree widgets and a model interface,
@@ -221,6 +221,20 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   relayout and repaint) under a counting allocator and asserts zero allocations
   after warmup; paint errors (draw list full, out of memory) now propagate from
   `paintHook` instead of being swallowed.
+- Damage and paint caching: the tree records what must be redrawn
+  (`core/damage.zig`: a node's old and new area when it changes or moves, grown
+  by 3 px for rings and by its text where the text is larger than the node; up
+  to 8 rects, then their bounding box). `Ui.renderFrame` hands the backend that
+  bounding box as `Submit.damage` when the backend keeps its contents
+  (`caps.partial_redraw`; the software backend does), and does a full redraw on
+  the first frame, a size or scale change, `RenderOptions.full`, or a root
+  resize. A property test renders random edits (text, enable, hover, focus, moves,
+  typing, canvas invalidation) incrementally and from scratch and requires
+  identical pixels. The draw list itself is still rebuilt each frame, except
+  that repaint-boundary subtrees (`NodeFlags.repaint_boundary`, set by code
+  editors and canvases) are recorded in `Ui.paint_cache` and replayed (translated
+  if the node moved) until something inside them is dirty; a pure move does not
+  dirty the moved node (`Tree.markMoved`). The stats overlay counts replays.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.
@@ -332,12 +346,11 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
 Ordered by the spec-drift notes (`NOTES/spec-drift-notes.md`); the notes are the
 authority for rationale, and a few items are recommendations, not requirements.
 
-1. Damage rects and per-repaint-boundary draw-record caching.
-2. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
+1. `makeClickable`, an unlabeled-interactive-node warning, owned node labels,
    focus scopes (modal traps), tab indices, IME preedit.
-3. Memory-mapped document open and an off-thread newline-index scan.
-4. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
-5. The C facade (`src/capi/`), once the core Zig library is done.
+2. Memory-mapped document open and an off-thread newline-index scan.
+3. SDL3 GPU backend and shader pipeline; monospace draw-list run records.
+4. The C facade (`src/capi/`), once the core Zig library is done.
 
 Smaller gaps: theme metrics (padding, min sizes) and a painter measure override; layout follow-ups (width-constrained text measure, stack/absolute,
 split and scroll containers, wrap, grid, calc `Length`); draw commands for

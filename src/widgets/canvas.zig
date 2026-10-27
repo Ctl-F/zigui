@@ -142,7 +142,7 @@ pub const Canvas = struct {
         return .{
             .role = .canvas,
             .style = style,
-            .flags = .{ .focusable = true, .clip_children = true },
+            .flags = .{ .focusable = true, .clip_children = true, .repaint_boundary = true },
         };
     }
 

@@ -81,6 +81,8 @@ pub const Ui = struct {
     fields: Pool(TextField, 64),
     editors: Pool(CodeEditor, 16),
     canvases: Pool(Canvas, 16),
+    /// Recorded draw commands of repaint-boundary subtrees (see `paint.Cache`).
+    paint_cache: paint.Cache,
     /// The renderer the app draws with (set by `renderFrame` or `setBackend`);
     /// canvases create their offscreen surfaces through it.
     backend: ?render_backend.Backend = null,
@@ -96,6 +98,10 @@ pub const Ui = struct {
     /// and is counted in `slow_handlers`. 0 disables the check.
     handler_budget_ns: u64 = 8_000_000,
     slow_handlers: u32 = 0,
+    last_target: struct { w: u32 = 0, h: u32 = 0, scale: f32 = 0 } = .{},
+    overlay_was_on: bool = false,
+    /// The region the last `renderFrame` redrew (null: all of it).
+    last_damage: ?geometry.Rect = null,
     pending_update_ns: u64 = 0,
     pending_handler_ns: u64 = 0,
     /// Last time passed to `tick`, in milliseconds.
@@ -122,6 +128,7 @@ pub const Ui = struct {
             .fields = Pool(TextField, 64).init(gpa),
             .editors = Pool(CodeEditor, 16).init(gpa),
             .canvases = Pool(Canvas, 16).init(gpa),
+            .paint_cache = paint.Cache.init(gpa),
             .commands = commands_mod.Commands.init(gpa),
             .shortcuts = shortcuts_mod.Shortcuts.init(gpa),
         };
@@ -158,6 +165,7 @@ pub const Ui = struct {
             while (it.next()) |e| e.ptr.deinit();
             pool.deinit();
         }
+        self.paint_cache.deinit();
         self.shortcuts.deinit();
         self.commands.deinit();
         self.text.deinit();
@@ -548,7 +556,7 @@ pub const Ui = struct {
     /// Lay out for a window of `size` (logical pixels) and rebuild `list`.
     pub fn layoutAndPaint(self: *Ui, size: geometry.Size, list: *DrawList) !void {
         try self.layoutPhase(size);
-        try paint.build(&self.tree, list);
+        try paint.buildCached(&self.tree, list, &self.paint_cache);
     }
 
     fn layoutPhase(self: *Ui, size: geometry.Size) !void {
@@ -570,11 +578,18 @@ pub const Ui = struct {
         /// Device pixels per logical pixel.
         scale: f32 = 1,
         clear: ?geometry.Color = null,
+        /// Redraw the whole window even if little changed (expose events).
+        full: bool = false,
     };
 
     /// Lay out for the target size, rebuild `list`, and draw it through `be`
     /// (begin, atlas upload if the backend wants it, submit, present). Call it
-    /// when `isDirty()` or the platform asks for a redraw.
+    /// when `isDirty()` or the platform asks for a redraw (then set `full`).
+    ///
+    /// Only the damaged part of the window is redrawn (see `damage.zig`) when the
+    /// backend keeps its contents between frames; the first frame, a size or
+    /// scale change, and `full` redraw everything. If nothing is damaged the
+    /// call does no drawing.
     pub fn renderFrame(self: *Ui, be: render_backend.Backend, list: *DrawList, o: RenderOptions) !void {
         self.backend = be;
         const scale = if (o.scale > 0) o.scale else 1;
@@ -585,9 +600,20 @@ pub const Ui = struct {
         const t_start = self.nowNs();
         try self.layoutPhase(logical);
         const t_layout = self.nowNs();
-        try paint.build(&self.tree, list);
+        try paint.buildCached(&self.tree, list, &self.paint_cache);
         const t_build = self.nowNs();
-        if (self.show_stats) self.stats.drawOverlay(list, logical.w) catch {};
+        if (self.show_stats) {
+            self.stats.drawOverlay(list, logical.w) catch {};
+            self.tree.damage.add(frame_stats.FrameStats.overlayRect(logical.w));
+        }
+        const same_target = self.last_target.w == o.pixel_w and self.last_target.h == o.pixel_h and self.last_target.scale == scale;
+        self.last_target = .{ .w = o.pixel_w, .h = o.pixel_h, .scale = scale };
+        const full = o.full or !same_target or !be.caps().partial_redraw or self.tree.damage.all or self.overlay_was_on != self.show_stats;
+        self.overlay_was_on = self.show_stats;
+        if (!full and self.tree.damage.isEmpty()) return;
+        const damage: ?geometry.Rect = if (full) null else self.tree.damage.bounds();
+        self.last_damage = damage;
+        errdefer self.tree.damage.markAll();
         const provider = self.glyphProvider();
         if (be.caps().atlas_upload) {
             render_backend.prepareGlyphs(list, scale, provider);
@@ -596,7 +622,8 @@ pub const Ui = struct {
             }
         }
         try be.beginFrame(.{ .pixel_w = o.pixel_w, .pixel_h = o.pixel_h, .scale = scale });
-        try be.submit(.{ .list = list, .clear = o.clear, .glyphs = provider });
+        try be.submit(.{ .list = list, .clear = o.clear, .damage = damage, .glyphs = provider });
+        self.tree.damage.clear();
         try be.endFrame();
         const t_end = self.nowNs();
         var f: frame_stats.Frame = .{
@@ -607,6 +634,7 @@ pub const Ui = struct {
             .handler_ns = self.pending_handler_ns,
             .commands = @intCast(list.items().len),
             .glyphs = @intCast(list.glyphItems().len),
+            .cached_subtrees = self.paint_cache.hits,
         };
         f.total_ns = f.update_ns + f.layout_ns + f.build_ns + f.submit_ns;
         self.stats.push(f);
@@ -2879,4 +2907,206 @@ test "steady-state frames allocate nothing after warmup" {
     try std.testing.expectEqual(allocs, s.fa.allocations);
     try std.testing.expectEqual(resizes, s.fa.resize_index);
     try std.testing.expectEqual(frees, s.fa.deallocations);
+}
+
+/// Draws every frame twice: incrementally through `renderFrame` (damage rects)
+/// and from scratch, and checks the two images agree.
+fn expectIncrementalMatchesFull(seed: u64, steps: usize) !void {
+    const sw = @import("../render/software_backend.zig");
+    const software = @import("../render/software.zig");
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.theme.font_size = 14;
+    var cmds: [2048]draw_list.Command = undefined;
+    var glyphs: [4096]draw_list.Glyph = undefined;
+    var list = DrawList.init(&cmds, &glyphs);
+
+    const root = ui.tree.root;
+    ui.tree.get(root).?.style = .{ .direction = .column, .gap = Length.px(6), .padding = Edges.all(6), .align_items = .start };
+    ui.tree.get(root).?.visual = .{ .background = geometry.Color.rgb(30, 30, 34) };
+    var labels: [4]*Label = undefined;
+    for (&labels, 0..) |*l, i| {
+        l.* = try ui.add(Label, root, .{ .text = "label", .color = geometry.Color.white });
+        _ = i;
+    }
+    const b1 = try ui.add(Button, root, .{ .text = "One", .style = .{ .width = Length.px(90), .height = Length.px(26), .shrink = 0 } });
+    const b2 = try ui.add(Button, root, .{ .text = "Two", .style = .{ .width = Length.px(90), .height = Length.px(26), .shrink = 0 } });
+    const field = try ui.add(TextField, root, .{ .text = "field", .style = .{ .width = Length.px(160), .height = Length.px(24), .shrink = 0 } });
+    const ed = try ui.add(CodeEditor, root, .{ .style = .{ .width = Length.px(200), .height = Length.px(70), .shrink = 0 } });
+    try ed.loadText("fn main() void {\n    var a = 1;\n    // comment\n    return;\n}\n", false);
+    const cv = try ui.add(canvas_mod.Canvas, root, .{ .style = .{ .width = Length.px(60), .height = Length.px(20), .shrink = 0 } });
+    const CvDraw = struct {
+        fn run(_: ?*anyopaque, _: *Canvas, pc: *PaintCtx) @import("paint_ctx.zig").Error!void {
+            try pc.list.fillRect(pc.rect, draw_list.Paint.linear(.{ .x = pc.rect.x, .y = pc.rect.y }, .{ .x = pc.rect.right(), .y = pc.rect.y }, geometry.Color.rgb(250, 20, 20), geometry.Color.rgb(20, 20, 250)));
+        }
+    };
+    cv.props.on_draw = .{ .run = CvDraw.run };
+    const box_h = try ui.tree.create(.{ .style = .{ .width = Length.px(80), .height = Length.px(30), .shrink = 0 }, .visual = .{ .background = geometry.Color.rgb(200, 60, 60), .radius = 6 } });
+    try ui.tree.appendChild(root, box_h);
+
+    var sa = try sw.SoftwareBackend.init(std.testing.allocator, null);
+    defer sa.deinit();
+    var fb_full = try software.Framebuffer.init(std.testing.allocator, 1, 1);
+    defer fb_full.deinit(std.testing.allocator);
+    const W: u32 = 260;
+    const H: u32 = 260;
+    try fb_full.resize(std.testing.allocator, W, H);
+
+    const label_texts = [_][]const u8{ "a", "longer label text", "x y z", "mid" };
+    const field_texts = [_][]const u8{ "", "typed", "some longer text here" };
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rnd = prng.random();
+    var total_hits: u64 = 0;
+    var last_op: u8 = 0;
+    var compared: usize = 0;
+    var partial: usize = 0;
+    var step: usize = 0;
+    while (step < steps) : (step += 1) {
+        last_op = rnd.uintLessThan(u8, 12);
+        switch (last_op) {
+            9 => {
+                ui.setFocus(ed.node);
+                ui.textInput("x");
+            },
+            10 => ui.wheel(20, 150, 0, if (rnd.boolean()) 1 else -1),
+            11 => cv.invalidate(null),
+            0 => try labels[rnd.uintLessThan(usize, 4)].setText(label_texts[rnd.uintLessThan(usize, label_texts.len)]),
+            1 => b1.setEnabled(rnd.boolean()),
+            2 => ui.pointerMove(@floatFromInt(rnd.uintLessThan(u32, W)), @floatFromInt(rnd.uintLessThan(u32, H))),
+            3 => {
+                ui.tree.get(box_h).?.style.width = Length.px(@floatFromInt(20 + rnd.uintLessThan(u32, 150)));
+                ui.tree.markDirty(box_h, DirtyFlags.layout_and_paint);
+            },
+            4 => try field.setText(field_texts[rnd.uintLessThan(usize, field_texts.len)]),
+            5 => {
+                ui.tree.get(box_h).?.visual.background = geometry.Color.rgb(rnd.int(u8), rnd.int(u8), rnd.int(u8));
+                ui.tree.markDirty(box_h, DirtyFlags.paint_only);
+            },
+            6 => b2.setEnabled(rnd.boolean()),
+            7 => {
+                ui.tree.get(root).?.style.gap = Length.px(@floatFromInt(rnd.uintLessThan(u32, 14)));
+                ui.tree.markDirty(root, DirtyFlags.layout_and_paint);
+            },
+            else => ui.setFocus(if (rnd.boolean()) field.node else b2.node),
+        }
+        if (step % 5 == 4) ui.tree.markDirty(box_h, DirtyFlags.paint_only); // plain repaint requests too
+        ui.update();
+        if (!ui.isDirty()) {
+            ui.endFrame();
+            continue;
+        }
+        const before = ui.tree.damage;
+        const was_partial = !before.all and !before.isEmpty();
+        try ui.renderFrame(sa.backend(), &list, .{ .pixel_w = W, .pixel_h = H, .clear = geometry.Color.black });
+        // Redraw the same list from scratch.
+        software.render(&fb_full, &list, .{ .clear = geometry.Color.black, .glyphs = ui.glyphProvider() });
+        // The cached build must equal one with no cache at all.
+        var cmds2: [2048]draw_list.Command = undefined;
+        var glyphs2: [4096]draw_list.Glyph = undefined;
+        var list2 = DrawList.init(&cmds2, &glyphs2);
+        try paint.build(&ui.tree, &list2);
+        try std.testing.expectEqual(list2.items().len, list.items().len);
+        for (list.items(), list2.items()) |a, b| try std.testing.expect(paint.approxEql(a, b));
+        try std.testing.expectEqual(list2.glyphItems().len, list.glyphItems().len);
+        for (list.glyphItems(), list2.glyphItems()) |a, b| try std.testing.expect(paint.approxEql(a, b));
+        total_hits += ui.paint_cache.hits;
+        const img = try sa.backend().readback(std.testing.allocator);
+        defer img.deinit(std.testing.allocator);
+        if (!std.mem.eql(u8, img.rgba, fb_full.bytes())) {
+            var first: usize = 0;
+            while (img.rgba[first] == fb_full.bytes()[first]) first += 1;
+            std.debug.print("seed {d} step {d} op {d}: incremental frame differs from a full redraw at pixel ({d},{d}); damage {any}\n", .{ seed, step, last_op, (first / 4) % W, (first / 4) / W, ui.last_damage });
+            return error.IncrementalMismatch;
+        }
+        compared += 1;
+        if (was_partial) partial += 1;
+        ui.endFrame();
+    }
+    try std.testing.expect(compared > steps / 3);
+    try std.testing.expect(partial > 0); // some frames really were partial
+    try std.testing.expect(total_hits > 0); // and the paint cache was really used
+}
+
+test "incremental (damage) rendering matches a full redraw over random edits" {
+    var seed: u64 = 1;
+    while (seed <= 12) : (seed += 1) try expectIncrementalMatchesFull(seed, 100);
+}
+
+test "a small change damages a small part of the window" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.tree.get(ui.tree.root).?.style = .{ .direction = .column, .align_items = .start };
+    const a = try ui.add(Label, ui.tree.root, .{ .text = "first" });
+    const far = try ui.add(Label, ui.tree.root, .{ .text = "second", .style = .{ .margin = .{ .top = Length.px(150) } } });
+    var gpu: FakeGpu = .{};
+    ui.update();
+    try ui.renderFrame(gpu.backend(), &t.h.list, .{ .pixel_w = 300, .pixel_h = 300 });
+    ui.endFrame();
+    try std.testing.expect(ui.tree.damage.isEmpty());
+    try a.setText("first!");
+    ui.update();
+    // FakeGpu does not keep its contents, so inspect the region directly.
+    const d = ui.tree.damage.bounds().?;
+    try std.testing.expect(d.h < 60 and d.w < 150);
+    const second = ui.tree.absoluteRect(far.node).?;
+    try std.testing.expect(!d.intersects(second));
+}
+
+test "repaint boundaries replay from the paint cache until something inside changes" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.theme.font_size = 14;
+    ui.tree.get(ui.tree.root).?.style = .{ .direction = .column, .align_items = .start };
+    const lab = try ui.add(Label, ui.tree.root, .{ .text = "title" });
+    const ed = try ui.add(CodeEditor, ui.tree.root, .{ .style = .{ .width = Length.px(180), .height = Length.px(80), .shrink = 0 } });
+    try ed.loadText("let a = 1;\nlet b = 2;\n", false);
+    var gpu: FakeGpu = .{};
+    const Frame = struct {
+        fn run(u: *Ui, list: *DrawList, g: *FakeGpu) !void {
+            u.update();
+            try u.renderFrame(g.backend(), list, .{ .pixel_w = 300, .pixel_h = 200 });
+            u.endFrame();
+        }
+    };
+
+    try Frame.run(ui, &t.h.list, &gpu);
+    try std.testing.expectEqual(@as(u32, 1), ui.paint_cache.misses); // first paint records the editor
+    try std.testing.expectEqual(@as(usize, 1), ui.paint_cache.count());
+    const first_cmds = t.h.list.items().len;
+
+    // A sibling changes: the editor subtree is replayed, not rebuilt.
+    try lab.setText("a different title");
+    try Frame.run(ui, &t.h.list, &gpu);
+    try std.testing.expectEqual(@as(u32, 1), ui.paint_cache.hits);
+    try std.testing.expectEqual(@as(u32, 0), ui.paint_cache.misses);
+    try std.testing.expectEqual(first_cmds, t.h.list.items().len);
+    try std.testing.expectEqual(@as(u32, 1), ui.stats.recent(0).?.cached_subtrees);
+
+    // The replay equals an uncached build, including after the editor moves.
+    ui.tree.get(lab.node).?.style.margin.top = Length.px(25);
+    ui.tree.markDirty(lab.node, DirtyFlags.layout_and_paint);
+    try Frame.run(ui, &t.h.list, &gpu);
+    try std.testing.expectEqual(@as(u32, 1), ui.paint_cache.hits);
+    var plain_cmds: [1024]draw_list.Command = undefined;
+    var plain_glyphs: [2048]draw_list.Glyph = undefined;
+    var plain = DrawList.init(&plain_cmds, &plain_glyphs);
+    try paint.build(&ui.tree, &plain);
+    try std.testing.expectEqual(plain.items().len, t.h.list.items().len);
+    for (t.h.list.items(), plain.items()) |a, b| try std.testing.expect(paint.approxEql(a, b));
+    for (t.h.list.glyphItems(), plain.glyphItems()) |a, b| try std.testing.expect(paint.approxEql(a, b));
+
+    // Something inside the boundary changes: it is re-recorded.
+    ui.setFocus(ed.node);
+    ui.textInput("zz");
+    try Frame.run(ui, &t.h.list, &gpu);
+    try std.testing.expectEqual(@as(u32, 1), ui.paint_cache.misses);
+    try std.testing.expectEqual(@as(u32, 0), ui.paint_cache.hits);
+
+    // Destroying the node drops its cache entry.
+    _ = ui.tree.destroySubtree(ed.node);
+    try Frame.run(ui, &t.h.list, &gpu);
+    try std.testing.expectEqual(@as(usize, 0), ui.paint_cache.count());
 }

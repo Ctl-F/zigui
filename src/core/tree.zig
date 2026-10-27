@@ -6,6 +6,7 @@
 const std = @import("std");
 const Handle = @import("handle.zig").Handle;
 const Pool = @import("pool.zig").Pool;
+const DamageRegion = @import("damage.zig").DamageRegion;
 const DirtyFlags = @import("dirty.zig").DirtyFlags;
 const Rect = @import("geometry.zig").Rect;
 const Size = @import("geometry.zig").Size;
@@ -147,6 +148,9 @@ pub const Tree = struct {
     /// changes with focus_in/focus_out. If the focused node is destroyed, focus
     /// falls back to the nearest focusable ancestor.
     focused: Handle = Handle.invalid,
+    /// Window area that must be redrawn (see `damage.zig`); the renderer takes it
+    /// each frame. Starts as everything.
+    damage: DamageRegion = .{ .all = true },
     /// Top of the stack of relayout boundaries that need a layout pass. It is
     /// intrusive (links live in `Node`), so marking dirty never allocates or fails.
     layout_queue_head: Handle = Handle.invalid,
@@ -485,6 +489,16 @@ pub const Tree = struct {
         if (list.items.len == 0) self.freeListeners(node);
     }
 
+    /// `r` (a node's rect) grown to cover its text where the text is larger than
+    /// the node: a label squeezed to nothing still paints its line, centered on
+    /// the (empty) box.
+    pub fn withTextOverhang(node: *const Node, r: Rect) Rect {
+        const t = node.text orelse return r;
+        const dx = @max(t.width - r.w, 0);
+        const dy = @max(t.line_height - r.h, 0);
+        return .{ .x = r.x - dx, .y = r.y - dy, .w = r.w + 2 * dx, .h = r.h + 2 * dy };
+    }
+
     /// Position and size of `h` in window coordinates.
     pub fn absoluteRect(self: *Tree, h: Handle) ?Rect {
         const node = self.get(h) orelse return null;
@@ -549,8 +563,18 @@ pub const Tree = struct {
             }
         }
         if (flags.needsPaint()) {
+            if (self.absoluteRect(h)) |r| self.damage.add(withTextOverhang(node, r));
             self.propagate(node.parent, .paint);
         }
+    }
+
+    /// A node moved without changing size or content (layout's doing): redraw
+    /// where it now is and tell its ancestors, but leave the node itself clean so
+    /// a repaint-boundary recording of it can be replayed at the new position.
+    pub fn markMoved(self: *Tree, h: Handle) void {
+        const node = self.get(h) orelse return;
+        if (self.absoluteRect(h)) |r| self.damage.add(withTextOverhang(node, r));
+        self.propagate(node.parent, .paint);
     }
 
     const PropagateKind = enum { layout, paint };
