@@ -62,7 +62,8 @@ pub fn lastError() []const u8 {
 
 pub const Window = struct {
     handle: *c.SDL_Window,
-    renderer: *c.SDL_Renderer,
+    /// Null for a window made with `createGpu` (a GPU device owns its drawing).
+    renderer: ?*c.SDL_Renderer,
     texture: ?*c.SDL_Texture = null,
     tex_w: u32 = 0,
     tex_h: u32 = 0,
@@ -78,9 +79,18 @@ pub const Window = struct {
         return .{ .handle = handle, .renderer = renderer };
     }
 
+    /// A window for the SDL GPU backend (`zigui_gpu`): no software renderer is
+    /// attached, so the GPU device can claim it. `present` is not available.
+    pub fn createGpu(title: [:0]const u8, logical_w: u32, logical_h: u32) Error!Window {
+        const flags = c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY;
+        const handle = c.SDL_CreateWindow(title.ptr, @intCast(logical_w), @intCast(logical_h), flags) orelse
+            return error.WindowFailed;
+        return .{ .handle = handle, .renderer = null };
+    }
+
     pub fn destroy(self: *Window) void {
         if (self.texture) |t| c.SDL_DestroyTexture(t);
-        c.SDL_DestroyRenderer(self.renderer);
+        if (self.renderer) |r| c.SDL_DestroyRenderer(r);
         c.SDL_DestroyWindow(self.handle);
         self.* = undefined;
     }
@@ -113,10 +123,11 @@ pub const Window = struct {
 
     /// Upload tightly packed RGBA8 pixels (`w` by `h`) and show them.
     pub fn present(self: *Window, rgba: []const u8, w: u32, h: u32) Error!void {
+        const renderer = self.renderer orelse return error.RendererFailed;
         if (self.texture == null or self.tex_w != w or self.tex_h != h) {
             if (self.texture) |t| c.SDL_DestroyTexture(t);
             self.texture = c.SDL_CreateTexture(
-                self.renderer,
+                renderer,
                 c.SDL_PIXELFORMAT_RGBA32,
                 c.SDL_TEXTUREACCESS_STREAMING,
                 @intCast(w),
@@ -127,9 +138,9 @@ pub const Window = struct {
         }
         const tex = self.texture.?;
         if (!c.SDL_UpdateTexture(tex, null, rgba.ptr, @intCast(w * 4))) return error.PresentFailed;
-        _ = c.SDL_RenderClear(self.renderer);
-        if (!c.SDL_RenderTexture(self.renderer, tex, null, null)) return error.PresentFailed;
-        if (!c.SDL_RenderPresent(self.renderer)) return error.PresentFailed;
+        _ = c.SDL_RenderClear(renderer);
+        if (!c.SDL_RenderTexture(renderer, tex, null, null)) return error.PresentFailed;
+        if (!c.SDL_RenderPresent(renderer)) return error.PresentFailed;
     }
 };
 

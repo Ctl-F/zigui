@@ -73,6 +73,32 @@ pub fn build(b: *std.Build) void {
     sdl_mod.addImport("sdl_c", sdl_c_mod);
     sdl_mod.addImport("zigui", mod);
 
+    // SDL3 GPU renderer backend (Vulkan today). Shaders are SPIR-V committed
+    // under src/platform/shaders; `zig build shaders` regenerates them (needs glslc).
+    const gpu_mod = b.addModule("zigui_gpu", .{
+        .root_source_file = b.path("src/platform/sdl_gpu.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    gpu_mod.addImport("sdl_c", sdl_c_mod);
+    gpu_mod.addImport("zigui", mod);
+    const gpu_tests = b.addTest(.{ .root_module = gpu_mod });
+    test_step.dependOn(&b.addRunArtifact(gpu_tests).step);
+
+    const shaders_step = b.step("shaders", "Recompile the GLSL shaders to SPIR-V (needs glslc)");
+    for ([_][2][]const u8{ .{ "vertex", "ui.vert" }, .{ "fragment", "ui.frag" } }) |sh| {
+        const run = b.addSystemCommand(&.{
+            "glslc",
+            b.fmt("-fshader-stage={s}", .{sh[0]}),
+            b.fmt("src/platform/shaders/{s}", .{sh[1]}),
+            "-o",
+            b.fmt("src/platform/shaders/{s}.spv", .{sh[1]}),
+        });
+        run.setCwd(b.path("."));
+        shaders_step.dependOn(&run.step);
+    }
+
     // stb_truetype font backend. Separate module so core never needs C.
     const stb_c = b.addTranslateC(.{
         .root_source_file = b.path("src/text/stb_c.h"),
@@ -105,6 +131,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "zigui", .module = mod },
                 .{ .name = "zigui_sdl", .module = sdl_mod },
                 .{ .name = "zigui_stb", .module = stb_mod },
+                .{ .name = "zigui_gpu", .module = gpu_mod },
             },
         }),
     });

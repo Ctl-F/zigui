@@ -25,6 +25,7 @@ const std = @import("std");
 const zigui = @import("zigui");
 const sdl = @import("zigui_sdl");
 const stb = @import("zigui_stb");
+const gpu = @import("zigui_gpu");
 
 const Color = zigui.Color;
 const Length = zigui.Length;
@@ -443,7 +444,9 @@ pub fn main(init: std.process.Init) !void {
     try sdl.init();
     defer sdl.quit();
 
-    var window = sdl.Window.create("zigui demo", 960, 600) catch |err| {
+    // ZIGUI_RENDERER=gpu draws with the SDL3 GPU backend instead of the software one.
+    const use_gpu = std.mem.eql(u8, init.environ_map.get("ZIGUI_RENDERER") orelse "software", "gpu");
+    var window = (if (use_gpu) sdl.Window.createGpu("zigui demo", 960, 600) else sdl.Window.create("zigui demo", 960, 600)) catch |err| {
         std.log.err("could not create window: {s} ({s})", .{ @errorName(err), sdl.lastError() });
         return err;
     };
@@ -499,9 +502,18 @@ pub fn main(init: std.process.Init) !void {
     var prewarmed_scale: f32 = 0;
 
     var presenter: WindowPresenter = .{ .window = &window };
-    var renderer = try zigui.software_backend.SoftwareBackend.init(gpa, presenter.presenter());
-    defer renderer.deinit();
-    const backend = renderer.backend();
+    var software_renderer: ?zigui.software_backend.SoftwareBackend = null;
+    defer if (software_renderer) |*r| r.deinit();
+    var gpu_renderer: ?*gpu.GpuBackend = null;
+    defer if (gpu_renderer) |g| g.destroy();
+    const backend = if (use_gpu) blk: {
+        gpu_renderer = try gpu.GpuBackend.create(gpa, .{ .window = window.handle });
+        std.log.info("renderer: sdl gpu ({s})", .{gpu_renderer.?.driver()});
+        break :blk gpu_renderer.?.backend();
+    } else blk: {
+        software_renderer = try zigui.software_backend.SoftwareBackend.init(gpa, presenter.presenter());
+        break :blk software_renderer.?.backend();
+    };
 
     var force = true; // first frame, resize, or expose: redraw even if the tree is clean
 

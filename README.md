@@ -16,7 +16,7 @@ atlas, fields), commands and scoped shortcuts, a piece-table editor core with
 undo/redo and multi-cursor, a code editor widget with incremental syntax
 highlighting, a software renderer, an SDL3 platform shim, a runtime widget
 schema and registry, generated forms and wizards, ZON UI documents, and a visual
-builder. About 465 tests.
+builder. About 470 tests.
 
 Not built yet (largest first): a renderer backend interface and GPU path, canvas
 and frame scheduling, damage tracking, list/tree widgets and a model interface,
@@ -30,6 +30,7 @@ zig build check-boundary       # also part of `test`: no C-convention code in th
 zig build demo                 # IDE-style demo window (needs SDL3 dev files, pkg-config sdl3)
 zig build dedit                # a minimal demo editor window
 zig build paint                # paint program on a canvas with an offscreen surface
+zig build shaders              # recompile GLSL to SPIR-V (needs glslc; the .spv files are committed)
 zig build builder              # the UI builder, editing ./ui.zon (or zig-out/bin/builder FILE)
 ```
 
@@ -262,6 +263,22 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   `error.Indexing` (ignored by the widget); afterwards it is an ordinary
   document. The index costs 8 bytes per line. Truncating a mapped file from
   outside faults on the lost pages; save to a new file and rename.
+- SDL3 GPU backend (`platform/sdl_gpu.zig`, module `zigui_gpu`): the `Backend`
+  interface on Vulkan through SDL's GPU API (`ZIGUI_RENDERER=gpu` in the demo).
+  Frames draw into a persistent offscreen target (so damage rects work) that is
+  blitted to the window's swapchain; with no window (or one that cannot be
+  claimed, like the offscreen video driver) it is headless and `readback` works.
+  The draw list becomes one vertex stream (six vertices per quad, 96 bytes each),
+  batched by texture and scissor, uploaded once, drawn in one render pass with
+  one pipeline. Shapes are SDFs in the fragment shader (same math as the
+  software rasterizer), glyphs sample R8 atlas page textures uploaded through
+  `uploadAtlasPage`, images and canvas surfaces are RGBA8/R8 textures. Tests
+  (6, skipped if no GPU device exists) render a mixed scene at 1x and 2x, a real
+  Ui with text through the atlas, partial redraws, and textures, and require the
+  result to match the software renderer within rounding. Shaders are GLSL in
+  `platform/shaders/` compiled to SPIR-V and committed. Metal and D3D12 need the
+  same shaders converted (SDL_shadercross) and are not set up. Headless runs use
+  `SDL_VIDEO_DRIVER=offscreen`.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.
