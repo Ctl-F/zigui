@@ -57,6 +57,8 @@ const Button = @import("../widgets/button.zig").Button;
 const Label = @import("../widgets/label.zig").Label;
 const TextField = @import("../widgets/text_field.zig").TextField;
 const ScrollView = @import("../widgets/scroll_view.zig").ScrollView;
+const tree_view = @import("../widgets/tree_view.zig");
+const TreeView = tree_view.TreeView;
 const registry = @import("../widgets/registry.zig");
 const form_mod = @import("../forms/form.zig");
 const doc_mod = @import("../uidoc/doc.zig");
@@ -163,7 +165,17 @@ pub const Builder = struct {
 
     root: Handle = Handle.invalid,
     palette: Handle = Handle.invalid,
+    /// The grid of palette buttons inside `palette`.
+    palette_grid: Handle = Handle.invalid,
+    outline: *TreeView = undefined,
+    /// The outline's scroll view (the tree's own).
     outline_scroll: *ScrollView = undefined,
+    /// Whether each document node's outline item was expanded, by uid; nodes
+    /// not seen before start expanded.
+    outline_expanded: std.AutoHashMapUnmanaged(u32, bool) = .empty,
+    /// Document uid to outline item.
+    outline_items: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+    syncing_outline: bool = false,
     preview_host: Handle = Handle.invalid,
     preview_frame: Handle = Handle.invalid,
     inspector_tabs: Handle = Handle.invalid,
@@ -234,6 +246,8 @@ pub const Builder = struct {
             self.clearInspector();
             if (self.inst) |*i| i.destroy();
             self.event_fields.deinit(self.gpa);
+            self.outline_expanded.deinit(self.gpa);
+            self.outline_items.deinit(self.gpa);
         }
         try self.rebuildAll();
         return self;
@@ -246,6 +260,8 @@ pub const Builder = struct {
         self.unregisterCommands();
         _ = self.ui.tree.destroySubtree(self.root);
         self.event_fields.deinit(self.gpa);
+        self.outline_expanded.deinit(self.gpa);
+        self.outline_items.deinit(self.gpa);
         if (self.clip_text) |t| self.gpa.free(t);
         self.editor.deinit();
         self.gpa.destroy(self);
@@ -343,10 +359,15 @@ pub const Builder = struct {
         self.palette = try self.panel(left, .{ .direction = .column, .gap = Length.px(2), .padding = Edges.all(8), .shrink = 0 }, panel_bg);
         const outline_panel = try self.panel(left, .{ .direction = .column, .gap = Length.px(4), .padding = Edges.all(8), .grow = 1 }, panel_bg);
         _ = try ui.add(Label, outline_panel, .{ .text = "Outline", .size = 15 });
-        self.outline_scroll = try ui.add(ScrollView, outline_panel, .{
+        self.outline = try ui.add(TreeView, outline_panel, .{
             .style = .{ .grow = 1 },
-            .content_style = .{ .direction = .column, .gap = Length.px(2), .padding = .{ .right = Length.px(10) } },
+            .label = "Outline",
+            .on_select = event.Callback.bind(self, onOutlineSelect),
         });
+        for ([_]event.EventKind{ .pointer_down, .pointer_move, .pointer_up }) |kind| {
+            try ui.tree.addListener(self.outline.node, .{ .kind = kind, .callback = event.Callback.bind(self, onOutlinePointer) });
+        }
+        self.outline_scroll = self.outline.scroll;
         self.outline_scroll.overlay = tree_mod.PaintHook.bind(self, paintOutlineOverlay);
 
         self.preview_host = try self.panel(main, .{ .direction = .column, .padding = Edges.all(12), .grow = 1 }, host_bg);
@@ -381,6 +402,7 @@ pub const Builder = struct {
         self.status = try ui.add(Label, self.root, .{});
 
         _ = try ui.add(Label, self.palette, .{ .text = "Add (click or drag)", .size = 15 });
+        self.palette_grid = try self.node(self.palette, .{ .grid_columns = 2, .gap = Length.px(4), .shrink = 0 });
         for (registry.widgets, 0..) |w, i| try self.paletteButton(w.name, i + 1);
         try self.paletteButton(doc_mod.box_type, registry.widgets.len + 1);
     }
@@ -402,7 +424,7 @@ pub const Builder = struct {
     }
 
     fn paletteButton(self: *Builder, name: []const u8, tag: usize) !void {
-        const b = try self.ui.add(Button, self.palette, .{ .text = name, .variant = .flat, .text_align = .start });
+        const b = try self.ui.add(Button, self.palette_grid, .{ .text = name, .variant = .flat, .text_align = .start, .style = .{ .padding = Edges.xy(8, 4) } });
         b.props.on_click = event.Callback.bind(self, onPalette);
         self.ui.tree.get(b.node).?.user_data = @ptrFromInt(tag);
         try self.ui.tree.addListener(b.node, .{ .kind = .pointer_down, .callback = event.Callback.bind(self, onPalettePointer) });
@@ -593,27 +615,36 @@ pub const Builder = struct {
         }
     }
 
+    /// Rebuild the outline's items from the document, keeping what the user
+    /// expanded and collapsed.
     fn rebuildOutline(self: *Builder) !void {
-        self.clearChildren(self.outline_scroll.contentNode());
-        try self.outlineRows(self.doc().root, 0);
+        var it = self.outline_items.iterator();
+        while (it.next()) |e| try self.outline_expanded.put(self.gpa, e.key_ptr.*, self.outline.isExpanded(e.value_ptr.*));
+        self.syncing_outline = true;
+        defer self.syncing_outline = false;
+        self.outline.clear();
+        self.outline_items.clearRetainingCapacity();
+        try self.outlineItems(self.doc().root, tree_view.no_item);
+        self.syncOutlineSelection();
     }
 
-    fn outlineRows(self: *Builder, n: *doc_mod.Node, depth: usize) anyerror!void {
+    fn outlineItems(self: *Builder, n: *doc_mod.Node, parent: u32) anyerror!void {
         var buf: [96]u8 = undefined;
-        const indent = @min(depth * 2, 24);
-        @memset(buf[0..indent], ' ');
-        const text = std.fmt.bufPrint(buf[indent..], "{s}{s}{s}", .{ n.type_name, if (n.id.len > 0) " #" else "", n.id }) catch buf[indent..indent];
-        const b = try self.ui.add(Button, self.outline_scroll.contentNode(), .{
-            .text = buf[0 .. indent + text.len],
-            .variant = if (n.uid == self.selected) .primary else .flat,
-            .text_align = .start,
-        });
-        b.props.on_click = event.Callback.bind(self, onOutline);
-        self.ui.tree.get(b.node).?.user_data = @ptrFromInt(n.uid);
-        for ([_]event.EventKind{ .pointer_down, .pointer_move, .pointer_up }) |kind| {
-            try self.ui.tree.addListener(b.node, .{ .kind = kind, .callback = event.Callback.bind(self, onOutlinePointer) });
-        }
-        for (n.children.items) |c| try self.outlineRows(c, depth + 1);
+        const text = std.fmt.bufPrint(&buf, "{s}{s}{s}", .{ n.type_name, if (n.id.len > 0) " #" else "", n.id }) catch n.type_name;
+        const item = try self.outline.addItem(parent, text);
+        self.outline.setUserData(item, n.uid);
+        try self.outline_items.put(self.gpa, n.uid, item);
+        self.outline.setExpanded(item, self.outline_expanded.get(n.uid) orelse true);
+        for (n.children.items) |c| try self.outlineItems(c, item);
+    }
+
+    /// Show the document's selection in the outline.
+    fn syncOutlineSelection(self: *Builder) void {
+        const item = self.outline_items.get(self.selected) orelse return;
+        const was = self.syncing_outline;
+        self.syncing_outline = true;
+        defer self.syncing_outline = was;
+        self.outline.select(item);
     }
 
     fn clearInspector(self: *Builder) void {
@@ -745,8 +776,8 @@ pub const Builder = struct {
 
     // ---- the Layout tab ----
 
-    const layout_field_count = 11;
-    const LayoutField = enum(u8) { gap, padding, margin, width_px, height_px, grow, shrink, inset_left, inset_top, inset_right, inset_bottom };
+    const layout_field_count = 13;
+    const LayoutField = enum(u8) { gap, padding, margin, width_px, height_px, grow, shrink, grid_columns, grid_span, inset_left, inset_top, inset_right, inset_bottom };
     const LayoutChoice = enum(u8) { direction, align_items, justify, width_mode, height_mode, align_self, position, wrap };
 
     fn layoutButtonGroup(self: *Builder, label: []const u8, group: LayoutChoice, names: []const []const u8, current: usize) !void {
@@ -811,6 +842,13 @@ pub const Builder = struct {
             try self.layoutButtonGroup("align", .align_items, &.{ "start", "center", "end", "stretch" }, @intFromEnum(st.align_items));
             try self.layoutButtonGroup("justify", .justify, &.{ "start", "center", "end" }, @min(@intFromEnum(st.justify), 2));
             try self.layoutButtonGroup("wrap", .wrap, &.{ "no", "yes" }, @intFromBool(st.wrap));
+            try self.layoutField("grid columns", .grid_columns, @floatFromInt(st.grid_columns));
+        }
+        if (n.parent) |p| {
+            const pl = self.live(p);
+            if (pl != null and self.ui.tree.get(pl.?.h).?.style.grid_columns > 0) {
+                try self.layoutField("grid span", .grid_span, @floatFromInt(st.grid_span));
+            }
         }
         if (n != self.doc().root) {
             _ = try self.ui.add(Label, self.content(), .{ .text = "Position", .size = 15 });
@@ -909,6 +947,12 @@ pub const Builder = struct {
                 },
                 .grow => st.grow = v,
                 .shrink => st.shrink = v,
+                .grid_columns => if (v >= 0 and v <= 64 and @as(f32, @floatFromInt(st.grid_columns)) != v) {
+                    st.grid_columns = @intFromFloat(v);
+                },
+                .grid_span => if (v >= 1 and v <= 64 and @as(f32, @floatFromInt(st.grid_span)) != v) {
+                    st.grid_span = @intFromFloat(v);
+                },
                 else => {},
             }
         }
@@ -1008,7 +1052,7 @@ pub const Builder = struct {
         if (self.doc().find(uid) == null or uid == self.selected) return;
         self.editor.breakCoalescing();
         self.selected = uid;
-        self.rebuildOutline() catch |e| self.updateStatus(e);
+        self.syncOutlineSelection();
         self.rebuildInspector() catch |e| self.updateStatus(e);
         self.updateButtons();
         self.repaintOverlays();
@@ -1220,12 +1264,11 @@ pub const Builder = struct {
         return if (tag <= registry.widgets.len) registry.widgets[tag - 1].name else doc_mod.box_type;
     }
 
-    fn onOutline(self: *Builder, ev: *event.Event) void {
-        if (self.swallow_click) {
-            self.swallow_click = false;
-            return;
-        }
-        self.select(@intCast(self.tagOf(ev.current)));
+    fn onOutlineSelect(self: *Builder, _: *event.Event) void {
+        if (self.syncing_outline) return;
+        const item = self.outline.selected();
+        if (item == tree_view.no_item) return;
+        self.select(@intCast(self.outline.userData(item)));
     }
 
     fn onTab(self: *Builder, ev: *event.Event) void {
@@ -1490,11 +1533,10 @@ pub const Builder = struct {
 
     fn outlineRowRects(self: *Builder, out: []interact.Row) usize {
         var n: usize = 0;
-        var c = self.ui.tree.get(self.outline_scroll.contentNode()).?.first_child;
-        while (self.ui.tree.get(c)) |cn| : (c = cn.next) {
+        for (self.outline.visibleItems()) |item| {
             if (n == out.len) break;
-            const r = self.ui.tree.absoluteRect(c) orelse continue;
-            out[n] = .{ .uid = @intCast(@intFromPtr(cn.user_data)), .rect = r };
+            const r = self.outline.rowRect(item) orelse continue;
+            out[n] = .{ .uid = @intCast(self.outline.userData(item)), .rect = r };
             n += 1;
         }
         return n;
@@ -1517,7 +1559,7 @@ pub const Builder = struct {
         self.dragging = false;
         self.drop = null;
         self.repaintOverlays();
-        if (was_dragging) self.swallow_click = p.source != .preview;
+        if (was_dragging) self.swallow_click = p.source == .palette;
         if (!was_dragging) return;
         const target = drop orelse return;
         if (p.uid != 0) {
@@ -1532,7 +1574,9 @@ pub const Builder = struct {
     fn onOutlinePointer(self: *Builder, ev: *event.Event) void {
         switch (ev.kind) {
             .pointer_down => if (ev.button == 1) {
-                const uid: u32 = @intCast(self.tagOf(ev.current));
+                const item = self.outline.itemAt(ev.x, ev.y);
+                if (item == tree_view.no_item) return;
+                const uid: u32 = @intCast(self.outline.userData(item));
                 self.press = .{ .source = .outline, .uid = uid, .sx = ev.x, .sy = ev.y };
             },
             .pointer_move => if (self.press != null and self.press.?.source == .outline) self.dragTo(ev.x, ev.y),
@@ -1704,7 +1748,7 @@ fn clickButton(b: *Button) void {
 }
 
 fn paletteButton(b: *Builder, name: []const u8) *Button {
-    var child = b.ui.tree.get(b.palette).?.first_child;
+    var child = b.ui.tree.get(b.palette_grid).?.first_child;
     while (b.ui.tree.get(child)) |n| : (child = n.next) {
         if (n.widget_type == ui_mod.typeTag(Button)) {
             const btn: *Button = @ptrCast(@alignCast(n.widget.?));
@@ -1714,16 +1758,13 @@ fn paletteButton(b: *Builder, name: []const u8) *Button {
     @panic("no palette button");
 }
 
-fn outlineRow(b: *Builder, uid: u32) *Button {
-    var c = b.ui.tree.get(b.outline_scroll.contentNode()).?.first_child;
-    while (b.ui.tree.get(c)) |n| : (c = n.next) {
-        if (@as(u32, @intCast(@intFromPtr(n.user_data))) == uid) return @ptrCast(@alignCast(n.widget.?));
-    }
-    @panic("no outline row");
+/// The outline row node of document node `uid`.
+fn outlineRow(b: *Builder, uid: u32) Handle {
+    return b.outline.rowNode(b.outline_items.get(uid).?);
 }
 
 fn outlineCount(b: *Builder) u32 {
-    return b.ui.tree.childCount(b.outline_scroll.contentNode());
+    return @intCast(b.outline.visibleItems().len);
 }
 
 fn formBinding(f: *DynForm, path: []const u8) @TypeOf(f.bindings.items[0]) {
@@ -1786,7 +1827,7 @@ test "clicking in the preview selects the node under the pointer and not the wid
     try testing.expectEqual(byId(b, "t").uid, b.selected);
     // The inspector follows, and the outline row is highlighted.
     try testing.expect(b.props_form != null);
-    try testing.expect(outlineRow(b, byId(b, "t").uid).props.variant == .primary);
+    try testing.expect(b.outline.selected() == b.outline_items.get(byId(b, "t").uid).?);
     // Clicking the empty frame selects the root.
     const frame = r.ui.tree.absoluteRect(b.preview_frame).?;
     try r.click(frame.right() - 6, frame.bottom() - 6);
@@ -1869,18 +1910,18 @@ test "outline rows select by click and reorder by drag" {
     try r.frame();
     const a = byId(b, "a");
     const t = byId(b, "t");
-    try r.click(r.center(outlineRow(b, t.uid).node)[0], r.center(outlineRow(b, t.uid).node)[1]);
+    try r.click(r.center(outlineRow(b, t.uid))[0], r.center(outlineRow(b, t.uid))[1]);
     try testing.expectEqual(t.uid, b.selected);
     // Drag the label's row onto the top of a's row: it moves before a.
-    const row_a = r.ui.tree.absoluteRect(outlineRow(b, a.uid).node).?;
-    try r.drag(r.center(outlineRow(b, t.uid).node), .{ row_a.x + 20, row_a.y + 2 });
+    const row_a = r.ui.tree.absoluteRect(outlineRow(b, a.uid)).?;
+    try r.drag(r.center(outlineRow(b, t.uid)), .{ row_a.x + 20, row_a.y + 2 });
     try testing.expectEqual(t, b.doc().root.children.items[0]);
     b.undo();
     try r.frame();
     try testing.expectEqual(a, b.doc().root.children.items[0]);
     // Dragging a row into the middle of a box row nests it.
-    const row_b = r.ui.tree.absoluteRect(outlineRow(b, byId(b, "b").uid).node).?;
-    try r.drag(r.center(outlineRow(b, t.uid).node), .{ row_b.x + 20, row_b.y + row_b.h / 2 });
+    const row_b = r.ui.tree.absoluteRect(outlineRow(b, byId(b, "b").uid)).?;
+    try r.drag(r.center(outlineRow(b, t.uid)), .{ row_b.x + 20, row_b.y + row_b.h / 2 });
     try testing.expectEqual(byId(b, "b"), byId(b, "t").parent.?);
 }
 
@@ -2290,4 +2331,26 @@ test "creating and destroying builders frees everything, including under allocat
         b.undo();
         b.destroy();
     }
+}
+
+test "the layout tab makes a container a grid and sets a child's span" {
+    const r = try Rig.init(null, .{});
+    defer r.deinit();
+    const b = r.b;
+    clickButton(paletteButton(b, "button"));
+    const first = b.selectedNode();
+    b.select(b.doc().root.uid);
+    clickButton(paletteButton(b, "button"));
+    b.select(b.doc().root.uid);
+    b.setTab(.layout);
+    try r.frame();
+    try testing.expect(b.layout_fields[@intFromEnum(Builder.LayoutField.grid_columns)] != null);
+    typeInto(&r.ui, b.layout_fields[@intFromEnum(Builder.LayoutField.grid_columns)].?, "2");
+    try testing.expectEqual(@as(i64, 2), b.doc().root.style.field("grid_columns").?.int);
+    // A child of a grid gets a span field.
+    b.select(first.uid);
+    try r.frame();
+    try testing.expect(b.layout_fields[@intFromEnum(Builder.LayoutField.grid_span)] != null);
+    typeInto(&r.ui, b.layout_fields[@intFromEnum(Builder.LayoutField.grid_span)].?, "2");
+    try testing.expectEqual(@as(i64, 2), first.style.field("grid_span").?.int);
 }

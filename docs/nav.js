@@ -21,6 +21,7 @@
       ["widgets/canvas.html", "Canvas"],
       ["widgets/scroll-view.html", "ScrollView"],
       ["widgets/split-view.html", "SplitView"],
+      ["widgets/tree-view.html", "TreeView"],
     ]],
     ["Tools", [
       ["documents.html", "UI documents (ZON)"],

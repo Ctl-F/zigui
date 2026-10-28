@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>TreeView - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>TreeView</h1>
+<p>A scrolling outline of expandable items: file trees, document structure, symbol lists. Items are added from code and referred to by a stable <code>u32</code> id. Not yet available in UI documents (items are data, not props); the <a href="../builder.html">builder</a> uses one for its outline.</p>
+<pre><code>const tv = try ui.add(zigui.TreeView, parent, .{
+    .style = .{ .grow = 1 },
+    .on_select = .bind(&amp;app, App.onSelect),
+    .on_activate = .bind(&amp;app, App.onOpen),
+});
+
+const src = try tv.addItem(zigui.tree_view.no_item, "src");           // top level
+const main = try tv.addItem(src, "main.zig");                        // child of src
+tv.setUserData(main, file_index);                                    // your own value
+tv.setExpanded(src, true);
+
+fn onSelect(self: *App, _: *zigui.event.Event) void {
+    const item = self.tree.selected();
+    if (item != zigui.tree_view.no_item) self.show(self.tree.userData(item));
+}</code></pre>
+<p><code>zigui.tree_view.no_item</code> means "none": no selection, or the top level when used as a parent.</p>
+
+<h2>Interaction</h2>
+<table>
+<tr><th>Input</th><th>Effect</th></tr>
+<tr><td>Click a row</td><td>Select it (focuses the tree).</td></tr>
+<tr><td>Click the arrow, or double-click a row with children</td><td>Expand or collapse.</td></tr>
+<tr><td>Double-click, Enter, Space</td><td>Activate the selected item (<code>on_activate</code>).</td></tr>
+<tr><td>Up / Down, Home / End</td><td>Move the selection (the tree scrolls to keep it visible).</td></tr>
+<tr><td>Left</td><td>Collapse the selected item, or select its parent.</td></tr>
+<tr><td>Right</td><td>Expand the selected item, or select its first child.</td></tr>
+<tr><td>Wheel, scrollbar</td><td>Scroll (it contains a <a href="scroll-view.html">ScrollView</a>).</td></tr>
+</table>
+<p>Collapsing an item that contains the selection moves the selection to that item.</p>
+
+<h2>Options</h2>
+<table>
+<tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>style</code></td><td><code>.{}</code></td><td>Layout of the whole view; give it a size or <code>.grow = 1</code>.</td></tr>
+<tr><td><code>label</code></td><td><code>"Tree"</code></td><td>Accessible name.</td></tr>
+<tr><td><code>indent</code></td><td>16</td><td>Pixels of indentation per level.</td></tr>
+<tr><td><code>row_height</code></td><td>22</td><td>Row height in pixels.</td></tr>
+<tr><td><code>on_select</code></td><td>null</td><td>The selection changed (also for programmatic <code>select</code>); read <code>out.selected</code>.</td></tr>
+<tr><td><code>on_activate</code></td><td>null</td><td>An item was activated; <code>out.activated_item</code> says which.</td></tr>
+<tr><td><code>on_toggle</code></td><td>null</td><td>An item was expanded or collapsed.</td></tr>
+</table>
+
+<h2>Out</h2>
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>selected</code></td><td>The selected item, or <code>no_item</code>.</td></tr>
+<tr><td><code>changed</code>, <code>activated</code> (+ <code>activated_item</code>), <code>toggled</code></td><td>Happened this frame.</td></tr>
+<tr><td><code>focused</code></td><td>Has keyboard focus (the selection is drawn more strongly).</td></tr>
+<tr><td><code>count</code></td><td>Items in the tree, visible or not.</td></tr>
+</table>
+
+<h2>Methods</h2>
+<table>
+<tr><th>Method</th><th>Purpose</th></tr>
+<tr><td><code>addItem(parent, text) !u32</code>, <code>addItemAt(parent, index, text) !u32</code></td><td>Add an item (appended or at a position); returns its id. Text is copied.</td></tr>
+<tr><td><code>removeItem(id)</code>, <code>clear()</code></td><td>Remove an item and its subtree / everything. Ids are not reused.</td></tr>
+<tr><td><code>setText(id, text) !void</code>, <code>itemText(id)</code></td><td>Change or read an item's text.</td></tr>
+<tr><td><code>setUserData(id, u64)</code>, <code>userData(id)</code></td><td>Your own value per item.</td></tr>
+<tr><td><code>parentOf(id)</code>, <code>childCount(parent)</code>, <code>childAt(parent, index)</code>, <code>depthOf(id)</code>, <code>exists(id)</code></td><td>Structure queries.</td></tr>
+<tr><td><code>setExpanded(id, bool)</code>, <code>isExpanded(id)</code>, <code>expandAll()</code>, <code>collapseAll()</code></td><td>Expansion.</td></tr>
+<tr><td><code>select(id)</code>, <code>selected()</code></td><td>Select an item (or <code>no_item</code>); expands its ancestors and scrolls to it.</td></tr>
+<tr><td><code>ensureVisible(id)</code></td><td>Expand ancestors and scroll without selecting.</td></tr>
+<tr><td><code>visibleItems()</code>, <code>rowRect(id)</code>, <code>itemAt(x, y)</code>, <code>rowNode(id)</code></td><td>Geometry in window coordinates, for hosts that add drag and drop (the builder's outline does).</td></tr>
+<tr><td><code>scroll</code> field</td><td>The inner <code>*ScrollView</code> (e.g. for an overlay).</td></tr>
+</table>
+
+<h2>Limits</h2>
+<ul>
+<li>Rows are real nodes, rebuilt after structural changes: thousands of items are fine, hundreds of thousands are not (no virtualization yet).</li>
+<li>Rows show one line of text; no icons, checkboxes, multi-selection, inline rename, or built-in drag and drop yet. Use <code>rowRect</code>/<code>itemAt</code> to build drag and drop.</li>
+<li>There is no model interface: the tree holds its own copy of items. Keep your data in sync by calling the methods above.</li>
+</ul>
+</main><script src="../nav.js"></script></body></html>

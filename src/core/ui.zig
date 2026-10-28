@@ -60,6 +60,7 @@ pub const TextField = text_field.TextField;
 pub const Canvas = canvas_mod.Canvas;
 const ScrollView = scroll_mod.ScrollView;
 const SplitView = split_mod.SplitView;
+const TreeView = @import("../widgets/tree_view.zig").TreeView;
 const CodeEditor = code_editor.CodeEditor;
 
 /// A unique address per widget type, stored on nodes so the registry can tell
@@ -92,6 +93,7 @@ pub const Ui = struct {
     canvases: Pool(Canvas, 16),
     scrollers: Pool(ScrollView, 16),
     splitters: Pool(SplitView, 16),
+    tree_views: Pool(TreeView, 16),
     /// Recorded draw commands of repaint-boundary subtrees (see `paint.Cache`).
     paint_cache: paint.Cache,
     /// The renderer the app draws with (set by `renderFrame` or `setBackend`);
@@ -148,6 +150,7 @@ pub const Ui = struct {
             .canvases = Pool(Canvas, 16).init(gpa),
             .scrollers = Pool(ScrollView, 16).init(gpa),
             .splitters = Pool(SplitView, 16).init(gpa),
+            .tree_views = Pool(TreeView, 16).init(gpa),
             .paint_cache = paint.Cache.init(gpa),
             .commands = commands_mod.Commands.init(gpa),
             .shortcuts = shortcuts_mod.Shortcuts.init(gpa),
@@ -160,7 +163,7 @@ pub const Ui = struct {
         self.theme = theme;
         self.tree.markDirty(self.tree.root, DirtyFlags.layout_and_paint);
         // Widgets reshape text and repaint from the new theme in `update`.
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| self.tree.markDirty(e.ptr.node, DirtyFlags.layout_and_paint);
         }
@@ -180,7 +183,7 @@ pub const Ui = struct {
     }
 
     pub fn deinit(self: *Ui) void {
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| e.ptr.deinit();
             pool.deinit();
@@ -196,7 +199,7 @@ pub const Ui = struct {
 
     // ---- creating widgets --------------------------------------------------------
 
-    fn poolFor(self: *Ui, comptime W: type) *Pool(W, if (W == CodeEditor or W == Canvas or W == ScrollView or W == SplitView) 16 else 64) {
+    fn poolFor(self: *Ui, comptime W: type) *Pool(W, if (W == CodeEditor or W == Canvas or W == ScrollView or W == SplitView or W == TreeView) 16 else 64) {
         if (W == Button) return &self.buttons;
         if (W == Label) return &self.labels;
         if (W == TextField) return &self.fields;
@@ -204,6 +207,7 @@ pub const Ui = struct {
         if (W == Canvas) return &self.canvases;
         if (W == ScrollView) return &self.scrollers;
         if (W == SplitView) return &self.splitters;
+        if (W == TreeView) return &self.tree_views;
         @compileError("not a widget type: " ++ @typeName(W));
     }
 
@@ -793,7 +797,7 @@ pub const Ui = struct {
 
     /// Run `method` on every live widget.
     fn forEachWidget(self: *Ui, comptime method: []const u8) void {
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| @field(@TypeOf(e.ptr.*), method)(e.ptr);
         }
@@ -806,6 +810,13 @@ pub const Ui = struct {
         const t0 = self.nowNs();
         defer self.pending_update_ns += self.nowNs() -| t0;
         self.checkPinned();
+        // Container widgets that create and destroy child widgets do it first,
+        // so what they destroy is reclaimed below and what they create is
+        // prepared and updated like the rest.
+        {
+            var it = self.tree_views.iterator();
+            while (it.next()) |e| e.ptr.rebuildIfDirty();
+        }
         self.sweep(&self.buttons);
         self.sweep(&self.labels);
         self.sweep(&self.fields);
@@ -813,6 +824,7 @@ pub const Ui = struct {
         self.sweep(&self.canvases);
         self.sweep(&self.scrollers);
         self.sweep(&self.splitters);
+        self.sweep(&self.tree_views);
 
         if (self.shortcuts.count() > 0) self.shortcuts.prune(&self.tree, &self.commands);
 

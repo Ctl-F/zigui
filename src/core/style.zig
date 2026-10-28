@@ -73,6 +73,14 @@ pub const Style = struct {
     wrap: bool = false,
     position: Position = .flow,
     inset: Insets = .{},
+    /// Make this node a grid: its flow children fill rows of this many
+    /// equal-width columns, left to right, then top to bottom. 0 means a flex
+    /// container (`direction`, `wrap`, ...). `gap` is used between rows and
+    /// between columns; `align_items`/`align_self` align a child inside its
+    /// cell (`.stretch` fills it).
+    grid_columns: u16 = 0,
+    /// For a child of a grid: how many columns it spans (at least 1).
+    grid_span: u16 = 1,
 };
 
 /// Stopgap built-in look until painters and themes exist: a filled, optionally

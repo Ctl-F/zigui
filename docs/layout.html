@@ -19,6 +19,8 @@
 <tr><td><code>align_self</code></td><td>null</td><td>Overrides the parent's <code>align_items</code> for this child.</td></tr>
 <tr><td><code>wrap</code></td><td>false</td><td>Continue on a new line when children overflow the main axis.</td></tr>
 <tr><td><code>position</code>, <code>inset</code></td><td><code>.flow</code></td><td>Absolute positioning, see below.</td></tr>
+<tr><td><code>grid_columns</code></td><td>0</td><td>Non-zero makes this node a <a href="#grid">grid</a> with that many equal columns.</td></tr>
+<tr><td><code>grid_span</code></td><td>1</td><td>For a child of a grid: how many columns it spans.</td></tr>
 </table>
 <p><code>Edges</code> lives in <code>zigui.style</code>: <code>const Edges = zigui.style.Edges;</code></p>
 
@@ -52,6 +54,20 @@ const status = try box(root, .{ .height = .px(24), .shrink = 0 });</code></pre>
 <h3>Wrapping a row of chips</h3>
 <pre><code>chips.style = .{ .direction = .row, .wrap = true, .gap = .px(4), .width = .px(300) };</code></pre>
 <div class="warn">Wrap needs a definite main-axis size (a fixed width, a parent that gives one, or <code>.fill</code>). A wrapping container does <b>not</b> yet grow to hold the extra lines when its own size is content-driven; give it an explicit height or let its parent size it.</div>
+
+<h2 id="grid">Grid layout</h2>
+<p>Set <code>grid_columns</code> on a container and its children fill rows of that many <b>equal-width</b> columns, left to right then top to bottom. Each row is as tall as its tallest cell. <code>gap</code> is used between rows and between columns.</p>
+<pre><code>// a two-column toolbox
+const grid = try tree.create(.{ .style = .{ .grid_columns = 2, .gap = .px(4) } });
+try tree.appendChild(parent, grid);
+for (names) |n| _ = try ui.add(zigui.Button, grid, .{ .text = n });</code></pre>
+<ul>
+<li>Column width is (content width - gaps) / columns. The grid needs a definite width (a fixed width, <code>.fill</code>, or a stretching parent). A <code>.fit</code> grid sizes its columns to the widest cell.</li>
+<li>A child with <code>.width = .auto</code> fills its cell when <code>align_items</code> is <code>.stretch</code> (the default); with <code>.start/.center/.end</code> it keeps its natural width and is placed accordingly. A fixed <code>width</code> or <code>height</code> is honored. <code>align_self</code> overrides per child. Margins are respected inside the cell.</li>
+<li><code>grid_span = 2</code> makes a child cover two columns; a child that does not fit the rest of the row starts a new row. Spans larger than the column count are clamped.</li>
+<li>Hidden and absolute children take no cell.</li>
+<li>Not yet: per-column sizes (fixed/fractional tracks), explicit row/column placement, auto-fit column counts, row spans.</li>
+</ul>
 
 <h2>Absolute positioning</h2>
 <p>A child with <code>position = .absolute</code> leaves the flex flow and is placed relative to its parent's box (padding included) using <code>inset</code> (<code>.left .top .right .bottom</code>, each a Length, <code>.auto</code> when unset). With both <code>left</code> and <code>right</code> (or top and bottom) set and the size <code>.auto</code>, the child stretches between them; otherwise it sits at the offset from the near side given, or from the far side if only that one is set. With no inset on an axis it starts at the parent's padding edge.</p>

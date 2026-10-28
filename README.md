@@ -349,6 +349,16 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   container with a draggable divider and resize cursors; child hosts are
   addressed through `content_at` in the registry. The builder edits all of this
   (Layout tab, drag to move absolute children).
+- Grid layout: `Style.grid_columns > 0` makes a container a grid of equal-width
+  columns (rows as tall as their tallest cell, `gap` both ways, `grid_span` for
+  children, `align_items`/`align_self` inside a cell); the builder's palette is
+  one and its Layout tab edits both fields.
+- TreeView (`widgets/tree_view.zig`): items added from code with stable ids,
+  one row node per visible item in an inner `ScrollView`, rebuilt by
+  `Ui.update` before widget sweeps (the rows create and destroy Labels);
+  keyboard and mouse navigation; `rowRect`/`itemAt` for drag and drop. The
+  builder's outline is a TreeView and keeps expansion across rebuilds. Not in
+  the registry (items are data, not props), not virtualized.
 - Workbench (`zig build workbench`): a code editor on the ZON text beside the
   builder, synced both ways; parse errors go to the status line. Examples build
   ReleaseSafe by default (`-Dexample_optimize`) because the software rasterizer
@@ -366,8 +376,8 @@ authority for rationale, and a few items are recommendations, not requirements.
 
 1. The C facade (`src/capi/`), once the core Zig library is done.
 
-Smaller gaps: theme metrics (padding, min sizes) and a painter measure override; layout follow-ups (width-constrained text measure, grid, calc `Length`, wrap
-growing a fit-sized container); draw commands for
+Smaller gaps: theme metrics (padding, min sizes) and a painter measure override; layout follow-ups (width-constrained text measure, grid tracks and explicit
+placement, calc `Length`, wrap growing a fit-sized container); draw commands for
 transforms, image quads, shadows, paths; a model interface for lists and trees;
 more languages, bracket matching, find/replace, soft wrap, and folding in the
 editor; undo/redo and password mode in text fields; HarfBuzz/FreeType backend

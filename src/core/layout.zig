@@ -133,6 +133,11 @@ pub const Layout = struct {
         const pad = resolveEdges(st.padding, null);
         const gap = edge(st.gap, null);
 
+        if (st.grid_columns > 0) {
+            self.measureGrid(tree, h, node, pad, gap);
+            return;
+        }
+
         var main_sum: f32 = 0;
         var cross_max: f32 = 0;
         var n: u32 = 0;
@@ -156,6 +161,44 @@ pub const Layout = struct {
             w = pick(row, main_total, cross_max);
             ht = pick(row, cross_max, main_total);
         }
+        node.measured = .{ .w = w + pad.l + pad.r, .h = ht + pad.t + pad.b };
+    }
+
+    /// A grid's preferred size: columns as wide as the widest cell (per column
+    /// spanned), rows as tall as their tallest cell.
+    fn measureGrid(self: *Layout, tree: *Tree, h: Handle, node: *Node, pad: Pad, gap: f32) void {
+        _ = self;
+        const cols: u16 = node.style.grid_columns;
+        var col_w: f32 = 0;
+        var total_h: f32 = 0;
+        var rows: u32 = 0;
+        var any = false;
+        var it = tree.children(h);
+        while (true) {
+            var row_h: f32 = 0;
+            var used: u16 = 0;
+            var peek = it;
+            while (nextFlow(tree, &peek)) |c| {
+                const cn = tree.get(c).?;
+                const span = cellSpan(cn, cols);
+                if (used > 0 and used + span > cols) break;
+                used += span;
+                it = peek;
+                const o = preferredOuter(cn);
+                col_w = @max(col_w, (o.w - gap * @as(f32, @floatFromInt(span - 1))) / @as(f32, @floatFromInt(span)));
+                row_h = @max(row_h, o.h);
+                any = true;
+            }
+            if (used == 0) break;
+            total_h += row_h;
+            rows += 1;
+        }
+        if (!any) {
+            node.measured = .{ .w = node.intrinsic.w + pad.l + pad.r, .h = node.intrinsic.h + pad.t + pad.b };
+            return;
+        }
+        const w = col_w * @as(f32, @floatFromInt(cols)) + gap * @as(f32, @floatFromInt(cols - 1));
+        const ht = total_h + gap * @as(f32, @floatFromInt(rows - 1));
         node.measured = .{ .w = w + pad.l + pad.r, .h = ht + pad.t + pad.b };
     }
 
@@ -191,7 +234,9 @@ pub const Layout = struct {
         node.dirty.children = false;
         node.dirty.style = false;
         node.dirty.child_layout = false;
-        if (n > 0) try self.placeFlow(tree, h, node, n, pad, cw);
+        if (n > 0) {
+            if (st.grid_columns > 0) self.placeGrid(tree, h, node, pad, cw) else try self.placeFlow(tree, h, node, n, pad, cw);
+        }
         self.placeAbsolute(tree, h, node, pad);
 
         // Descend only where something changed. The decision lives on the
@@ -202,6 +247,86 @@ pub const Layout = struct {
             if (!cn.place_pending) continue;
             cn.place_pending = false;
             try self.place(tree, c, cw);
+        }
+    }
+
+    /// The next flow child after `it`'s position, advancing it.
+    fn nextFlow(tree: *Tree, it: *Tree.ChildIterator) ?Handle {
+        while (it.next()) |c| {
+            if (isFlow(tree.get(c).?)) return c;
+        }
+        return null;
+    }
+
+    fn cellSpan(cn: *const Node, cols: u16) u16 {
+        return @min(@max(cn.style.grid_span, 1), cols);
+    }
+
+    /// Grid placement: equal-width columns, rows as tall as their tallest cell.
+    fn placeGrid(self: *Layout, tree: *Tree, h: Handle, node: *Node, pad: Pad, cw: f32) void {
+        _ = self;
+        const st = node.style;
+        const cols: u16 = st.grid_columns;
+        const gap = edge(st.gap, cw);
+        const colf: f32 = @floatFromInt(cols);
+        const col_w = @max((cw - gap * (colf - 1)) / colf, 0);
+        var y: f32 = pad.t;
+        var it = tree.children(h);
+        while (true) {
+            // Find the row: children until the next one would overflow the columns.
+            var used: u16 = 0;
+            var count: u32 = 0;
+            var row_h: f32 = 0;
+            var scan = it;
+            while (true) {
+                var peek = scan;
+                const c = nextFlow(tree, &peek) orelse break;
+                const cn = tree.get(c).?;
+                const span = cellSpan(cn, cols);
+                if (used > 0 and used + span > cols) break;
+                used += span;
+                count += 1;
+                scan = peek;
+                const m = resolveEdges(cn.style.margin, col_w);
+                const nat = if (cn.style.height == .fill) cn.measured.h else length.resolveClamped(cn.style.height, cn.style.min_height, cn.style.max_height, .{ .parent = null, .content = cn.measured.h }).value;
+                row_h = @max(row_h, nat + m.t + m.b);
+            }
+            if (count == 0) break;
+
+            var col: u16 = 0;
+            for (0..count) |_| {
+                const c = nextFlow(tree, &it).?;
+                const cn = tree.get(c).?;
+                const cs = cn.style;
+                const span = cellSpan(cn, cols);
+                const spanf: f32 = @floatFromInt(span);
+                const cell_w = spanf * col_w + (spanf - 1) * gap;
+                const cell_x = pad.l + @as(f32, @floatFromInt(col)) * (col_w + gap);
+                col += span;
+                const m = resolveEdges(cs.margin, col_w);
+                const inner_w = @max(cell_w - m.l - m.r, 0);
+                const inner_h = @max(row_h - m.t - m.b, 0);
+                const al = cs.align_self orelse st.align_items;
+
+                const wctx: length.ResolveCtx = .{ .parent = inner_w, .content = cn.measured.w };
+                const w = if (cs.width == .fill or (cs.width == .auto and al == .stretch))
+                    length.clampSize(inner_w, minOf(cs.min_width, wctx), maxOf(cs.max_width, wctx))
+                else
+                    length.resolveClamped(cs.width, cs.min_width, cs.max_width, wctx).value;
+                const hctx: length.ResolveCtx = .{ .parent = null, .content = cn.measured.h };
+                const ht = if (cs.height == .fill or (cs.height == .auto and al == .stretch))
+                    length.clampSize(inner_h, minOf(cs.min_height, hctx), maxOf(cs.max_height, hctx))
+                else
+                    length.resolveClamped(cs.height, cs.min_height, cs.max_height, hctx).value;
+                const free = @max(inner_w - w, 0);
+                const dx: f32 = switch (al) {
+                    .start, .stretch => 0,
+                    .center => free / 2,
+                    .end => free,
+                };
+                setRect(tree, h, c, cn, .{ .x = cell_x + m.l + dx, .y = y + m.t, .w = w, .h = ht });
+            }
+            y += row_h + gap;
         }
     }
 
@@ -785,4 +910,47 @@ test "without wrap nothing changes: a single line shrinks as before" {
     try t.run(400, 400);
     try expectRect(t.rect(a), 0, 0, 50, 20);
     try expectRect(t.rect(b), 50, 0, 50, 20);
+}
+
+test "grid: equal columns, rows as tall as their tallest cell, gap between" {
+    var t = try Harness.init(.{});
+    defer t.deinit();
+    const g = try t.add(t.tree.root, .{ .style = .{ .grid_columns = 2, .width = Length.px(210), .height = Length.px(200), .gap = Length.px(10), .padding = Edges.all(5) } });
+    const a = try t.add(g, .{ .style = .{ .height = Length.px(20) } }); // stretches to the column
+    const b = try t.add(g, .{ .style = .{ .height = Length.px(30) } });
+    const c = try t.add(g, .{ .style = .{ .width = Length.px(40), .height = Length.px(10) } });
+    try t.run(400, 300);
+    // Content 200 wide: columns (200 - 10) / 2 = 95.
+    try expectRect(t.rect(a), 5, 5, 95, 20);
+    try expectRect(t.rect(b), 110, 5, 95, 30);
+    // Row 2 starts after the 30px tall first row plus the gap.
+    try expectRect(t.rect(c), 5, 45, 40, 10);
+}
+
+test "grid: spans, alignment, and hidden children" {
+    var t = try Harness.init(.{});
+    defer t.deinit();
+    const g = try t.add(t.tree.root, .{ .style = .{ .grid_columns = 3, .width = Length.px(300), .height = Length.px(200), .align_items = .center } });
+    const wide = try t.add(g, .{ .style = .{ .grid_span = 2, .width = Length.px(100), .height = Length.px(20) } });
+    const one = try t.add(g, .{ .style = .{ .width = Length.px(40), .height = Length.px(20) } });
+    const hidden = try t.add(g, .{ .style = .{ .height = Length.px(99) }, .flags = .{ .hidden = true } });
+    const next = try t.add(g, .{ .style = .{ .grid_span = 3, .width = Length.px(60), .height = Length.px(10) } });
+    _ = hidden;
+    try t.run(400, 300);
+    // Columns are 100 wide: a span of 2 is 200 and centers its 100px child.
+    try expectRect(t.rect(wide), 50, 0, 100, 20);
+    try expectRect(t.rect(one), 230, 0, 40, 20);
+    // The three-column span starts a new row and centers in 300.
+    try expectRect(t.rect(next), 120, 20, 60, 10);
+}
+
+test "a fit-width grid sizes columns to the widest cell" {
+    var t = try Harness.init(.{ .align_items = .start });
+    defer t.deinit();
+    const g = try t.add(t.tree.root, .{ .style = .{ .grid_columns = 2, .width = .fit, .height = .fit, .gap = Length.px(4) } });
+    _ = try t.box(g, 30, 10);
+    _ = try t.box(g, 50, 20);
+    _ = try t.box(g, 20, 10);
+    try t.run(400, 300);
+    try expectRect(t.rect(g), 0, 0, 50 + 4 + 50, 20 + 4 + 10);
 }
