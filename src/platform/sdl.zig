@@ -36,7 +36,13 @@ pub const Event = struct {
         expose,
         mouse_move: struct { x: f32, y: f32 },
         mouse_button: struct { x: f32, y: f32, button: MouseButton, down: bool, clicks: u32 },
-        mouse_wheel: struct { x: f32, y: f32 },
+        /// `x`/`y` are the scroll amounts (positive y is up); `px`/`py` where the
+        /// pointer was when the wheel turned (window coordinates).
+        mouse_wheel: struct { x: f32, y: f32, px: f32, py: f32 },
+        /// The pointer left the window: hover should clear.
+        pointer_left,
+        /// The window lost keyboard focus: a held button's release may never arrive.
+        focus_lost,
         key: struct { key: Key, mods: zigui.keys.Mods, scancode: u32, keycode: u32, down: bool, repeat: bool },
         /// Committed text. Copied out of SDL's buffer, truncated to 63 bytes
         /// at a code point boundary.
@@ -209,7 +215,11 @@ fn translate(ev: *const c.SDL_Event) ?Event {
             .window = ev.motion.windowID,
             .data = .{ .mouse_move = .{ .x = ev.motion.x, .y = ev.motion.y } },
         },
-        c.SDL_EVENT_MOUSE_BUTTON_DOWN, c.SDL_EVENT_MOUSE_BUTTON_UP => return .{
+        c.SDL_EVENT_MOUSE_BUTTON_DOWN, c.SDL_EVENT_MOUSE_BUTTON_UP => {
+            // While a button is held keep receiving the pointer outside the
+            // window, so the release is never lost.
+            _ = c.SDL_CaptureMouse(ev.type == c.SDL_EVENT_MOUSE_BUTTON_DOWN);
+            return .{
             .window = ev.button.windowID,
             .data = .{ .mouse_button = .{
                 .x = ev.button.x,
@@ -218,11 +228,14 @@ fn translate(ev: *const c.SDL_Event) ?Event {
                 .down = ev.type == c.SDL_EVENT_MOUSE_BUTTON_DOWN,
                 .clicks = ev.button.clicks,
             } },
+            };
         },
         c.SDL_EVENT_MOUSE_WHEEL => return .{
             .window = ev.wheel.windowID,
-            .data = .{ .mouse_wheel = .{ .x = ev.wheel.x, .y = ev.wheel.y } },
+            .data = .{ .mouse_wheel = .{ .x = ev.wheel.x, .y = ev.wheel.y, .px = ev.wheel.mouse_x, .py = ev.wheel.mouse_y } },
         },
+        c.SDL_EVENT_WINDOW_MOUSE_LEAVE => return .{ .window = ev.window.windowID, .data = .pointer_left },
+        c.SDL_EVENT_WINDOW_FOCUS_LOST => return .{ .window = ev.window.windowID, .data = .focus_lost },
         c.SDL_EVENT_KEY_DOWN, c.SDL_EVENT_KEY_UP => return .{
             .window = ev.key.windowID,
             .data = .{ .key = .{
@@ -341,18 +354,51 @@ pub fn setCursor(kind: Cursor) void {
 
 /// Next pending event, or null if the queue is empty. Events the toolkit
 /// does not use are skipped.
-pub fn pollEvent() ?Event {
+/// An event read ahead while merging mouse motion; returned by the next call.
+var lookahead: ?c.SDL_Event = null;
+
+fn nextRaw(wait_ms: ?i32) ?c.SDL_Event {
+    if (lookahead) |e| {
+        lookahead = null;
+        return e;
+    }
     var ev: c.SDL_Event = undefined;
-    while (c.SDL_PollEvent(&ev)) {
-        if (translate(&ev)) |e| return e;
+    if (wait_ms) |ms| {
+        if (!c.SDL_WaitEventTimeout(&ev, ms)) return null;
+        return ev;
+    }
+    if (!c.SDL_PollEvent(&ev)) return null;
+    return ev;
+}
+
+/// Translate the next queued event. Runs of mouse motion are merged into the
+/// last one: handling every motion of a fast mouse costs hit tests and hover
+/// work for positions that are never drawn.
+fn nextEvent(wait_ms: ?i32) ?Event {
+    var first = true;
+    while (nextRaw(if (first) wait_ms else null)) |ev| {
+        first = false;
+        var cur = ev;
+        if (cur.type == c.SDL_EVENT_MOUSE_MOTION) {
+            while (nextRaw(null)) |more| {
+                if (more.type == c.SDL_EVENT_MOUSE_MOTION and more.motion.windowID == cur.motion.windowID) {
+                    cur = more;
+                } else {
+                    lookahead = more;
+                    break;
+                }
+            }
+        }
+        if (translate(&cur)) |e| return e;
     }
     return null;
 }
 
+pub fn pollEvent() ?Event {
+    return nextEvent(null);
+}
+
 /// Block until an event arrives or `timeout_ms` passes (negative waits forever).
 pub fn waitEvent(timeout_ms: i32) ?Event {
-    var ev: c.SDL_Event = undefined;
-    if (!c.SDL_WaitEventTimeout(&ev, timeout_ms)) return null;
-    if (translate(&ev)) |e| return e;
-    return pollEvent();
+    return nextEvent(timeout_ms);
 }

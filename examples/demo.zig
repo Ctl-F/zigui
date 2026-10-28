@@ -364,8 +364,13 @@ const Script = struct {
     /// Apply ";"-separated commands to the UI.
     fn run(ui: *Ui, text: []const u8) void {
         var cmds = std.mem.tokenizeScalar(u8, text, ';');
-        while (cmds.next()) |cmd| {
-            const sp = std.mem.indexOfScalar(u8, cmd, ' ') orelse continue;
+        while (cmds.next()) |cmd| runOne(ui, cmd);
+    }
+
+    /// Apply one command (the main loop draws a frame between commands).
+    fn runOne(ui: *Ui, cmd: []const u8) void {
+        {
+            const sp = std.mem.indexOfScalar(u8, cmd, ' ') orelse return;
             const verb = cmd[0..sp];
             const rest = cmd[sp + 1 ..];
             if (std.mem.eql(u8, verb, "type")) {
@@ -390,8 +395,8 @@ const Script = struct {
                 ui.key(k, mods, false, false);
             } else {
                 var nums = std.mem.tokenizeScalar(u8, rest, ' ');
-                const x = std.fmt.parseFloat(f32, nums.next() orelse continue) catch continue;
-                const y = std.fmt.parseFloat(f32, nums.next() orelse continue) catch continue;
+                const x = std.fmt.parseFloat(f32, nums.next() orelse return) catch return;
+                const y = std.fmt.parseFloat(f32, nums.next() orelse return) catch return;
                 if (std.mem.eql(u8, verb, "move")) {
                     ui.pointerMove(x, y);
                 } else if (std.mem.eql(u8, verb, "click")) {
@@ -518,7 +523,7 @@ pub fn main(init: std.process.Init) !void {
     var force = true; // first frame, resize, or expose: redraw even if the tree is clean
 
     const screenshot = init.environ_map.get("ZIGUI_SCREENSHOT");
-    var script: ?[]const u8 = init.environ_map.get("ZIGUI_SCRIPT");
+    var script = std.mem.tokenizeScalar(u8, init.environ_map.get("ZIGUI_SCRIPT") orelse "", ';');
     var frames_drawn: u32 = 0;
 
     var text_input_on = false;
@@ -581,9 +586,8 @@ pub fn main(init: std.process.Init) !void {
         // Headless mode: after the first frame has laid things out, feed the
         // scripted input, then let the loop redraw once more and finish.
         if (screenshot != null) {
-            if (script) |s| {
-                Script.run(&ui, s);
-                script = null;
+            if (script.next()) |cmd| {
+                Script.runOne(&ui, cmd);
                 continue;
             }
             const path = screenshot.?;
@@ -592,6 +596,28 @@ pub fn main(init: std.process.Init) !void {
             const png = try zigui.png.encodeRgba(gpa, img.rgba, img.width, img.height);
             defer gpa.free(png);
             try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = png });
+            {
+                const sm = ui.stats.summary();
+                std.log.info("frames {d}: avg {d:.2} ms, max {d:.2} ms, avg cmds {d}, missed {d}", .{ sm.frames, @as(f64, @floatFromInt(sm.avg_total_ns)) / 1e6, @as(f64, @floatFromInt(sm.max_total_ns)) / 1e6, sm.avg_commands, sm.missed });
+            }
+            {
+                var u: u64 = 0;
+                var l: u64 = 0;
+                var bl: u64 = 0;
+                var sb: u64 = 0;
+                var h: u64 = 0;
+                const n = ui.stats.len();
+                for (0..n) |i| {
+                    const f = ui.stats.recent(i).?;
+                    u += f.update_ns;
+                    l += f.layout_ns;
+                    bl += f.build_ns;
+                    sb += f.submit_ns;
+                    h += f.handler_ns;
+                }
+                const d = @as(f64, @floatFromInt(@max(n, 1))) * 1e6;
+                std.log.info("per frame (ms): update {d:.3} layout {d:.3} build {d:.3} submit {d:.3} handlers {d:.3}", .{ @as(f64, @floatFromInt(u)) / d, @as(f64, @floatFromInt(l)) / d, @as(f64, @floatFromInt(bl)) / d, @as(f64, @floatFromInt(sb)) / d, @as(f64, @floatFromInt(h)) / d });
+            }
             std.log.info("wrote {s}: {d}x{d}, {d} frames drawn, {d} clicks, {d} cards", .{
                 path, img.width, img.height, frames_drawn, state.clicks, state.card_count,
             });
@@ -620,7 +646,9 @@ pub fn main(init: std.process.Init) !void {
                 .resized, .expose => force = true,
                 .mouse_move => |m| ui.pointerMove(m.x, m.y),
                 .mouse_button => |m| ui.pointerButtonEx(m.x, m.y, @backingInt(m.button), m.down, m.clicks),
-                .mouse_wheel => |m| ui.wheel(0, 0, m.x, m.y),
+                .mouse_wheel => |m| ui.wheel(m.px, m.py, m.x, m.y),
+                .pointer_left => ui.pointerLeft(),
+                .focus_lost => ui.pointerCancel(),
                 .text_input => |t| ui.textInput(t.bytes[0..t.len]),
                 .text_editing => |t| ui.textEditing(t.bytes[0..t.len], t.cursor),
                 .key => |k| {

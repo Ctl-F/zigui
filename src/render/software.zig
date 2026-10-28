@@ -146,6 +146,34 @@ const Shape = union(enum) {
     ring: struct { cx: f32, cy: f32, hw: f32, hh: f32, radius: f32, width: f32 },
     segment: struct { a: Vec2, b: Vec2, half_width: f32 },
 
+    /// Pixels whose coverage is exactly 1 (their whole box is inside the shape),
+    /// found without evaluating it per pixel. Conservative: it may be smaller
+    /// than the true interior, never larger.
+    fn core(self: Shape) ?IRect {
+        switch (self) {
+            .rect => |r| return pixelsInside(r.x, r.y, r.right(), r.bottom()),
+            .round_box => |s| {
+                const rmax = @max(@max(s.radii[0], s.radii[1]), @max(s.radii[2], s.radii[3]));
+                const inset = rmax + 1;
+                return pixelsInside(s.cx - s.hw + inset, s.cy - s.hh + inset, s.cx + s.hw - inset, s.cy + s.hh - inset);
+            },
+            else => return null,
+        }
+    }
+
+    /// Pixels whose coverage is exactly 0 deep inside a border ring.
+    fn hole(self: Shape) ?IRect {
+        switch (self) {
+            .ring => |s| {
+                // Beyond the corner arcs' centers as well, so the distance to the
+                // border is at least the width.
+                const inset = s.radius + s.width + 1;
+                return pixelsInside(s.cx - s.hw + inset, s.cy - s.hh + inset, s.cx + s.hw - inset, s.cy + s.hh - inset);
+            },
+            else => return null,
+        }
+    }
+
     fn coverage(self: Shape, px: f32, py: f32) f32 {
         switch (self) {
             .rect => |r| {
@@ -172,6 +200,13 @@ const Shape = union(enum) {
         }
     }
 };
+
+/// The whole pixels inside the float rectangle [x0, x1) x [y0, y1), or null if none.
+fn pixelsInside(x0: f32, y0: f32, x1: f32, y1: f32) ?IRect {
+    if (x1 <= x0 or y1 <= y0) return null;
+    const r: IRect = .{ .x0 = ceilI(x0), .y0 = ceilI(y0), .x1 = floorI(x1), .y1 = floorI(y1) };
+    return if (r.isEmpty()) null else r;
+}
 
 /// Coverage for a pixel center at signed distance `d` from an edge (negative inside).
 fn edgeCoverage(d: f32) f32 {
@@ -301,6 +336,8 @@ const Renderer = struct {
     }
 
     /// Rasterize `shape` over `bounds` (device pixels, already padded for AA).
+    /// Pixels the shape fully covers (`core`) are filled without evaluating it,
+    /// and pixels it leaves untouched (`hole`) are skipped: only edges cost.
     fn draw(self: *Renderer, bounds: IRect, shape: Shape, paint: Paint) void {
         const b = bounds.intersect(self.clip);
         if (b.isEmpty()) return;
@@ -309,13 +346,39 @@ const Renderer = struct {
             else => null,
         };
         const w: usize = self.fb.width;
+        const core = if (shape.core()) |c| c.intersect(b) else null;
+        const hole = if (shape.hole()) |h| h.intersect(b) else null;
 
         var y = b.y0;
         while (y < b.y1) : (y += 1) {
             const py = @as(f32, @floatFromInt(y)) + 0.5;
             const row = self.fb.pixels[@as(usize, @intCast(y)) * w ..][0..w];
+            // This row's special spans (at most one of each applies).
+            var span_x0: i32 = b.x1;
+            var span_x1: i32 = b.x1;
+            var span_core = false;
+            if (core) |c| {
+                if (y >= c.y0 and y < c.y1 and !c.isEmpty()) {
+                    span_x0 = c.x0;
+                    span_x1 = c.x1;
+                    span_core = true;
+                }
+            }
+            if (hole) |h| {
+                if (y >= h.y0 and y < h.y1 and !h.isEmpty()) {
+                    span_x0 = h.x0;
+                    span_x1 = h.x1;
+                    span_core = false;
+                }
+            }
+
             var x = b.x0;
             while (x < b.x1) : (x += 1) {
+                if (x == span_x0 and span_x1 > span_x0) {
+                    if (span_core) self.fillSpan(row, x, span_x1, y, paint, solid);
+                    x = span_x1 - 1; // the loop's increment lands just after the span
+                    continue;
+                }
                 const px = @as(f32, @floatFromInt(x)) + 0.5;
                 const cov = shape.coverage(px, py);
                 if (cov <= 0) continue;
@@ -326,6 +389,27 @@ const Renderer = struct {
                     blend(dst, paintAt(paint, self.scale, px, py), cov * self.opacity);
                 }
             }
+        }
+    }
+
+    /// Paint pixels [x0, x1) of `row` (screen row `y`) with full coverage.
+    fn fillSpan(self: *Renderer, row: []Color, x0: i32, x1: i32, y: i32, paint: Paint, solid: ?Color) void {
+        const lo: usize = @intCast(x0);
+        const hi: usize = @intCast(x1);
+        if (solid) |c| {
+            @memset(row[lo..hi], c);
+            return;
+        }
+        const py = @as(f32, @floatFromInt(y)) + 0.5;
+        if (paint == .color) {
+            const c = paint.color;
+            for (row[lo..hi]) |*dst| blend(dst, c, self.opacity);
+            return;
+        }
+        var x = x0;
+        while (x < x1) : (x += 1) {
+            const px = @as(f32, @floatFromInt(x)) + 0.5;
+            blend(&row[@intCast(x)], paintAt(paint, self.scale, px, py), self.opacity);
         }
     }
 

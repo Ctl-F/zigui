@@ -16,7 +16,7 @@ atlas, fields), commands and scoped shortcuts, a piece-table editor core with
 undo/redo and multi-cursor, a code editor widget with incremental syntax
 highlighting, a software renderer, an SDL3 platform shim, a runtime widget
 schema and registry, generated forms and wizards, ZON UI documents, and a visual
-builder. About 495 tests.
+builder. About 505 tests.
 
 Not built yet (largest first): a renderer backend interface and GPU path, canvas
 and frame scheduling, damage tracking, list/tree widgets and a model interface,
@@ -211,6 +211,27 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   `scrollTo`/`scrollIntoView`, and an `overlay` slot; `Node.overlay_hook` paints
   after children. `Tree.nodeAt` picks the deepest node at a point, interactive or
   not.
+- Event system audit (this is what an audit of the input path found and fixed):
+  the SDL loops delivered wheel events at (0, 0) instead of at the pointer, so
+  wheel scrolling went to whatever was in the window's top-left corner (the shim
+  now reports the pointer position with the wheel); a button release that
+  happened outside the window was lost, leaving the old press "held" so the next
+  click was misrouted (a press while the same button is still held now ends the
+  old press, SDL captures the mouse while a button is down, and
+  `Ui.pointerCancel` handles a lost focus); hover stayed lit after the pointer
+  left the window (`Ui.pointerLeft`); and runs of mouse motion were each
+  hit-tested and dispatched (the shim merges them). A randomized stress test
+  (`core/input_fuzz.zig`: pointer, keys, focus scopes, and listeners that stop
+  propagation, destroy, reparent, hide, and change focusability mid-dispatch)
+  checks tree consistency, closed dispatches, and live-only input state after
+  every step.
+- Rendering cost: the software rasterizer fills the interior of rectangles and
+  rounded boxes and skips the empty middle of borders instead of evaluating
+  every pixel (about 5x faster on large panels), the builder repaints only the
+  edges and handles of its overlays, and the example programs build as
+  ReleaseSafe by default (`-Dexample_optimize=debug` for Debug); a Debug build
+  of software rendering is an order of magnitude slower and not a fair
+  judge of responsiveness.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.

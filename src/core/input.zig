@@ -170,6 +170,28 @@ pub const Input = struct {
         }
     }
 
+    /// End a press without a click (the window lost focus, or a release was
+    /// lost): the pressed node gets its `pointer_up`.
+    pub fn cancelPress(self: *Input, tree: *Tree, x: f32, y: f32) void {
+        if (!tree.isValid(self.pressed)) {
+            self.pressed = Handle.invalid;
+            return;
+        }
+        const target = self.pressed;
+        const button = self.pressed_button;
+        self.pressed = Handle.invalid;
+        self.pressed_button = 0;
+        var up: Event = .{ .kind = .pointer_up, .target = target, .x = x, .y = y, .button = button, .mods = self.mods };
+        dispatch.dispatch(tree, &up);
+    }
+
+    /// The pointer left the window: nothing is hovered any more (a held button
+    /// keeps its capture).
+    pub fn pointerLeft(self: *Input, tree: *Tree) void {
+        if (tree.isValid(self.pressed)) return;
+        self.setHover(tree, null, self.pointer_x, self.pointer_y);
+    }
+
     pub fn pointerMove(self: *Input, tree: *Tree, x: f32, y: f32) void {
         self.pointer_x = x;
         self.pointer_y = y;
@@ -193,6 +215,9 @@ pub const Input = struct {
 
         if (down) {
             self.keyboard = false;
+            // A press while this button is still held means its release never
+            // arrived (it happened outside the window, say): end the old press.
+            if (tree.isValid(self.pressed) and self.pressed_button == button) self.cancelPress(tree, x, y);
             var handled = false;
             if (hit) |h| {
                 if (!tree.isValid(self.pressed)) {

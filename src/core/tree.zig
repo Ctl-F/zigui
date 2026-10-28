@@ -676,6 +676,17 @@ pub const Tree = struct {
         return if (inside) h else null;
     }
 
+    /// Redraw just `rect` (window coordinates) because something drawn there by
+    /// `h` (typically its overlay hook) changed, without dirtying the node: the
+    /// damage is the rect, not the node's whole area. Ancestors learn that a
+    /// descendant needs painting so the frame is not skipped.
+    pub fn invalidateRect(self: *Tree, h: Handle, rect: Rect) void {
+        const node = self.get(h) orelse return;
+        self.damage.add(rect);
+        node.dirty.child_paint = true;
+        self.propagate(node.parent, .paint);
+    }
+
     /// A node moved without changing size or content (layout's doing): redraw
     /// where it now is and tell its ancestors, but leave the node itself clean so
     /// a repaint-boundary recording of it can be replayed at the new position.

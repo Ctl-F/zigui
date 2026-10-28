@@ -119,6 +119,10 @@ const command_titles = [command_count][]const u8{
     "Undo", "Redo", "Save", "Delete node", "Duplicate", "Copy", "Cut", "Paste", "Wrap in box", "Unwrap", "Move up", "Move down", "Indent", "Outdent",
 };
 
+/// Most rectangles the preview overlay can occupy: hover and selection outlines
+/// (four edges each), three handles, and a drop marker.
+const overlay_max = 4 + 4 + 3 + 1;
+
 const Source = enum { preview, outline, palette };
 
 const Press = struct {
@@ -182,6 +186,9 @@ pub const Builder = struct {
     press: ?Press = null,
     dragging: bool = false,
     drop: ?interact.Drop = null,
+    last_overlay: [overlay_max]Rect = undefined,
+    last_overlay_n: usize = 0,
+    last_outline_marker: bool = false,
     resize: ?Resize = null,
     /// Counter for edit gestures (a resize drag): its edits merge into one step.
     gesture: u32 = 0,
@@ -506,9 +513,61 @@ pub const Builder = struct {
         self.repaintOverlays();
     }
 
+    /// The strips the preview overlay paints for the box `r`: its outline (and
+    /// resize handles for a selection). Big boxes only damage their edges.
+    fn outlineStrips(r: Rect, handles: bool, out: []Rect, n: *usize) void {
+        const t: f32 = 6; // stroke plus slack
+        const strips = [4]Rect{
+            .{ .x = r.x - t, .y = r.y - t, .w = r.w + 2 * t, .h = 2 * t },
+            .{ .x = r.x - t, .y = r.bottom() - t, .w = r.w + 2 * t, .h = 2 * t },
+            .{ .x = r.x - t, .y = r.y + t, .w = 2 * t, .h = @max(r.h - 2 * t, 0) },
+            .{ .x = r.right() - t, .y = r.y + t, .w = 2 * t, .h = @max(r.h - 2 * t, 0) },
+        };
+        for (strips) |s| {
+            out[n.*] = s;
+            n.* += 1;
+        }
+        if (handles) {
+            inline for (.{ interact.ResizeHandle.right, interact.ResizeHandle.bottom, interact.ResizeHandle.corner }) |hd| {
+                const hr = interact.handleRect(r, hd);
+                out[n.*] = .{ .x = hr.x - 3, .y = hr.y - 3, .w = hr.w + 6, .h = hr.h + 6 };
+                n.* += 1;
+            }
+        }
+    }
+
+    /// The areas the preview overlay paints now: only those (and where it was
+    /// before) need repainting when hover, selection, or the drop marker changes.
+    fn overlayRects(self: *Builder, out: *[overlay_max]Rect) usize {
+        var n: usize = 0;
+        const inst = self.inst orelse return 0;
+        if (self.hover != 0 and self.hover != self.selected) {
+            if (inst.handleOf(self.hover)) |h| {
+                if (self.ui.tree.absoluteRect(h)) |r| outlineStrips(r, false, out, &n);
+            }
+        }
+        if (self.selectionRect()) |r| outlineStrips(r, self.selected != self.doc().root.uid, out, &n);
+        if (self.drop) |d| {
+            out[n] = .{ .x = d.indicator.x - 4, .y = d.indicator.y - 4, .w = d.indicator.w + 8, .h = d.indicator.h + 8 };
+            n += 1;
+        }
+        return n;
+    }
+
     fn repaintOverlays(self: *Builder) void {
-        self.ui.tree.markDirty(self.preview_host, .{ .paint = true });
-        self.ui.tree.markDirty(self.outline_scroll.node, .{ .paint = true });
+        // What was drawn before is still on screen: repaint it, and where the
+        // overlay goes now.
+        for (self.last_overlay[0..self.last_overlay_n]) |r| self.ui.tree.invalidateRect(self.preview_host, r);
+        var now: [overlay_max]Rect = undefined;
+        const n = self.overlayRects(&now);
+        for (now[0..n]) |r| self.ui.tree.invalidateRect(self.preview_host, r);
+        self.last_overlay = now;
+        self.last_overlay_n = n;
+        // The outline's drop marker lives in its own panel.
+        if (self.dragging or self.drop != null or self.last_outline_marker) {
+            self.ui.tree.markDirty(self.outline_scroll.node, .{ .paint = true });
+            self.last_outline_marker = self.dragging and self.drop != null;
+        }
     }
 
     fn rebuildOutline(self: *Builder) !void {

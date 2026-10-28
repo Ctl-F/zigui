@@ -64,6 +64,11 @@ fn runCommand(b: *Builder, ui: *Ui, cmd: []const u8) void {
             const k = zigui.keys.parseKey(last) orelse .unknown;
             ui.key(k, mods, true, false);
             ui.key(k, mods, false, false);
+        } else if (std.mem.eql(u8, verb, "move")) {
+            var nums = std.mem.tokenizeScalar(u8, rest, ' ');
+            const x = std.fmt.parseFloat(f32, nums.next() orelse return) catch return;
+            const y = std.fmt.parseFloat(f32, nums.next() orelse return) catch return;
+            ui.pointerMove(x, y);
         } else if (std.mem.eql(u8, verb, "click")) {
             var nums = std.mem.tokenizeScalar(u8, rest, ' ');
             const x = std.fmt.parseFloat(f32, nums.next() orelse return) catch return;
@@ -165,7 +170,8 @@ pub fn main(init: std.process.Init) !void {
     var list = zigui.DrawList.init(commands, glyphs);
     var prewarmed_scale: f32 = 0;
     var presenter: WindowPresenter = .{ .window = &window };
-    var renderer = try zigui.software_backend.SoftwareBackend.init(gpa, presenter.presenter());
+    const no_present = init.environ_map.get("ZIGUI_NOPRESENT") != null; // measure rendering without the window's vsync wait
+    var renderer = try zigui.software_backend.SoftwareBackend.init(gpa, if (no_present) null else presenter.presenter());
     defer renderer.deinit();
     const backend = renderer.backend();
 
@@ -187,6 +193,9 @@ pub fn main(init: std.process.Init) !void {
                     ui.text.prewarmAscii(@intCast(f), 15 * scale);
                 }
             }
+            defer if (init.environ_map.get("ZIGUI_TRACE") != null) {
+                if (ui.last_damage) |d| std.log.info("damage {d:.0}x{d:.0} at {d:.0},{d:.0}; cmds {d}", .{ d.w, d.h, d.x, d.y, list.items().len }) else std.log.info("damage full; cmds {d}", .{list.items().len});
+            };
             try ui.renderFrame(backend, &list, .{ .pixel_w = px.w, .pixel_h = px.h, .scale = scale, .clear = zigui.Color.black });
             force = false;
         }
@@ -202,6 +211,26 @@ pub fn main(init: std.process.Init) !void {
             const png = try zigui.png.encodeRgba(gpa, img.rgba, img.width, img.height);
             defer gpa.free(png);
             try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = screenshot.?, .data = png });
+            {
+                var u: u64 = 0;
+                var l: u64 = 0;
+                var bl: u64 = 0;
+                var sb: u64 = 0;
+                var h: u64 = 0;
+                var worst: u64 = 0;
+                const n = ui.stats.len();
+                for (0..n) |i| {
+                    const f = ui.stats.recent(i).?;
+                    u += f.update_ns;
+                    l += f.layout_ns;
+                    bl += f.build_ns;
+                    sb += f.submit_ns;
+                    h += f.handler_ns;
+                    worst = @max(worst, f.total_ns);
+                }
+                const d = @as(f64, @floatFromInt(@max(n, 1))) * 1e6;
+                std.log.info("per frame (ms): update {d:.3} layout {d:.3} build {d:.3} submit {d:.3} handlers {d:.3}; worst total {d:.2}", .{ @as(f64, @floatFromInt(u)) / d, @as(f64, @floatFromInt(l)) / d, @as(f64, @floatFromInt(bl)) / d, @as(f64, @floatFromInt(sb)) / d, @as(f64, @floatFromInt(h)) / d, @as(f64, @floatFromInt(worst)) / 1e6 });
+            }
             std.log.info("wrote {s}: {d}x{d}", .{ screenshot.?, img.width, img.height });
             return;
         }
@@ -224,7 +253,9 @@ pub fn main(init: std.process.Init) !void {
                 .resized, .expose => force = true,
                 .mouse_move => |m| ui.pointerMove(m.x, m.y),
                 .mouse_button => |m| ui.pointerButtonEx(m.x, m.y, @backingInt(m.button), m.down, m.clicks),
-                .mouse_wheel => |m| ui.wheel(0, 0, m.x, m.y),
+                .mouse_wheel => |m| ui.wheel(m.px, m.py, m.x, m.y),
+                .pointer_left => ui.pointerLeft(),
+                .focus_lost => ui.pointerCancel(),
                 .text_input => |t| ui.textInput(t.bytes[0..t.len]),
                 .text_editing => |t| ui.textEditing(t.bytes[0..t.len], t.cursor),
                 .key => |k| {

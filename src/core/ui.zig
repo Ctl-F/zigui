@@ -449,6 +449,16 @@ pub const Ui = struct {
         self.endHandler(t0, "pointer_button");
     }
 
+    /// The window lost focus: end any press in progress without a click.
+    pub fn pointerCancel(self: *Ui) void {
+        self.input.cancelPress(&self.tree, self.input.pointer_x, self.input.pointer_y);
+    }
+
+    /// The pointer left the window: clear hover.
+    pub fn pointerLeft(self: *Ui) void {
+        self.input.pointerLeft(&self.tree);
+    }
+
     pub fn wheel(self: *Ui, x: f32, y: f32, dx: f32, dy: f32) void {
         const t0 = self.nowNs();
         self.input.wheel(&self.tree, x, y, dx, dy);

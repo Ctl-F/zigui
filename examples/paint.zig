@@ -274,7 +274,9 @@ pub fn main(init: std.process.Init) !void {
                 .resized, .expose => force = true,
                 .mouse_move => |m| ui.pointerMove(m.x, m.y),
                 .mouse_button => |m| ui.pointerButtonEx(m.x, m.y, @backingInt(m.button), m.down, m.clicks),
-                .mouse_wheel => |m| ui.wheel(0, 0, m.x, m.y),
+                .mouse_wheel => |m| ui.wheel(m.px, m.py, m.x, m.y),
+                .pointer_left => ui.pointerLeft(),
+                .focus_lost => ui.pointerCancel(),
                 .text_input => |t| ui.textInput(t.bytes[0..t.len]),
                 .text_editing => |t| ui.textEditing(t.bytes[0..t.len], t.cursor),
                 .key => |k| {
