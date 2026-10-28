@@ -3,6 +3,7 @@
 
 const geometry = @import("../core/geometry.zig");
 const Color = geometry.Color;
+const Edges = @import("../core/style.zig").Edges;
 const button = @import("button.zig");
 const label = @import("label.zig");
 const text_field = @import("text_field.zig");
@@ -109,6 +110,9 @@ pub const Theme = struct {
         },
     },
     corner_radius: f32 = 6,
+    /// Inner spacing for buttons and text fields, so rounded corners stay clear of the text.
+    button_padding: Edges = Edges.xy(12, 5),
+    field_padding: Edges = Edges.xy(10, 5),
     focus_ring: Color = Color.rgb(0x9d, 0xc4, 0xff),
     focus_ring_width: f32 = 2,
     /// Font ids from `Ui.addFont`. Both default to font 0 until a mono font is added.

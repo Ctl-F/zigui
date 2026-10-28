@@ -28,7 +28,8 @@ const label = @import("label.zig");
 const Ui = @import("../core/ui.zig").Ui;
 const paint_ctx = @import("../core/paint_ctx.zig");
 const PaintCtx = paint_ctx.PaintCtx;
-const FieldColors = @import("theme.zig").FieldColors;
+const theme_mod = @import("theme.zig");
+const FieldColors = theme_mod.FieldColors;
 const Style = @import("../core/style.zig").Style;
 const Node = @import("../core/tree.zig").Node;
 
@@ -128,6 +129,10 @@ pub const TextField = struct {
         .focus_in, .focus_out, .pointer_enter, .pointer_leave,
         .pointer_down, .pointer_move, .pointer_up, .key_down, .text_input, .text_editing,
     };
+
+    pub fn themePadding(theme: *const theme_mod.Theme) @import("../core/style.zig").Edges {
+        return theme.field_padding;
+    }
 
     pub fn nodeTemplate(style: Style) Node {
         return .{

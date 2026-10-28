@@ -97,6 +97,10 @@ pub const Button = struct {
 
     pub const listened_kinds = [_]event.EventKind{ .pointer_enter, .pointer_leave, .pointer_down, .pointer_up, .click, .focus_in, .focus_out, .key_down };
 
+    pub fn themePadding(theme: *const theme_mod.Theme) @import("../core/style.zig").Edges {
+        return theme.button_padding;
+    }
+
     pub fn nodeTemplate(style: Style) Node {
         return .{ .role = .button, .flags = .{ .focusable = true }, .style = style };
     }

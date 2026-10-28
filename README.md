@@ -347,6 +347,10 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   builder, synced both ways; parse errors go to the status line. Examples build
   ReleaseSafe by default (`-Dexample_optimize`) because the software rasterizer
   is too slow in Debug.
+- Buttons and text fields get inner spacing from the theme (`button_padding`,
+  `field_padding`) when their style has no padding, so rounded corners stay
+  clear of the text. The preview root grows to fill its frame (builder only), so
+  `fill` heights work in a document root.
 
 
 ## Next steps

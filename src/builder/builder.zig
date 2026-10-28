@@ -307,8 +307,10 @@ pub const Builder = struct {
         return h;
     }
 
+    const tool_button_style: Style = .{ .padding = Edges.xy(7, 3), .shrink = 0 };
+
     fn toolbarButton(self: *Builder, parent: Handle, text: []const u8, cmd: Command) !void {
-        const b = try self.ui.add(Button, parent, .{ .text = text, .variant = .flat });
+        const b = try self.ui.add(Button, parent, .{ .text = text, .variant = .flat, .style = tool_button_style });
         b.props.on_click = event.Callback.bind(self, onToolbar);
         self.ui.tree.get(b.node).?.user_data = @ptrFromInt(@as(usize, @intFromEnum(cmd)) + 1);
         self.buttons[@intFromEnum(cmd)] = b;
@@ -331,7 +333,7 @@ pub const Builder = struct {
         _ = try ui.add(Label, bar, .{ .text = "Frame:" });
         const presets = [_][]const u8{ "Fill", "360x640", "800x600", "1280x720" };
         for (presets, 0..) |p, i| {
-            const b = try ui.add(Button, bar, .{ .text = p, .variant = .flat });
+            const b = try ui.add(Button, bar, .{ .text = p, .variant = .flat, .style = tool_button_style });
             b.props.on_click = event.Callback.bind(self, onFramePreset);
             ui.tree.get(b.node).?.user_data = @ptrFromInt(i + 1);
         }
@@ -516,11 +518,22 @@ pub const Builder = struct {
         while (it.next()) |e| {
             if (self.ui.tree.get(e.value_ptr.*)) |n| n.user_data = @ptrFromInt(e.key_ptr.*);
         }
+        self.applyRootDefaults();
         try self.rebuildOutline();
         try self.rebuildInspector();
         self.updateStatus(null);
         self.updateButtons();
         self.repaintOverlays();
+    }
+
+    /// The document root plays the window's role in the preview: it fills the
+    /// frame unless the document says otherwise, so `fill` heights inside it
+    /// have something to fill. Edits to the root diff against the same base.
+    fn applyRootDefaults(self: *Builder) void {
+        const inst = self.inst orelse return;
+        const root = self.doc().root;
+        if (root.style.field("grow") != null) return;
+        if (self.ui.tree.get(inst.root)) |n| n.style.grow = 1;
     }
 
     /// The strips the preview overlay paints for the box `r`: its outline (and
@@ -909,7 +922,10 @@ pub const Builder = struct {
         const n = self.selectedNode();
         var scratch = std.heap.ArenaAllocator.init(self.gpa);
         defer scratch.deinit();
-        const default_style: Style = .{};
+        var default_style: Style = .{};
+        if (self.inst) |inst| {
+            if (inst.root.eql(h)) default_style.grow = 1;
+        }
         const live_style = &self.ui.tree.get(h).?.style;
         const rec = (diff.diff(scratch.allocator(), registry.styleSchema(), live_style, &default_style) catch |e| return self.updateStatus(e)) orelse zon.Value{ .record = &.{} };
         const before = self.editor.version;
@@ -1017,6 +1033,7 @@ pub const Builder = struct {
     const defaults = struct {
         const label_props = ".{ .text = \"Label\" }";
         const button_props = ".{ .text = \"Button\" }";
+        const pane_style = ".{ .direction = .column, .gap = 6, .padding = .{ .left = 8, .top = 8, .right = 8, .bottom = 8 }, .width = .fill, .height = .fill }";
         const box_style = ".{ .direction = .column, .gap = 6, .padding = .{ .left = 8, .top = 8, .right = 8, .bottom = 8 } }";
     };
 
@@ -1050,11 +1067,11 @@ pub const Builder = struct {
         if (std.mem.eql(u8, type_name, "button")) n.props = try zon.parse(a, defaults.button_props, null);
         if (std.mem.eql(u8, type_name, doc_mod.box_type)) n.style = try zon.parse(a, defaults.box_style, null);
         if (std.mem.eql(u8, type_name, "split_view")) {
-            n.style = try zon.parse(a, ".{ .height = 200 }", null);
+            n.style = try zon.parse(a, ".{ .width = .fill, .height = 200 }", null);
             // A split view always has two panes: start them as boxes.
             for (0..2) |_| {
                 const pane = try self.editor.addNode(n.uid, n.children.items.len, doc_mod.box_type);
-                pane.style = try zon.parse(a, defaults.box_style, null);
+                pane.style = try zon.parse(a, defaults.pane_style, null);
             }
         }
         if (multi) try self.editor.endBatch();

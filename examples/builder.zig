@@ -180,6 +180,7 @@ pub fn main(init: std.process.Init) !void {
     var script = std.mem.tokenizeScalar(u8, init.environ_map.get("ZIGUI_SCRIPT") orelse "", ';');
     var text_input_on = false;
     var running = true;
+    const trace_events = init.environ_map.get("ZIGUI_TRACE") != null;
     while (running) {
         _ = ui.tick(sdl.ticks());
         ui.update();
@@ -194,6 +195,7 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
             defer if (init.environ_map.get("ZIGUI_TRACE") != null) {
+                std.log.info("frame px {d}x{d} scale {d:.3}", .{ px.w, px.h, scale });
                 if (ui.last_damage) |d| std.log.info("damage {d:.0}x{d:.0} at {d:.0},{d:.0}; cmds {d}", .{ d.w, d.h, d.x, d.y, list.items().len }) else std.log.info("damage full; cmds {d}", .{list.items().len});
             };
             try ui.renderFrame(backend, &list, .{ .pixel_w = px.w, .pixel_h = px.h, .scale = scale, .clear = zigui.Color.black });
@@ -249,6 +251,7 @@ pub fn main(init: std.process.Init) !void {
         var ev = sdl.waitEvent(timeout);
         _ = ui.tick(sdl.ticks());
         while (ev) |e| : (ev = sdl.pollEvent()) {
+            if (trace_events) std.log.info("event {s} {any}", .{ @tagName(e.data), e.data });
             switch (e.data) {
                 .quit, .close_requested => running = false,
                 .resized, .expose => force = true,

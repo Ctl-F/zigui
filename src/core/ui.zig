@@ -246,7 +246,17 @@ pub const Ui = struct {
         node.widget = w;
         node.widget_type = typeTag(W);
         try w.apply(opts);
+        // Widgets that draw a rounded box get the theme's inner spacing unless
+        // the caller chose a padding (all zero means unset).
+        if (comptime @hasDecl(W, "themePadding")) {
+            const st = &self.tree.get(node_h).?.style;
+            if (isNoPadding(st.padding)) st.padding = W.themePadding(&self.theme);
+        }
         return w;
+    }
+
+    fn isNoPadding(e: @import("style.zig").Edges) bool {
+        return std.meta.eql(e, .{});
     }
 
     // ---- shared widget helpers (used by widget implementations) ---------------------

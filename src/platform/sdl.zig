@@ -210,7 +210,15 @@ fn translate(ev: *const c.SDL_Event) ?Event {
             .window = ev.window.windowID,
             .data = .{ .resized = .{ .w = @intCast(@max(ev.window.data1, 1)), .h = @intCast(@max(ev.window.data2, 1)) } },
         },
-        c.SDL_EVENT_WINDOW_EXPOSED => return .{ .window = ev.window.windowID, .data = .expose },
+        // Anything that can change what is on screen or how it maps (the
+        // compositor may configure the surface after the first frame): redraw.
+        c.SDL_EVENT_WINDOW_EXPOSED,
+        c.SDL_EVENT_WINDOW_SHOWN,
+        c.SDL_EVENT_WINDOW_RESIZED,
+        c.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
+        c.SDL_EVENT_WINDOW_FOCUS_GAINED,
+        c.SDL_EVENT_WINDOW_MOUSE_ENTER,
+        => return .{ .window = ev.window.windowID, .data = .expose },
         c.SDL_EVENT_MOUSE_MOTION => return .{
             .window = ev.motion.windowID,
             .data = .{ .mouse_move = .{ .x = ev.motion.x, .y = ev.motion.y } },
