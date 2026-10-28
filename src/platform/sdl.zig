@@ -66,6 +66,14 @@ pub fn lastError() []const u8 {
     return std.mem.span(c.SDL_GetError());
 }
 
+/// Map the window and wait for the compositor to finish configuring it before
+/// a renderer attaches a buffer. Wayland compositors may otherwise not route
+/// pointer input to a window until its first resize.
+fn showAndSync(handle: *c.SDL_Window) void {
+    _ = c.SDL_ShowWindow(handle);
+    _ = c.SDL_SyncWindow(handle);
+}
+
 pub const Window = struct {
     handle: *c.SDL_Window,
     /// Null for a window made with `createGpu` (a GPU device owns its drawing).
@@ -79,6 +87,7 @@ pub const Window = struct {
         const handle = c.SDL_CreateWindow(title.ptr, @intCast(logical_w), @intCast(logical_h), flags) orelse
             return error.WindowFailed;
         errdefer c.SDL_DestroyWindow(handle);
+        showAndSync(handle);
         const renderer = c.SDL_CreateRenderer(handle, null) orelse return error.RendererFailed;
         // Pace presents to the display so continuous canvases do not spin.
         _ = c.SDL_SetRenderVSync(renderer, 1);
@@ -91,6 +100,7 @@ pub const Window = struct {
         const flags = c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY;
         const handle = c.SDL_CreateWindow(title.ptr, @intCast(logical_w), @intCast(logical_h), flags) orelse
             return error.WindowFailed;
+        showAndSync(handle);
         return .{ .handle = handle, .renderer = null };
     }
 
