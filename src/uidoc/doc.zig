@@ -166,6 +166,12 @@ pub const Doc = struct {
         return error.InvalidDocument;
     }
 
+    /// A detached node (with its subtree) built from a ZON node record (what
+    /// `nodeToValue` writes). Attach it with `insert`.
+    pub fn parseNode(self: *Doc, v: zon.Value, problem: ?*Problem) !*Node {
+        return self.readNode(v, problem);
+    }
+
     fn readNode(self: *Doc, v: zon.Value, problem: ?*Problem) !*Node {
         const fs = v.fields() orelse return fail(problem, "a node is a record", "");
         const type_v = v.field("type") orelse return fail(problem, "node is missing .type", "");
@@ -223,6 +229,26 @@ pub const Doc = struct {
     fn isEmpty(v: zon.Value) bool {
         const fs = v.fields() orelse return true;
         return fs.len == 0;
+    }
+
+    /// The ZON record for `n` and its subtree.
+    pub fn nodeToValue(self: *Doc, n: *const Node) Allocator.Error!zon.Value {
+        return self.nodeValue(n);
+    }
+
+    /// A detached copy of `n` and its subtree with fresh uids. Ids are dropped
+    /// (they are meant to be unique).
+    pub fn cloneNode(self: *Doc, n: *const Node) Allocator.Error!*Node {
+        const c = try self.newNode(n.type_name);
+        c.style = n.style;
+        c.props = n.props;
+        c.on = n.on;
+        for (n.children.items) |child| {
+            const cc = try self.cloneNode(child);
+            cc.parent = c;
+            try c.children.append(self.alloc(), cc);
+        }
+        return c;
     }
 
     fn nodeValue(self: *Doc, n: *const Node) Allocator.Error!zon.Value {

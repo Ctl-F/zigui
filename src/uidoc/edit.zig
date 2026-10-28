@@ -20,6 +20,7 @@ pub const Which = enum { style, props };
 
 pub const Error = error{ NoSuchNode, InvalidMove, CannotEditRoot } || Allocator.Error;
 
+
 const Command = union(enum) {
     set_record: struct { uid: u32, which: Which, old: zon.Value, new: zon.Value },
     set_id: struct { uid: u32, old: []const u8, new: []const u8 },
@@ -27,6 +28,8 @@ const Command = union(enum) {
     insert: struct { parent: u32, index: usize, node: *Node },
     remove: struct { node: *Node, parent: u32, index: usize },
     move: struct { node: *Node, from_parent: u32, from_index: usize, to_parent: u32, to_index: usize },
+    /// Several commands that undo and redo as one step.
+    batch: []const Command,
 };
 
 pub const Editor = struct {
@@ -41,12 +44,15 @@ pub const Editor = struct {
     /// The single top-level field that edit changed (edits to other fields do
     /// not merge into it), or null if it changed several.
     coalesce_key: ?[]const u8 = null,
+    batch_depth: u32 = 0,
+    batch_cmds: std.ArrayListUnmanaged(Command) = .empty,
 
     pub fn init(gpa: Allocator, doc: Doc) Editor {
         return .{ .gpa = gpa, .doc = doc };
     }
 
     pub fn deinit(self: *Editor) void {
+        self.batch_cmds.deinit(self.gpa);
         self.undo_stack.deinit(self.gpa);
         self.redo_stack.deinit(self.gpa);
         self.doc.deinit();
@@ -89,6 +95,7 @@ pub const Editor = struct {
                 _ = self.doc.detach(c.node);
                 try self.doc.insert(try self.node(c.to_parent), c.to_index, c.node);
             },
+            .batch => |cmds| for (cmds) |sub| try self.apply(sub),
         }
     }
 
@@ -109,10 +116,26 @@ pub const Editor = struct {
                 _ = self.doc.detach(c.node);
                 try self.doc.insert(try self.node(c.from_parent), c.from_index, c.node);
             },
+            .batch => |cmds| {
+                var i = cmds.len;
+                while (i > 0) {
+                    i -= 1;
+                    try self.revert(cmds[i]);
+                }
+            },
         }
     }
 
     fn exec(self: *Editor, cmd: Command) Error!void {
+        if (self.batch_depth > 0) {
+            try self.batch_cmds.ensureUnusedCapacity(self.gpa, 1);
+            try self.apply(cmd);
+            self.batch_cmds.appendAssumeCapacity(cmd);
+            self.redo_stack.clearRetainingCapacity();
+            self.version +%= 1;
+            self.coalescing = false;
+            return;
+        }
         // Make room first so a failure leaves nothing half-done.
         try self.undo_stack.ensureUnusedCapacity(self.gpa, 1);
         try self.apply(cmd);
@@ -140,6 +163,37 @@ pub const Editor = struct {
         self.version +%= 1;
         self.coalescing = false;
         return true;
+    }
+
+    // ---- batches ----
+
+    /// Start grouping edits: everything done until the matching `endBatch`
+    /// undoes and redoes as one step. Batches nest (only the outermost counts).
+    pub fn beginBatch(self: *Editor) void {
+        self.batch_depth += 1;
+    }
+
+    /// Finish a batch. If one of its edits failed, call `abortBatch` instead.
+    pub fn endBatch(self: *Editor) Error!void {
+        std.debug.assert(self.batch_depth > 0);
+        self.batch_depth -= 1;
+        if (self.batch_depth > 0 or self.batch_cmds.items.len == 0) return;
+        const cmds = try self.doc.alloc().dupe(Command, self.batch_cmds.items);
+        self.batch_cmds.clearRetainingCapacity();
+        try self.undo_stack.append(self.gpa, .{ .batch = cmds });
+    }
+
+    /// Undo whatever the open batch did so far and close it.
+    pub fn abortBatch(self: *Editor) void {
+        std.debug.assert(self.batch_depth > 0);
+        self.batch_depth -= 1;
+        var i = self.batch_cmds.items.len;
+        while (i > 0) {
+            i -= 1;
+            self.revert(self.batch_cmds.items[i]) catch {};
+        }
+        self.batch_cmds.clearRetainingCapacity();
+        if (self.batch_depth == 0) self.version +%= 1;
     }
 
     // ---- the editing operations ----
@@ -178,6 +232,78 @@ pub const Editor = struct {
         const at = @min(to_index, count);
         if (same and at == from_index) return;
         try self.exec(.{ .move = .{ .node = n, .from_parent = parentUid(n), .from_index = from_index, .to_parent = to_parent, .to_index = at } });
+    }
+
+    /// Copy `uid` and its subtree and put the copy right after it; returns the copy.
+    pub fn duplicateNode(self: *Editor, uid: u32) Error!*Node {
+        const n = try self.node(uid);
+        if (n == self.doc.root) return error.CannotEditRoot;
+        const copy = try self.doc.cloneNode(n);
+        try self.insertNode(parentUid(n), n.indexInParent().? + 1, copy);
+        return copy;
+    }
+
+    /// Put `uid` inside a new node of `type_name` (a box) where it was; returns
+    /// the wrapper. One undo step.
+    pub fn wrapNode(self: *Editor, uid: u32, type_name: []const u8) Error!*Node {
+        const n = try self.node(uid);
+        if (n == self.doc.root) return error.CannotEditRoot;
+        const parent = parentUid(n);
+        const index = n.indexInParent().?;
+        self.beginBatch();
+        errdefer self.abortBatch();
+        const w = try self.addNode(parent, index, type_name);
+        try self.moveNode(uid, w.uid, 0);
+        try self.endBatch();
+        return w;
+    }
+
+    /// Replace `uid` by its children, in place. One undo step.
+    pub fn unwrapNode(self: *Editor, uid: u32) Error!void {
+        const n = try self.node(uid);
+        if (n == self.doc.root) return error.CannotEditRoot;
+        const parent = parentUid(n);
+        const at = n.indexInParent().?;
+        self.beginBatch();
+        errdefer self.abortBatch();
+        var moved: usize = 0;
+        while (n.children.items.len > 0) {
+            // The first child goes right where the wrapper is, pushing it along.
+            try self.moveNode(n.children.items[0].uid, parent, at + moved);
+            moved += 1;
+        }
+        try self.removeNode(uid);
+        try self.endBatch();
+    }
+
+    /// Move `uid` into the end of the sibling before it, if that is a box.
+    pub fn indentNode(self: *Editor, uid: u32) Error!void {
+        const n = try self.node(uid);
+        if (n == self.doc.root) return error.CannotEditRoot;
+        const i = n.indexInParent().?;
+        if (i == 0) return error.InvalidMove;
+        const prev = n.parent.?.children.items[i - 1];
+        if (!std.mem.eql(u8, prev.type_name, doc_mod.box_type)) return error.InvalidMove;
+        try self.moveNode(uid, prev.uid, prev.children.items.len);
+    }
+
+    /// Move `uid` out of its parent, to just after it.
+    pub fn outdentNode(self: *Editor, uid: u32) Error!void {
+        const n = try self.node(uid);
+        if (n == self.doc.root) return error.CannotEditRoot;
+        const p = n.parent.?;
+        const gp = p.parent orelse return error.InvalidMove;
+        try self.moveNode(uid, gp.uid, p.indexInParent().? + 1);
+    }
+
+    /// Insert a node built from a ZON record (a pasted subtree) under `parent`.
+    pub fn pasteValue(self: *Editor, parent: u32, index: usize, value: zon.Value) Error!*Node {
+        const n = self.doc.parseNode(value, null) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidMove,
+        };
+        try self.insertNode(parent, index, n);
+        return n;
     }
 
     /// Replace a node's style or props record. Consecutive calls for the same
@@ -429,4 +555,146 @@ test "an edit that fails to allocate leaves the document unchanged" {
             try testing.expectEqual(@as(usize, 0), e.doc.root.children.items.len);
         };
     }
+}
+
+fn shape(e: *Editor, n: *Node, out: *std.ArrayListUnmanaged(u8)) !void {
+    try out.print(testing.allocator, "{s}", .{n.type_name});
+    if (n.children.items.len > 0) {
+        try out.append(testing.allocator, '(');
+        for (n.children.items, 0..) |c, i| {
+            if (i > 0) try out.append(testing.allocator, ',');
+            try shape(e, c, out);
+        }
+        try out.append(testing.allocator, ')');
+    }
+}
+
+/// The tree as "box(label,box(button))".
+fn treeShape(e: *Editor) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(testing.allocator);
+    try shape(e, e.doc.root, &out);
+    return out.toOwnedSlice(testing.allocator);
+}
+
+fn expectShape(e: *Editor, want: []const u8) !void {
+    const got = try treeShape(e);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(want, got);
+}
+
+test "a batch undoes and redoes as one step, and aborting rolls back" {
+    var e = try newEditor();
+    defer e.deinit();
+    const root = e.doc.root.uid;
+    e.beginBatch();
+    _ = try e.addNode(root, 0, "label");
+    _ = try e.addNode(root, 1, "button");
+    try e.endBatch();
+    try expectShape(&e, "box(label,button)");
+    try testing.expectEqual(@as(usize, 1), e.undo_stack.items.len);
+    _ = try e.undo();
+    try expectShape(&e, "box");
+    _ = try e.redo();
+    try expectShape(&e, "box(label,button)");
+
+    e.beginBatch();
+    _ = try e.addNode(root, 2, "box");
+    try e.removeNode(e.doc.root.children.items[0].uid);
+    try expectShape(&e, "box(button,box)");
+    e.abortBatch();
+    try expectShape(&e, "box(label,button)");
+    try testing.expectEqual(@as(usize, 1), e.undo_stack.items.len);
+
+    // Nested batches join the outer one; an empty batch records nothing.
+    e.beginBatch();
+    e.beginBatch();
+    _ = try e.addNode(root, 0, "label");
+    try e.endBatch();
+    try e.endBatch();
+    e.beginBatch();
+    try e.endBatch();
+    try testing.expectEqual(@as(usize, 2), e.undo_stack.items.len);
+}
+
+test "duplicate copies a subtree with fresh uids and no ids" {
+    var e = try newEditor();
+    defer e.deinit();
+    const root = e.doc.root.uid;
+    const box = try e.addNode(root, 0, "box");
+    const label = try e.addNode(box.uid, 0, "label");
+    try e.setId(box.uid, "panel");
+    try e.setRecord(label.uid, .props, try rec(&e, ".{ .text = \"hi\" }"));
+    const copy = try e.duplicateNode(box.uid);
+    try expectShape(&e, "box(box(label),box(label))");
+    try testing.expect(copy != box and copy.uid != box.uid);
+    try testing.expectEqual(@as(usize, 1), copy.indexInParent().? - box.indexInParent().?);
+    try testing.expectEqualStrings("", copy.id);
+    try testing.expectEqualStrings("hi", copy.children.items[0].props.field("text").?.string);
+    try testing.expect(copy.children.items[0].uid != label.uid);
+    // Editing the copy leaves the original alone.
+    try e.setRecord(copy.children.items[0].uid, .props, try rec(&e, ".{ .text = \"changed\" }"));
+    try testing.expectEqualStrings("hi", label.props.field("text").?.string);
+    _ = try e.undo();
+    _ = try e.undo();
+    try expectShape(&e, "box(box(label))");
+    try testing.expectError(error.CannotEditRoot, e.duplicateNode(root));
+}
+
+test "wrap puts a node in a new box in place; unwrap puts the children back" {
+    var e = try newEditor();
+    defer e.deinit();
+    const root = e.doc.root.uid;
+    const a = try e.addNode(root, 0, "label");
+    const b = try e.addNode(root, 1, "button");
+    const c = try e.addNode(root, 2, "label");
+    const w = try e.wrapNode(b.uid, "box");
+    try expectShape(&e, "box(label,box(button),label)");
+    try testing.expect(b.parent == w and w.indexInParent().? == 1);
+    _ = try e.undo();
+    try expectShape(&e, "box(label,button,label)");
+    _ = try e.redo();
+
+    // Unwrapping restores the order, even for a wrapper with several children.
+    const d = try e.addNode(w.uid, 1, "label");
+    try e.unwrapNode(w.uid);
+    try expectShape(&e, "box(label,button,label,label)");
+    try testing.expect(e.doc.root.children.items[1] == b and e.doc.root.children.items[2] == d and e.doc.root.children.items[3] == c);
+    _ = try e.undo();
+    try expectShape(&e, "box(label,box(button,label),label)");
+    try testing.expect(w.parent == e.doc.root and b.parent == w);
+    _ = a;
+    try testing.expectError(error.CannotEditRoot, e.wrapNode(root, "box"));
+    try testing.expectError(error.CannotEditRoot, e.unwrapNode(root));
+}
+
+test "indent and outdent change nesting without changing order" {
+    var e = try newEditor();
+    defer e.deinit();
+    const root = e.doc.root.uid;
+    _ = try e.addNode(root, 0, "label");
+    const box = try e.addNode(root, 1, "box");
+    const x = try e.addNode(root, 2, "button");
+    try e.indentNode(x.uid);
+    try expectShape(&e, "box(label,box(button))");
+    try testing.expect(x.parent == box);
+    try e.outdentNode(x.uid);
+    try expectShape(&e, "box(label,box,button)");
+    try testing.expectError(error.InvalidMove, e.outdentNode(box.uid)); // its parent is the root
+    try testing.expectError(error.InvalidMove, e.indentNode(e.doc.root.children.items[0].uid)); // nothing before it
+    try testing.expectError(error.InvalidMove, e.indentNode(box.uid)); // the previous sibling is a label
+    _ = try e.undo();
+    try expectShape(&e, "box(label,box(button))");
+}
+
+test "pasting a ZON record inserts a subtree with fresh uids" {
+    var e = try newEditor();
+    defer e.deinit();
+    const root = e.doc.root.uid;
+    const pasted = try e.pasteValue(root, 0, try rec(&e, ".{ .type = \"box\", .children = .{ .{ .type = \"label\", .props = .{ .text = \"p\" } } } }"));
+    try expectShape(&e, "box(box(label))");
+    try testing.expectEqualStrings("p", pasted.children.items[0].props.field("text").?.string);
+    try testing.expectError(error.InvalidMove, e.pasteValue(root, 0, try rec(&e, ".{ .nonsense = 1 }")));
+    _ = try e.undo();
+    try expectShape(&e, "box");
 }
