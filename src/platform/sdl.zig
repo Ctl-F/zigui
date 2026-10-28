@@ -89,6 +89,7 @@ pub const Window = struct {
         errdefer c.SDL_DestroyWindow(handle);
         showAndSync(handle);
         const renderer = c.SDL_CreateRenderer(handle, null) orelse return error.RendererFailed;
+        std.log.info("sdl: video driver {s}, renderer {s}", .{ std.mem.span(@as([*:0]const u8, c.SDL_GetCurrentVideoDriver() orelse @ptrCast("?"))), std.mem.span(@as([*:0]const u8, c.SDL_GetRendererName(renderer) orelse @ptrCast("?"))) });
         // Pace presents to the display so continuous canvases do not spin.
         _ = c.SDL_SetRenderVSync(renderer, 1);
         return .{ .handle = handle, .renderer = renderer };
