@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>SplitView - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>SplitView</h1>
+<p>Two panes separated by a draggable divider. The first pane is <code>first_size</code> pixels along the split axis; the second takes the rest. Dragging the divider changes <code>first_size</code> within the minimums. The resize cursor shows over the divider.</p>
+<pre><code>const split = try ui.add(zigui.SplitView, parent, .{
+    .style = .{ .grow = 1 },
+    .first_size = 260,
+});
+_ = try ui.add(zigui.Label, split.firstNode(), .{ .text = "Files" });
+_ = try ui.add(zigui.CodeEditor, split.secondNode(), .{ .style = .{ .grow = 1 } });</code></pre>
+<p>The pane nodes are columns. To make content fill a pane, give it <code>.width = .fill</code> and <code>.height = .fill</code> (or <code>.grow = 1</code>).</p>
+<h2>Options</h2>
+<table>
+<tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>style</code></td><td><code>.{}</code></td><td>Layout of the whole split. Give it a size: <code>.fill</code>/<code>.grow = 1</code>, or a fixed height.</td></tr>
+<tr><td><code>vertical</code></td><td>false</td><td>false: panes side by side; true: stacked.</td></tr>
+<tr><td><code>first_size</code></td><td>240</td><td>Size of the first pane in pixels.</td></tr>
+<tr><td><code>min_first</code>, <code>min_second</code></td><td>48</td><td>Minimum pane sizes.</td></tr>
+<tr><td><code>divider_size</code></td><td>6</td><td></td></tr>
+</table>
+<h2>Methods</h2>
+<ul><li><code>firstNode()</code>, <code>secondNode()</code>, <code>setFirstSize(px)</code></li></ul>
+<h2>Document</h2>
+<p>A <code>split_view</code> has two children: child 0 is the first pane, child 1 the second.</p>
+<pre><code>.{ .type = "split_view", .props = .{ .first_size = 200 }, .style = .{ .width = .fill, .height = .fill },
+   .children = .{ .{ .type = "box" }, .{ .type = "box" } } }</code></pre>
+</main><script src="../nav.js"></script></body></html>

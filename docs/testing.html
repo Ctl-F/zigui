@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Testing and debugging - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Testing and debugging</h1>
+
+<h2>Unit tests</h2>
+<pre><code>zig build test             # about 500 tests, no window or SDL needed
+zig build check-boundary   # part of test: no C-convention code in the core</code></pre>
+<p><code>zig build test</code> prints <code>ui_check</code> warnings and a "failed command" line on purpose (shadow-checker tests); judge success by the exit status and the final test count, not those lines. Tests run against a headless harness with a synthetic test font, so layout and painting are deterministic. A good pattern for a new widget: create a <code>Ui</code>, add the widget, feed events (<code>ui.pointerMove</code>, <code>ui.textInput</code>), call <code>ui.update()</code> and a frame, and assert on <code>out</code>, node rectangles, or draw-list commands. See the tests at the bottom of <code>src/core/ui.zig</code> and <code>src/builder/builder.zig</code>.</p>
+
+<h2>Headless example runs</h2>
+<p>The examples run without a display and can take screenshots:</p>
+<pre><code>SDL_VIDEODRIVER=dummy ZIGUI_SCREENSHOT=out.png ./zig-out/bin/demo
+SDL_VIDEODRIVER=dummy ZIGUI_SCRIPT="click 700 22;type lay;key enter" ZIGUI_SCREENSHOT=out.png ./zig-out/bin/demo</code></pre>
+<p>Script verbs: <code>move X Y</code>, <code>click X Y</code>, <code>press X Y</code>, <code>type TEXT</code>, <code>key [ctrl+][shift+]NAME</code>. The builder and workbench add verbs such as <code>add WIDGET</code> and <code>select N</code> (see <code>runCommand</code> in their sources). Script commands run one per frame, separated by <code>;</code>.</p>
+
+<h2>Environment variables</h2>
+<table>
+<tr><th>Variable</th><th>Effect</th></tr>
+<tr><td><code>ZIGUI_FONT</code>, <code>ZIGUI_MONO_FONT</code></td><td>Font file paths.</td></tr>
+<tr><td><code>ZIGUI_SCREENSHOT=file.png</code></td><td>Write the final frame and exit.</td></tr>
+<tr><td><code>ZIGUI_SCRIPT</code></td><td>Scripted input (above).</td></tr>
+<tr><td><code>ZIGUI_TRACE=1</code></td><td>Examples print damage rectangles per frame and (builder) every input event.</td></tr>
+<tr><td><code>ZIGUI_NOPRESENT=1</code></td><td>Render without presenting, to measure rendering cost without the vsync wait.</td></tr>
+</table>
+
+<h2>Build options</h2>
+<ul>
+<li><code>-Dui_checks=true|false</code>: the shadow checker that warns when you change a prop without marking it dirty. On in Debug and ReleaseSafe, off otherwise. <code>-Dui_strict=true</code> makes it panic.</li>
+<li><code>-Dexample_optimize=debug|safe|fast|small</code>: optimization for the examples (default safe).</li>
+</ul>
+
+<h2>Performance</h2>
+<p><code>ui.stats</code> keeps recent per-frame timings (update, layout, build, submit, handlers); the builder and demo print them in headless runs. Software rendering in Debug is an order of magnitude slower than ReleaseSafe: judge responsiveness in an optimized build.</p>
+</main><script src="nav.js"></script></body></html>

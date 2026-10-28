@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Button - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>Button</h1>
+<p>A clickable button with hover, pressed, focus, and disabled states. Enter and Space activate it when focused.</p>
+<pre><code>const save = try ui.add(zigui.Button, parent, .{
+    .text = "Save",
+    .variant = .primary,
+    .on_click = .bind(&amp;app, App.save),
+});</code></pre>
+<h2>Options</h2>
+<table>
+<tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>style</code></td><td><code>.{}</code></td><td>Layout. With no padding set the theme's <code>button_padding</code> applies.</td></tr>
+<tr><td><code>text</code></td><td><code>""</code></td><td>Label, copied.</td></tr>
+<tr><td><code>variant</code></td><td><code>.normal</code></td><td><code>.normal .primary .danger .flat</code>: which color set from the theme.</td></tr>
+<tr><td><code>enabled</code></td><td>true</td><td>A disabled button ignores clicks and is skipped by Tab.</td></tr>
+<tr><td><code>text_align</code></td><td><code>.center</code></td><td>Label alignment.</td></tr>
+<tr><td><code>on_click</code></td><td>null</td><td>Callback; runs for pointer clicks and keyboard activation.</td></tr>
+<tr><td><code>command</code></td><td>null</td><td>Name of a command to run instead. The button is enabled only while the command is.</td></tr>
+<tr><td><code>colors</code></td><td>null</td><td>Override the theme's <code>ButtonColors</code> for this button.</td></tr>
+<tr><td><code>painter</code></td><td>null</td><td>Override the theme's button painter.</td></tr>
+</table>
+<h2>Out</h2>
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>clicked</code></td><td>Clicked this frame (cleared by <code>ui.endFrame()</code>).</td></tr>
+<tr><td><code>click_count</code></td><td>Total clicks since creation.</td></tr>
+<tr><td><code>hovered</code>, <code>pressed</code>, <code>focused</code>, <code>focus_visible</code></td><td>Current state.</td></tr>
+</table>
+<h2>Methods</h2>
+<ul>
+<li><code>setText</code>, <code>setEnabled</code>, <code>setVariant</code>, <code>setPainter</code>, <code>setCommand(name)</code></li>
+<li><code>colors()</code>: the colors currently in effect.</li>
+</ul>
+<h2>Examples</h2>
+<h3>A button tied to a command (shared with a shortcut)</h3>
+<pre><code>_ = try ui.registerCommand("file.save", .{ .title = "Save", .run = .bind(&amp;app, App.save) });
+try ui.bindShortcut("mod+s", "file.save", .app, null);
+_ = try ui.add(zigui.Button, toolbar, .{ .text = "Save", .command = "file.save" });</code></pre>
+<h3>A colored swatch button</h3>
+<pre><code>b.props.colors = .{ .normal = c, .hover = c, .pressed = c, .disabled = c, .border = zigui.Color.white, .border_width = 1 };</code></pre>
+<h2>Document</h2>
+<pre><code>.{ .type = "button", .id = "ok", .props = .{ .text = "OK", .variant = .primary }, .on = .{ .click = "confirm" } }</code></pre>
+</main><script src="../nav.js"></script></body></html>

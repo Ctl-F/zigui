@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Containers - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>Containers (box)</h1>
+<p>A plain container is a node with no widget: a <code>Style</code> that arranges its children and an optional <code>Visual</code> background. In UI documents its type name is <code>"box"</code>.</p>
+<pre><code>const panel = try ui.tree.create(.{
+    .style = .{ .direction = .column, .gap = .px(6), .padding = zigui.style.Edges.all(8) },
+    .visual = .{ .background = zigui.Color.rgb(34, 36, 41), .border_width = 1,
+                 .border_color = zigui.Color.rgb(64, 68, 76), .radius = 4 },
+});
+try ui.tree.appendChild(parent, panel);
+_ = try ui.add(zigui.Label, panel, .{ .text = "Inside the panel" });</code></pre>
+<h2>Useful node fields</h2>
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>style</code></td><td>Layout, see <a href="../layout.html">Layout</a>.</td></tr>
+<tr><td><code>visual</code></td><td>Background, border, corner radius.</td></tr>
+<tr><td><code>flags.clip_children</code></td><td>Clip children to the node's rectangle when painting.</td></tr>
+<tr><td><code>role</code>, <code>label</code></td><td>Accessibility; set the label with <code>ui.tree.setLabel</code>.</td></tr>
+<tr><td><code>cursor</code></td><td>Mouse cursor shape over the node.</td></tr>
+<tr><td><code>user_data</code></td><td>An opaque pointer for your own bookkeeping.</td></tr>
+</table>
+<h2>Tree operations</h2>
+<pre><code>try ui.tree.appendChild(parent, child);
+_ = ui.tree.destroySubtree(node);       // children included; widgets are cleaned up
+ui.setHidden(node, true);               // takes no space while hidden</code></pre>
+<h2>In a UI document</h2>
+<pre><code>.{ .type = "box", .style = .{ .direction = .column, .gap = 6 }, .children = .{ ... } }</code></pre>
+</main><script src="../nav.js"></script></body></html>

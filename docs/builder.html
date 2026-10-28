@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>The builder - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>The builder</h1>
+<p>A visual editor for <a href="documents.html">UI documents</a>, written with the toolkit itself. Run it with <code>zig build builder</code> (edits <code>./ui.zon</code>) or <code>zig-out/bin/builder FILE.zon</code>. <code>zig build workbench</code> shows the document text in a <a href="widgets/code-editor.html">CodeEditor</a> next to the builder, synced both ways.</p>
+
+<h2>The screen</h2>
+<ul>
+<li><b>Add</b> palette (left, top): click to add the widget inside the selected box (or after the selected widget); drag onto the preview or outline to place it exactly.</li>
+<li><b>Outline</b> (left, bottom): the document tree. Click to select; drag to reorder or reparent.</li>
+<li><b>Preview</b> (center): the UI, not running. Click to select (empty frame space selects the root); hover and selection are drawn as overlays. Drag to move; drag the right, bottom, or corner handles to set pixel width and height. Frame presets (Fill, 360x640, 800x600, 1280x720) show device sizes.</li>
+<li><b>Inspector</b> (right): tabs for <b>props</b> and <b>style</b> (generated from the widget schemas), <b>layout</b> (direction, gap, padding, align, justify, wrap, width/height modes, grow, shrink, margin, position and insets), and <b>events</b> (bind events to actions).</li>
+<li><b>Toolbar</b>: Undo, Redo, Duplicate, Wrap in box, Unwrap, Indent, Outdent, Up, Down, Delete, Cut, Copy, Paste (as ZON text through the system clipboard), Save.</li>
+</ul>
+
+<h2>Shortcuts</h2>
+<p>Active while focus is in the preview panel: Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y, Ctrl+S, Ctrl+D (duplicate), Ctrl+C/X/V, Ctrl+G (wrap), Ctrl+Shift+G (unwrap), Delete, Alt+Up/Down (move), Alt+Right (indent), Alt+Left (outdent).</p>
+
+<h2>Absolute positioning in the builder</h2>
+<p>Set a child's <b>position</b> to <code>absolute</code> in the Layout tab; it can then be dragged freely inside its parent and its insets are written for you.</p>
+<div class="note">The preview's root fills the preview frame (it grows to fill unless the document sets <code>grow</code>), so <code>fill</code> heights inside the root behave as they would in a window.</div>
+
+<h2>Embedding the builder in your program</h2>
+<pre><code>var doc = try zigui.uidoc.Doc.init(gpa);            // or parseDoc(...)
+const builder = try zigui.builder.Builder.create(&amp;ui, parent, doc, .{
+    .save = .{ .ctx = &amp;saver, .call = Saver.write },    // called with the ZON text on Save
+    .on_change = .bind(&amp;app, App.docChanged),
+    .command_prefix = "builder",                       // give each builder its own prefix
+});
+defer builder.destroy();
+
+builder.modified();                  // unsaved changes?
+builder.markSaved();
+const text = try builder.toZon(gpa); // current document as ZON; free it
+try builder.loadDocument(new_doc);   // swap the document</code></pre>
+<p><code>examples/workbench.zig</code> shows a complete embedding with a text pane.</p>
+
+<h2>Limits</h2>
+<p>No multi-selection, no zoom, no live text editing on the preview, no drag from the preview onto the inspector; enum values are cycle buttons.</p>
+</main><script src="nav.js"></script></body></html>

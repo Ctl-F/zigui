@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Maintaining these docs - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Maintaining these docs</h1>
+<p>These pages are a living document. The rule: <b>a feature or widget is not done until it is documented.</b> The same change that adds it updates the docs.</p>
+
+<h2>Checklist</h2>
+<ul>
+<li><b>New widget:</b> add <code>docs/widgets/NAME.html</code> (copy an existing page: description, example, Options table, Out table, Methods, Document form), add it to the table in <code>docs/widgets/index.html</code>, add one line to <code>docs/nav.js</code>, and add it to the lists on <code>docs/index.html</code> and <code>docs/documents.html</code>.</li>
+<li><b>New layout mode or style field:</b> update <code>layout.html</code> (and the builder's Layout section in <code>builder.html</code> if it can edit it).</li>
+<li><b>New event, command, or shortcut behavior:</b> <code>events.html</code>.</li>
+<li><b>New theme field or painter:</b> <code>theming.html</code>.</li>
+<li><b>Changed or removed API:</b> fix every snippet that used it. Search the docs for the old name.</li>
+<li><b>New builder feature, shortcut, or example program:</b> <code>builder.html</code> / <code>testing.html</code>.</li>
+<li><b>New page:</b> add it to <code>nav.js</code> and link it from <code>index.html</code>.</li>
+</ul>
+
+<h2>Style</h2>
+<ul>
+<li>Static HTML, no build step; <code>style.css</code> and <code>nav.js</code> are shared. Pages open from disk (<code>file://</code>) as well as from a server. Pages in <code>docs/widgets/</code> set <code>data-root="../"</code>.</li>
+<li>Show a small example first, then the reference tables. Use the exact names from the source; if a snippet is not copied from a compiling example, double-check it against the code.</li>
+<li>State limits plainly ("not yet: ...") so readers do not hunt for features that do not exist.</li>
+</ul>
+</main><script src="nav.js"></script></body></html>

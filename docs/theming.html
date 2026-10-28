@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Theming - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Theming</h1>
+<p>Widgets get their look from <code>ui.theme</code> (type <code>zigui.Theme</code>): colors, metrics, and one <b>painter</b> per widget type. A painter draws the widget's box; behavior never changes with the theme.</p>
+
+<h2>Theme fields</h2>
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>button_colors</code></td><td>Four sets (normal, primary, danger, flat) of <code>normal/hover/pressed/disabled</code> colors; the button's <code>variant</code> picks the set.</td></tr>
+<tr><td><code>field</code>, <code>editor</code></td><td>Colors for text fields and code editors (background, border, text, selection, caret, syntax colors).</td></tr>
+<tr><td><code>corner_radius</code></td><td>Rounded-corner radius for buttons and fields (default 6).</td></tr>
+<tr><td><code>button_padding</code>, <code>field_padding</code></td><td>Inner spacing applied to buttons and text fields whose style has no padding of its own, so rounded corners stay clear of the text. Set an explicit <code>style.padding</code> on a widget to override.</td></tr>
+<tr><td><code>focus_ring</code>, <code>focus_ring_width</code></td><td>Keyboard focus ring.</td></tr>
+<tr><td><code>ui_font</code>, <code>mono_font</code></td><td>Font ids from <code>ui.addFont</code>. Both default to 0; set <code>mono_font</code> when you add a monospace font.</td></tr>
+<tr><td><code>font_size</code>, <code>text_color</code></td><td>Default text size (14) and color.</td></tr>
+<tr><td><code>button_painter</code>, <code>label_painter</code></td><td>Painter functions (see below).</td></tr>
+</table>
+
+<h2>Changing the theme</h2>
+<pre><code>var theme = ui.theme;
+theme.corner_radius = 3;
+theme.button_padding = zigui.style.Edges.xy(16, 6);
+theme.text_color = zigui.Color.rgb(230, 230, 230);
+ui.setTheme(theme);          // marks everything for relayout and repaint</code></pre>
+
+<h2>Per-widget overrides</h2>
+<p>Buttons and fields accept <code>colors</code> in their options (and <code>props.colors</code> at runtime) to override the theme for one widget:</p>
+<pre><code>b.props.colors = .{ .normal = red, .hover = red, .pressed = red, .disabled = red, .border = zigui.Color.white, .border_width = 1 };</code></pre>
+
+<h2>Custom painters</h2>
+<p>A painter is <code>fn (ctx: *PaintCtx, b: *const Button) PaintCtx.Error!void</code>. Draw the box with <code>ctx.box(visual)</code> or raw draw-list calls on <code>ctx.list</code> inside <code>ctx.rect</code>; set <code>ctx.text_color</code> to recolor the label.</p>
+<pre><code>fn flatPainter(ctx: *zigui.PaintCtx, b: *const zigui.Button) zigui.paint_ctx.Error!void {
+    try ctx.box(.{ .background = if (b.out.hovered) hover_color else base_color, .radius = 2 });
+}
+
+var theme = ui.theme;
+theme.button_painter = flatPainter;     // every button
+ui.setTheme(theme);
+button.setPainter(flatPainter);         // or just this one</code></pre>
+</main><script src="nav.js"></script></body></html>

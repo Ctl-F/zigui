@@ -29,6 +29,13 @@ Read `docs/zig-first-refactor.md` before changing public types. In short:
   copy it, or store it in a container that can reallocate once widgets exist.
   Debug builds assert this.
 
+## Documentation is part of the work
+
+User-facing docs live in `docs/` (static HTML; start at `docs/index.html`). Every
+new feature, widget, option, or behavior change updates them in the same change:
+a widget gets its own page under `docs/widgets/` and a line in `docs/nav.js`.
+Follow `docs/maintaining.html`. Fix any snippet whose API you changed.
+
 ## Commands
 
 ```

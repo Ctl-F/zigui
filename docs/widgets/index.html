@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Widgets - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>Widgets</h1>
+<p>A widget is behavior attached to a node. Create one with <code>ui.add(Widget, parent, options)</code>; it returns a pointer you can keep (valid until the widget is destroyed). Every widget has <code>props</code> (state you control), <code>out</code> (what the toolkit reports), and an <code>Options</code> struct for creation. All text you pass is copied.</p>
+<table>
+<tr><th>Widget</th><th>Document name</th><th>Use it for</th></tr>
+<tr><td><a href="container.html">Containers</a></td><td><code>box</code></td><td>Grouping and arranging; plain nodes with a <code>Style</code>.</td></tr>
+<tr><td><a href="label.html">Label</a></td><td><code>label</code></td><td>Static or changing text.</td></tr>
+<tr><td><a href="button.html">Button</a></td><td><code>button</code></td><td>Clickable actions; can run a command.</td></tr>
+<tr><td><a href="text-field.html">TextField</a></td><td><code>text_field</code></td><td>Single-line text input.</td></tr>
+<tr><td><a href="code-editor.html">CodeEditor</a></td><td><code>code_editor</code></td><td>Multi-line editing with syntax highlighting, undo, multi-cursor; large files.</td></tr>
+<tr><td><a href="canvas.html">Canvas</a></td><td><code>canvas</code></td><td>Custom drawing and raw input: paint programs, viewports.</td></tr>
+<tr><td><a href="scroll-view.html">ScrollView</a></td><td><code>scroll_view</code></td><td>Content bigger than its space.</td></tr>
+<tr><td><a href="split-view.html">SplitView</a></td><td><code>split_view</code></td><td>Two resizable panes.</td></tr>
+</table>
+
+<h2>Common patterns</h2>
+<h3>Styling a widget</h3>
+<p>Every <code>Options</code> has a <code>style: Style</code> (see <a href="../layout.html">Layout</a>):</p>
+<pre><code>_ = try ui.add(zigui.Button, parent, .{ .text = "OK", .style = .{ .width = .px(120) } });</code></pre>
+<h3>Reacting</h3>
+<pre><code>// 1. a callback in the options
+_ = try ui.add(zigui.Button, parent, .{ .text = "OK", .on_click = .bind(&amp;app, App.ok) });
+// 2. polling out after ui.update()
+if (button.out.clicked) { ... }</code></pre>
+<h3>Changing a widget later</h3>
+<pre><code>label.setText("Saved");        // setters mark the right dirty flags
+button.setEnabled(false);</code></pre>
+<h3>Widgets in UI documents</h3>
+<p>The registry (<code>zigui.registry</code>) gives every widget a name and a schema, which is how <a href="../documents.html">UI documents</a>, the <a href="../builder.html">builder</a> and <a href="../forms.html">forms</a> create and edit them without compile-time knowledge. When you add a widget, add it to <code>registry.widgets</code>, to the nav in <code>docs/nav.js</code>, and write its page.</p>
+</main><script src="../nav.js"></script></body></html>

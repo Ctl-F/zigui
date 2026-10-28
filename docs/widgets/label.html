@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Label - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>Label</h1>
+<p>Non-interactive text with no box. Its size comes from the text.</p>
+<pre><code>const title = try ui.add(zigui.Label, parent, .{ .text = "Project", .size = 18 });
+title.setText("Project: zigui");</code></pre>
+<h2>Options</h2>
+<table>
+<tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>style</code></td><td><code>.{}</code></td><td>Layout.</td></tr>
+<tr><td><code>text</code></td><td><code>""</code></td><td>Copied.</td></tr>
+<tr><td><code>font</code></td><td><code>.ui</code></td><td><code>.ui</code> or <code>.mono</code> (the theme's fonts).</td></tr>
+<tr><td><code>size</code></td><td>0</td><td>Em size in logical pixels; 0 uses the theme's <code>font_size</code>.</td></tr>
+<tr><td><code>color</code></td><td>transparent</td><td>Transparent means the theme's text color.</td></tr>
+<tr><td><code>text_align</code></td><td><code>.start</code></td><td><code>.start .center .end</code> within the label's width.</td></tr>
+<tr><td><code>painter</code></td><td>null</td><td>Override the theme's label painter.</td></tr>
+</table>
+<h2>Methods</h2>
+<ul><li><code>setText(text) !void</code></li><li><code>setPainter(?Painter)</code></li></ul>
+<h2>Document</h2>
+<pre><code>.{ .type = "label", .props = .{ .text = "Hello", .size = 16 } }</code></pre>
+</main><script src="../nav.js"></script></body></html>

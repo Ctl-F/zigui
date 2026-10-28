@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>How it works - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>How it works</h1>
+
+<h2>The tree</h2>
+<p>Everything on screen is a <b>node</b> in one tree owned by the <code>Ui</code> (<code>ui.tree</code>, root <code>ui.tree.root</code>). A node has a <code>style</code> (how it is sized and arranged), a <code>visual</code> (background, border, corner radius), a rectangle computed by layout, listeners, and optionally text and a widget.</p>
+<p>A <b>widget</b> is behavior attached to a node: a <code>Button</code> keeps hover/pressed state and turns clicks into callbacks; a <code>TextField</code> keeps text and a caret. Widgets are created with <code>ui.add(Widget, parent, options)</code>. Plain containers are bare nodes:</p>
+<pre><code>const panel = try ui.tree.create(.{
+    .style = .{ .direction = .column, .gap = .px(6), .padding = zigui.style.Edges.all(8) },
+    .visual = .{ .background = zigui.Color.rgb(34, 36, 41), .radius = 4 },
+});
+try ui.tree.appendChild(parent, panel);</code></pre>
+
+<h2>Handles, not pointers</h2>
+<p>Nodes and widgets are referred to by <code>Handle</code> (an index plus a generation). A handle to something that has been destroyed simply stops resolving: <code>ui.tree.get(h)</code> returns <code>null</code>. Widget pointers returned by <code>ui.add</code> stay valid until that widget is destroyed (pool chunks never move). Destroy a whole subtree with <code>ui.tree.destroySubtree(h)</code>; destruction requested during event dispatch is deferred until dispatch finishes.</p>
+
+<h2>Props, out, and setters</h2>
+<p>Each widget has:</p>
+<ul>
+<li><code>props</code>: the state you control (text, enabled, variant, colors...). Prefer the setters (<code>button.setText("x")</code>, <code>button.setEnabled(false)</code>): they mark the right dirty category. Writing a prop field directly is allowed in Zig; in Debug and ReleaseSafe builds a shadow checker warns when you changed something without telling the toolkit.</li>
+<li><code>out</code>: what the toolkit reports back each frame (<code>clicked</code>, <code>hovered</code>, <code>changed</code>, <code>caret</code>...). Per-frame flags are cleared by <code>ui.endFrame()</code>.</li>
+</ul>
+<p>You can react to widgets two ways: register a callback in the options (<code>.on_click</code>, <code>.on_change</code>) or read <code>out</code> after <code>ui.update()</code>.</p>
+
+<h2>The frame</h2>
+<ol>
+<li>Input calls (<code>ui.pointerMove</code>, <code>ui.key</code>, ...) dispatch events immediately and mark nodes dirty.</li>
+<li><code>ui.update()</code> lets widgets refresh derived state (shape text, compute <code>out</code>).</li>
+<li><code>ui.renderFrame()</code> runs <b>layout</b> (measure bottom-up, place top-down), then <b>paint</b> into a fixed-capacity <code>DrawList</code>, then submits to the backend. Only the damaged rectangle is repainted and presented.</li>
+<li><code>ui.endFrame()</code> clears per-frame state.</li>
+</ol>
+<p>Dirtiness is tracked per category (layout, paint, text, children...). A change that cannot affect layout (a color) repaints without relayout. Nodes flagged <code>relayout_boundary</code> stop layout dirtiness from climbing past them; <code>repaint_boundary</code> nodes cache their painted subtree.</p>
+<div class="note">There is no allocation on the frame path: the draw list storage is allocated once at startup. If you see a "draw list full" error, give <code>DrawList.init</code> bigger buffers.</div>
+
+<h2>Ownership</h2>
+<ul>
+<li>Strings you pass to widgets (<code>.text = "..."</code>, <code>setText</code>, placeholders) are <b>copied</b>; the toolkit owns the copy and frees it. You may free yours immediately.</li>
+<li>Exception: <code>CodeEditor</code>'s <code>Options.text</code> is borrowed; use <code>loadText(bytes, true)</code> to hand over an allocation. See <a href="widgets/code-editor.html">CodeEditor</a>.</li>
+<li>The <code>Ui</code> must not move after widgets exist (see <a href="getting-started.html">Getting started</a>).</li>
+<li>The UI core is single-threaded. Call into it from one thread only; to wake a sleeping loop from another thread use the platform's <code>wake()</code>.</li>
+</ul>
+
+<h2>Accessibility basics</h2>
+<p>Nodes have a <code>role</code> and a <code>label</code>. Built-in widgets set them. For your own interactive node use <code>ui.makeClickable(h, .{ .label = "Open", .on_click = ... })</code>, which makes it focusable, Tab-reachable, activated by click/Enter/Space, and gives it a pointer cursor. In Debug and ReleaseSafe the toolkit warns (<code>ui_check:</code>) about interactive nodes without a label; set one with <code>ui.tree.setLabel(h, "name")</code>.</p>
+
+<h2>Source map</h2>
+<table>
+<tr><th>Directory</th><th>Contents</th></tr>
+<tr><td><code>src/core/</code></td><td>tree, layout, flex, events, input, focus, commands, shortcuts, draw list, schema</td></tr>
+<tr><td><code>src/widgets/</code></td><td>widgets, theme, registry</td></tr>
+<tr><td><code>src/editor/</code></td><td>text editing engine behind CodeEditor (piece table, undo, multi-cursor, syntax)</td></tr>
+<tr><td><code>src/text/</code></td><td>fonts, shaping, glyph atlas</td></tr>
+<tr><td><code>src/render/</code></td><td>software rasterizer, backend interface, PNG encoder</td></tr>
+<tr><td><code>src/platform/</code></td><td>SDL3 shim (windows, events, clipboard, cursors), GPU backend</td></tr>
+<tr><td><code>src/forms/</code>, <code>src/uidoc/</code>, <code>src/builder/</code></td><td>forms, UI documents, the visual builder</td></tr>
+</table>
+</main><script src="nav.js"></script></body></html>

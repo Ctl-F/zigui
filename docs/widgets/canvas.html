@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Canvas - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>Canvas</h1>
+<p>A node you draw into and read raw input from: paint programs, viewports, custom widgets. Two drawing modes (usable together): a draw hook that emits draw-list commands, and an offscreen pixel surface.</p>
+<h2>Draw-hook mode</h2>
+<pre><code>const c = try ui.add(zigui.Canvas, parent, .{
+    .style = .{ .grow = 1 },
+    .on_draw = zigui.canvas.DrawHook.bind(&amp;app, App.draw),
+});
+
+fn draw(self: *App, canvas: *zigui.Canvas, pc: *zigui.PaintCtx) zigui.paint_ctx.Error!void {
+    const paint = zigui.draw_list.Paint.solid(zigui.Color.rgb(255, 80, 80));
+    try pc.list.fillRect(.{ .x = pc.rect.x + 10, .y = pc.rect.y + 10, .w = 80, .h = 40 }, paint);
+}</code></pre>
+<p><code>pc.rect</code> is the canvas rectangle in window coordinates; commands are clipped to it. Draw-list commands include <code>fillRect</code>, <code>strokeRect</code>, rounded variants, <code>line</code>, <code>image</code>, <code>pushClip</code>.</p>
+<h2>Offscreen surface mode</h2>
+<pre><code>try canvas.createSurface(1024, 768);                       // after the backend exists
+canvas.updateSurface(.{ .x = 0, .y = 0, .w = w, .h = h }, pixels, w * 4) catch {};   // RGBA8 rows, stride in bytes
+...
+canvas.releaseSurface();                                   // before destroying the canvas</code></pre>
+<p>The surface is stretched over the node (<code>filter</code>: <code>.nearest</code> or <code>.linear</code>). Convert pointer positions to surface pixels with <code>canvas.toSurface(local_x, local_y)</code>. <code>examples/paint.zig</code> is a complete program.</p>
+<h2>Options</h2>
+<table>
+<tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>style</code></td><td><code>.{}</code></td><td></td></tr>
+<tr><td><code>label</code></td><td><code>"Canvas"</code></td><td>Accessible name.</td></tr>
+<tr><td><code>redraw_policy</code></td><td><code>.on_demand</code></td><td><code>.on_demand</code> (repaint on <code>invalidate()</code> or input), <code>.continuous</code> (every frame), <code>.fixed_hz</code> (<code>hz</code> per second).</td></tr>
+<tr><td><code>hz</code></td><td>30</td><td>For <code>.fixed_hz</code>.</td></tr>
+<tr><td><code>raw_keys</code></td><td>false</td><td>A focused canvas gets every key (Tab and shortcuts too); only Escape leaves it.</td></tr>
+<tr><td><code>grab_input</code></td><td>false</td><td>All pointer input goes to the canvas wherever the pointer is.</td></tr>
+<tr><td><code>filter</code></td><td><code>.linear</code></td><td>Surface scaling.</td></tr>
+<tr><td><code>on_pointer</code></td><td>null</td><td>Pointer enter/leave/down/move/up and wheel; use <code>ev.local_x/local_y</code>. A press captures the pointer until release.</td></tr>
+<tr><td><code>on_key</code></td><td>null</td><td>Key down/up and committed text.</td></tr>
+<tr><td><code>on_draw</code></td><td>null</td><td>The draw hook.</td></tr>
+</table>
+<h2>Out</h2>
+<p><code>hovered</code>, <code>focused</code>, <code>pressed</code>, <code>pointer_x/pointer_y</code> (canvas-local), <code>frames</code> (times painted).</p>
+<h2>Methods</h2>
+<ul>
+<li><code>invalidate(?Rect)</code>: request a repaint (null = all).</li>
+<li><code>createSurface</code>, <code>updateSurface</code>, <code>releaseSurface</code>, <code>toSurface</code></li>
+</ul>
+<div class="note">For animation set <code>redraw_policy = .continuous</code> or <code>.fixed_hz</code> and use <code>ui.nextWakeMs()</code> in your loop so it wakes on time.</div>
+</main><script src="../nav.js"></script></body></html>

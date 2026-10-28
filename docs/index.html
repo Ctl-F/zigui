@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>zigui documentation</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>zigui</h1>
+<p>zigui is a retained-mode, cross-platform UI toolkit for Zig 0.17, built for IDEs, text editors, and paint programs. You build a tree of nodes once, change what changes, and the toolkit lays out, paints, and redraws only the damaged parts.</p>
+
+<h2>Where to start</h2>
+<table>
+<tr><th>If you want to...</th><th>Read</th></tr>
+<tr><td>get a window with a button in it</td><td><a href="getting-started.html">Getting started</a></td></tr>
+<tr><td>understand the model (tree, handles, frames, ownership)</td><td><a href="how-it-works.html">How it works</a></td></tr>
+<tr><td>size and arrange things</td><td><a href="layout.html">Layout and styling</a></td></tr>
+<tr><td>react to the mouse and keyboard, add menus-style commands and shortcuts</td><td><a href="events.html">Events, commands, shortcuts</a></td></tr>
+<tr><td>use a specific widget</td><td><a href="widgets/index.html">Widgets</a></td></tr>
+<tr><td>describe a UI in a text file and edit it visually</td><td><a href="documents.html">UI documents</a>, <a href="builder.html">the builder</a></td></tr>
+<tr><td>generate a dialog from a struct</td><td><a href="forms.html">Forms and wizards</a></td></tr>
+<tr><td>run headless, take screenshots, write tests</td><td><a href="testing.html">Testing and debugging</a></td></tr>
+</table>
+
+<h2>What is in the box</h2>
+<ul>
+<li><b>Core:</b> node tree, flex layout (with wrap and absolute positioning), events with capture/target/bubble, focus scopes, commands and scoped shortcuts, damage-tracked painting.</li>
+<li><b>Widgets:</b> <a href="widgets/label.html">Label</a>, <a href="widgets/button.html">Button</a>, <a href="widgets/text-field.html">TextField</a>, <a href="widgets/code-editor.html">CodeEditor</a>, <a href="widgets/canvas.html">Canvas</a>, <a href="widgets/scroll-view.html">ScrollView</a>, <a href="widgets/split-view.html">SplitView</a>.</li>
+<li><b>Rendering:</b> a software rasterizer and an SDL3 GPU backend behind one <code>Backend</code> interface.</li>
+<li><b>Tooling:</b> a runtime widget schema, generated forms and wizards, ZON UI documents, and a visual builder.</li>
+</ul>
+
+<div class="note">These docs are a living document. Every new feature and widget must be documented here in the same change that adds it; see <a href="maintaining.html">Maintaining these docs</a>.</div>
+
+<h2>Conventions used in the examples</h2>
+<ul>
+<li><code>zigui</code> means <code>const zigui = @import("zigui");</code>. Examples assume <code>ui</code> is your <code>Ui</code> value (pass <code>&amp;ui</code> where a <code>*Ui</code> is wanted), <code>gpa: std.mem.Allocator</code>, and <code>app</code> for your own state struct.</li>
+<li>Callbacks are written <code>.bind(&amp;app, App.method)</code>, where <code>method</code> is <code>fn (*App, *zigui.event.Event) void</code>.</li>
+<li>Snippets are trimmed for reading. <code>examples/</code> holds complete programs that compile: <code>dedit.zig</code> (smallest), <code>demo.zig</code>, <code>paint.zig</code>, <code>builder.zig</code>, <code>workbench.zig</code>.</li>
+</ul>
+</main><script src="nav.js"></script></body></html>

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Forms and wizards - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Forms and wizards</h1>
+<p>Generate a dialog body from a Zig struct. The form is built from the struct's runtime schema, so you describe the data and get the controls.</p>
+<pre><code>const NewProject = struct {
+    name: []const u8 = "",
+    kind: enum { app, library } = .app,
+    shared: bool = false,
+    count: u32 = 1,
+
+    pub const ui = .{                       // optional metadata
+        .count = .{ .label = "How many", .min = 1, .max = 9 },
+    };
+    pub fn validate(self: *const NewProject, report: *zigui.form.Report) void {   // optional cross-field checks
+        if (self.name.len == 0) report.add("name", "Name is required");
+    }
+};
+
+var form = try zigui.form.Form(NewProject).create(&amp;ui, parent, .{ .title = "New project" });
+defer form.destroy();
+
+// each frame:
+if (form.state == .submitted) {
+    const value = try form.take(gpa);       // deep copy
+    defer zigui.form.freeOwned(NewProject, value, gpa);   // or take(arena) and skip freeing
+    ...
+}</code></pre>
+<table>
+<tr><th>Field type</th><th>Control</th></tr>
+<tr><td>bool</td><td>On/Off toggle</td></tr>
+<tr><td>enum</td><td>Button that cycles through the names</td></tr>
+<tr><td>numbers, colors, Lengths, strings</td><td>Text fields with parsing; errors show under the field and disable Submit</td></tr>
+<tr><td>optional</td><td>A "Set" toggle plus the control</td></tr>
+<tr><td>struct, array</td><td>Indented group</td></tr>
+</table>
+<p>Metadata keys in <code>pub const ui</code>: <code>label</code>, <code>tooltip</code>, <code>min</code>, <code>max</code>, <code>step</code>, <code>group</code>, <code>multiline</code>, <code>hidden</code>, <code>readonly</code>. Form options: <code>title</code>, <code>submit_label</code>, <code>cancel_label</code>, <code>style</code>, <code>label_width</code>, <code>only</code> (list of fields), <code>group</code>. <code>form.state</code> is <code>.open</code>, <code>.submitted</code>, or <code>.cancelled</code>. The form is non-blocking; a blocking <code>prompt</code> is not built yet.</p>
+
+<h2>Wizards</h2>
+<p><code>zigui.wizard.Wizard(T)</code> is a list of pages over one result struct with Back/Next/Finish/Cancel and a step indicator. A page is generated (<code>.fields = &amp;.{"name", "kind"}</code> or <code>.group = "advanced"</code>) or custom (a <code>build</code> callback that fills a host node). <code>can_next</code> and page-scoped validation gate Next; values persist across pages.</p>
+<pre><code>const pages = [_]Wizard(NewProject).Page{
+    .{ .title = "Basics", .fields = &amp;.{ "name", "kind" } },
+    .{ .title = "Options", .fields = &amp;.{ "shared", "count" } },
+};
+const wiz = try Wizard(NewProject).create(&amp;ui, parent, &amp;pages, .{ .title = "New project" });
+// each frame: wiz.state == .submitted / .cancelled</code></pre>
+</main><script src="nav.js"></script></body></html>

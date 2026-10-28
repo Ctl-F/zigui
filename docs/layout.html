@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Layout and styling - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Layout and styling</h1>
+<p>Every node has a <code>Style</code>. Layout is a two-pass flexbox-like model: children are measured bottom-up, then placed top-down. A node arranges its children along a main axis (<code>direction</code>).</p>
+
+<h2>Style fields</h2>
+<table>
+<tr><th>Field</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>width</code>, <code>height</code></td><td><code>.auto</code></td><td>Preferred size, a <a href="#length">Length</a>.</td></tr>
+<tr><td><code>min_width</code>, <code>max_width</code>, <code>min_height</code>, <code>max_height</code></td><td><code>.auto</code> (unbounded)</td><td>Clamp the resolved size. If min exceeds max, min wins.</td></tr>
+<tr><td><code>grow</code></td><td>0</td><td>Share of leftover main-axis space this child takes.</td></tr>
+<tr><td><code>shrink</code></td><td>1</td><td>Share of overflow this child gives up. Use 0 for things that must not shrink (toolbars, fixed headers).</td></tr>
+<tr><td><code>direction</code></td><td><code>.row</code></td><td><code>.row</code> or <code>.column</code>: the main axis of this node's children.</td></tr>
+<tr><td><code>gap</code></td><td>0</td><td>Space between children.</td></tr>
+<tr><td><code>padding</code>, <code>margin</code></td><td>0</td><td><code>Edges</code>: <code>.left/.top/.right/.bottom</code> as Lengths. Build with <code>Edges.all(8)</code> or <code>Edges.xy(12, 4)</code>.</td></tr>
+<tr><td><code>align_items</code></td><td><code>.stretch</code></td><td>Cross-axis alignment of children: <code>.start .center .end .stretch</code>.</td></tr>
+<tr><td><code>justify</code></td><td><code>.start</code></td><td>Main-axis placement when nothing grows: <code>.start .center .end</code>.</td></tr>
+<tr><td><code>align_self</code></td><td>null</td><td>Overrides the parent's <code>align_items</code> for this child.</td></tr>
+<tr><td><code>wrap</code></td><td>false</td><td>Continue on a new line when children overflow the main axis.</td></tr>
+<tr><td><code>position</code>, <code>inset</code></td><td><code>.flow</code></td><td>Absolute positioning, see below.</td></tr>
+</table>
+<p><code>Edges</code> lives in <code>zigui.style</code>: <code>const Edges = zigui.style.Edges;</code></p>
+
+<h2 id="length">Length</h2>
+<table>
+<tr><th>Value</th><th>Meaning</th></tr>
+<tr><td><code>.px(120)</code></td><td>Logical pixels.</td></tr>
+<tr><td><code>.pct(50)</code></td><td>Percent of the parent's content box on that axis. Falls back to auto if the parent is itself sized by its content (and counts a <code>ui_check</code> warning).</td></tr>
+<tr><td><code>.auto</code></td><td>Size to content, then flex rules (grow/shrink) apply.</td></tr>
+<tr><td><code>.fill</code></td><td>Take the remaining space (basis 0, grow at least 1).</td></tr>
+<tr><td><code>.fit</code></td><td>Shrink-wrap the children, clamped by min/max.</td></tr>
+</table>
+<p>Sizes are resolved first and then clamped to min/max in absolute terms.</p>
+
+<h2>Examples</h2>
+<h3>A toolbar, a growing content area, a status bar</h3>
+<p>(<code>box(parent, style)</code> stands for <code>tree.create(.{ .style = style })</code> followed by <code>tree.appendChild</code>.)</p>
+<pre><code>root.style = .{ .direction = .column };
+// header: fixed height, does not shrink
+const header = try box(root, .{ .direction = .row, .height = .px(40), .shrink = 0, .gap = .px(8), .align_items = .center });
+// body: takes everything left over
+const body = try box(root, .{ .direction = .row, .grow = 1 });
+const status = try box(root, .{ .height = .px(24), .shrink = 0 });</code></pre>
+
+<h3>A sidebar that is 20% wide, at least 150 and at most 360 pixels</h3>
+<pre><code>.{ .width = .pct(20), .min_width = .px(150), .max_width = .px(360), .shrink = 0 }</code></pre>
+
+<h3>Centering one child</h3>
+<pre><code>container.style = .{ .align_items = .center, .justify = .center };</code></pre>
+
+<h3>Wrapping a row of chips</h3>
+<pre><code>chips.style = .{ .direction = .row, .wrap = true, .gap = .px(4), .width = .px(300) };</code></pre>
+<div class="warn">Wrap needs a definite main-axis size (a fixed width, a parent that gives one, or <code>.fill</code>). A wrapping container does <b>not</b> yet grow to hold the extra lines when its own size is content-driven; give it an explicit height or let its parent size it.</div>
+
+<h2>Absolute positioning</h2>
+<p>A child with <code>position = .absolute</code> leaves the flex flow and is placed relative to its parent's box (padding included) using <code>inset</code> (<code>.left .top .right .bottom</code>, each a Length, <code>.auto</code> when unset). With both <code>left</code> and <code>right</code> (or top and bottom) set and the size <code>.auto</code>, the child stretches between them; otherwise it sits at the offset from the near side given, or from the far side if only that one is set. With no inset on an axis it starts at the parent's padding edge.</p>
+<pre><code>badge.style = .{ .position = .absolute, .width = .px(18), .height = .px(18),
+                 .inset = .{ .right = .px(4), .top = .px(4) } };</code></pre>
+<p>Absolute children are ignored when the parent computes its content size.</p>
+
+<h2>Visual</h2>
+<p><code>node.visual</code> is the stopgap look for a plain node: <code>background</code>, <code>border_color</code>, <code>border_width</code>, <code>radius</code>. Widgets paint themselves through the theme; see <a href="theming.html">Theming</a>.</p>
+<pre><code>node.visual = .{ .background = zigui.Color.rgb(44, 46, 52), .border_color = zigui.Color.rgb(64, 68, 76), .border_width = 1, .radius = 4 };</code></pre>
+
+<h2>Changing style at runtime</h2>
+<p>After editing <code>node.style</code> tell the toolkit what changed:</p>
+<pre><code>ui.tree.get(h).?.style.width = .px(300);
+ui.tree.markDirty(h, zigui.DirtyFlags.layout_and_paint);</code></pre>
+<p>Hide and show with <code>ui.setHidden(h, true)</code>; a hidden node takes no space.</p>
+
+<h2>Built-in containers</h2>
+<p>For scrolling and resizable panes use <a href="widgets/scroll-view.html">ScrollView</a> and <a href="widgets/split-view.html">SplitView</a>.</p>
+</main><script src="nav.js"></script></body></html>

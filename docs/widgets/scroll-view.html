@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>ScrollView - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>ScrollView</h1>
+<p>A clipped viewport onto content larger than the space available. It creates one child node, the <b>content node</b>; put your children there.</p>
+<pre><code>const scroll = try ui.add(zigui.ScrollView, parent, .{
+    .style = .{ .grow = 1 },
+    .content_style = .{ .direction = .column, .gap = .px(2), .padding = zigui.style.Edges.all(4) },
+});
+for (names) |n| _ = try ui.add(zigui.Label, scroll.contentNode(), .{ .text = n });</code></pre>
+<p>The content is laid out at its natural size along the scrolling axis and never shrunk. Scroll with the wheel (Shift+wheel for horizontal) or by dragging the scrollbar thumb.</p>
+<h2>Options</h2>
+<table>
+<tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>style</code></td><td><code>.{}</code></td><td>The viewport's layout (give it a size or <code>.grow = 1</code>).</td></tr>
+<tr><td><code>content_style</code></td><td>column</td><td>Layout of the content node: direction, gap, padding, alignment.</td></tr>
+<tr><td><code>vertical</code>, <code>horizontal</code></td><td>true, false</td><td>Which axes scroll.</td></tr>
+<tr><td><code>scrollbar</code></td><td>true</td><td>Draw the scrollbar.</td></tr>
+</table>
+<h2>Methods</h2>
+<ul>
+<li><code>contentNode() Handle</code></li>
+<li><code>scrollTo(x, y)</code>, <code>scrollBy(dx, dy)</code>: clamped to the content.</li>
+<li><code>scrollIntoView(handle)</code>: scroll just enough to show a descendant.</li>
+<li><code>overlay</code>: a paint hook slot drawn over the content (the builder draws selection overlays there).</li>
+</ul>
+<p>The offset lives on the node (<code>node.scroll_x/scroll_y</code>), so hit testing, painting, damage and <code>absoluteRect</code> of everything inside follow it.</p>
+<h2>Document</h2>
+<p>Children of a <code>scroll_view</code> node go into its content node.</p>
+<pre><code>.{ .type = "scroll_view", .style = .{ .height = 200 }, .children = .{ .{ .type = "label", .props = .{ .text = "row" } } } }</code></pre>
+</main><script src="../nav.js"></script></body></html>

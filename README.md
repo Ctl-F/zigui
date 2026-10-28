@@ -22,6 +22,12 @@ Not built yet (largest first): a renderer backend interface and GPU path, canvas
 and frame scheduling, damage tracking, list/tree widgets and a model interface,
 docking and multi-window, accessibility. See "Next steps".
 
+## Documentation
+
+Guides, a tutorial, and a page per widget are in `docs/` (open `docs/index.html`).
+They are a living document: a feature or widget is not finished until its docs
+are updated (`docs/maintaining.html` has the checklist).
+
 ## Commands
 
 ```

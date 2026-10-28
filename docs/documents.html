@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>UI documents - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>UI documents (ZON)</h1>
+<p>A UI can be described in a text file and instantiated at runtime (or embedded with <code>@embedFile</code>). The same format is what the <a href="builder.html">builder</a> edits. Files hold only what differs from defaults, so they stay small and diff well.</p>
+
+<h2>Format</h2>
+<pre><code>.{
+    .version = 1,
+    .root = .{
+        .type = "box",
+        .style = .{ .direction = .column, .gap = 8, .padding = .{ .left = 12, .top = 12 } },
+        .children = .{
+            .{ .type = "label", .props = .{ .text = "Hello" } },
+            .{ .type = "button", .id = "ok", .props = .{ .text = "OK" }, .on = .{ .click = "confirm" } },
+        },
+    },
+}</code></pre>
+<table>
+<tr><th>Key</th><th>Meaning</th></tr>
+<tr><td><code>.type</code></td><td>A <a href="widgets/index.html">widget name</a> (<code>label</code>, <code>button</code>, <code>text_field</code>, <code>code_editor</code>, <code>canvas</code>, <code>scroll_view</code>, <code>split_view</code>) or <code>"box"</code> for a plain container.</td></tr>
+<tr><td><code>.style</code></td><td>Sparse <a href="layout.html">Style</a>. Lengths: a number is pixels; <code>.fill</code>, <code>.fit</code>, <code>.auto</code>; percent as the string <code>"50%"</code> (or <code>.{ .percent = 50 }</code>). Enums by name (<code>.direction = .column</code>).</td></tr>
+<tr><td><code>.props</code></td><td>Sparse widget props: the widget's <code>Props</code> fields (see each widget page). Content text for <code>text_field</code> and <code>code_editor</code> goes in <code>.text</code>.</td></tr>
+<tr><td><code>.on</code></td><td>Event to action name: <code>.on = .{ .click = "confirm" }</code>. The app supplies the actions.</td></tr>
+<tr><td><code>.id</code></td><td>A name to look the live node up by.</td></tr>
+<tr><td><code>.children</code></td><td>Child nodes. A <code>scroll_view</code>'s children go in its content; a <code>split_view</code> takes exactly two.</td></tr>
+</table>
+
+<h2>Loading</h2>
+<pre><code>var diag: zigui.zon.Diag = .{};
+var problem: zigui.uidoc.Problem = undefined;
+var doc = try zigui.uidoc.parseDoc(gpa, @embedFile("main.zon"), &amp;diag, &amp;problem);
+defer doc.deinit();
+
+var actions: zigui.uiload.Actions = .{};
+defer actions.deinit(gpa);
+try actions.put(gpa, "confirm", .bind(&amp;app, App.onConfirm));
+
+var inst = try zigui.uiload.instantiate(&amp;ui, ui.tree.root, &amp;doc, .{ .actions = &amp;actions });
+defer inst.destroy();
+
+const ok = inst.widget(zigui.Button, "ok").?;      // by id and type
+const node = inst.find("ok");                        // or just the node handle</code></pre>
+<ul>
+<li>A syntax error carries a line and column in <code>diag</code>.</li>
+<li><code>instantiate</code> never crashes on a bad document: every unknown prop, wrong value type, unknown enum name, or missing action becomes a <code>Problem</code> (with a path such as <code>props.variant: unknown value 'huge'</code>) in <code>inst.problems</code>, and the rest still builds. Set <code>.strict = false</code> to ignore unknown actions (the builder does).</li>
+<li><code>instantiateStrict</code> returns <code>error.InvalidDocument</code> if there are any problems.</li>
+</ul>
+
+<h2>Building a document in code</h2>
+<p><code>Doc</code> is the model the builder edits (<code>zigui.uidoc.Doc</code>): <code>Doc.init(gpa)</code> creates an empty one (a box root), <code>doc.toZon(gpa)</code> writes it out. Edits with undo go through <code>zigui.uiedit.Editor</code>.</p>
+
+<h2>The registry</h2>
+<p><code>zigui.registry</code> lists every widget by name with its <code>Props</code> and <code>Out</code> schemas. <code>registry.create(ui, "button", parent)</code>, <code>setProp(ui, node, "text", value)</code>, <code>setStyle(ui, node, "padding.left", value)</code> write by path, mark the right dirty flags, and reject wrong types. Widgets must be listed in <code>registry.widgets</code> to appear in documents and in the builder's palette.</p>
+</main><script src="nav.js"></script></body></html>

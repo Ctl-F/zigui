@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>CodeEditor - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>CodeEditor</h1>
+<p>A multi-line editor for source code: line numbers, incremental syntax highlighting, undo/redo, multiple cursors, large-file support (only visible lines are shaped and drawn).</p>
+<pre><code>const ed = try ui.add(zigui.CodeEditor, parent, .{
+    .style = .{ .grow = 1 },
+    .language = &amp;zigui.syntax.zig,
+    .on_change = .bind(&amp;app, App.textChanged),
+});
+try ed.loadText(source_bytes, false);    // false: borrowed; true: the editor takes ownership of an allocation
+ui.setFocus(ed.node);</code></pre>
+<h2>Options</h2>
+<table>
+<tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>style</code></td><td><code>.{}</code></td><td>Layout (usually <code>.grow = 1</code>).</td></tr>
+<tr><td><code>text</code></td><td><code>""</code></td><td>Initial text, <b>borrowed</b>: it must outlive the editor. Use <code>loadText</code> to hand over an allocation.</td></tr>
+<tr><td><code>language</code></td><td>null</td><td>A <code>*const syntax.Language</code>: <code>syntax.zig</code>, <code>syntax.c</code>, <code>syntax.json</code>, <code>syntax.markdown</code>, <code>syntax.plain</code>.</td></tr>
+<tr><td><code>font</code>, <code>size</code></td><td><code>.mono</code>, 0</td><td>Set <code>ui.theme.mono_font</code> to a monospace font.</td></tr>
+<tr><td><code>tab_width</code></td><td>4</td><td></td></tr>
+<tr><td><code>enabled</code>, <code>read_only</code></td><td>true, false</td><td></td></tr>
+<tr><td><code>line_numbers</code>, <code>auto_indent</code></td><td>true, true</td><td></td></tr>
+<tr><td><code>label</code></td><td><code>"Code editor"</code></td><td>Accessible name.</td></tr>
+<tr><td><code>on_change</code></td><td>null</td><td>After the text changes (typing, paste, undo).</td></tr>
+<tr><td><code>colors</code>, <code>painter</code></td><td>null</td><td>Overrides for the theme's editor palette.</td></tr>
+</table>
+<h2>Out</h2>
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>changed</code>, <code>change_count</code></td><td>Edited this frame / total.</td></tr>
+<tr><td><code>modified</code></td><td>Text differs from the last <code>markSaved()</code>.</td></tr>
+<tr><td><code>line_count</code>, <code>caret_line</code>, <code>caret_column</code>, <code>selection_count</code></td><td>For status bars.</td></tr>
+<tr><td><code>indexing</code>, <code>index_progress</code></td><td>A file opened with <code>openFile</code> is still being indexed (editing is off meanwhile).</td></tr>
+<tr><td><code>focused</code>, <code>hovered</code></td><td></td></tr>
+</table>
+<h2>Methods</h2>
+<table>
+<tr><th>Method</th><th>Purpose</th></tr>
+<tr><td><code>loadText(bytes, owned) !void</code></td><td>Replace the whole content (resets undo).</td></tr>
+<tr><td><code>textAlloc(gpa) ![]u8</code></td><td>Copy the content out; you free it.</td></tr>
+<tr><td><code>openFile(io, path) !void</code></td><td>Memory-map a file; line indexing runs incrementally so huge files open at once.</td></tr>
+<tr><td><code>markSaved()</code></td><td>Reset <code>out.modified</code> after saving.</td></tr>
+<tr><td><code>setLanguage(?*const Language) !void</code></td><td>Change highlighting.</td></tr>
+<tr><td><code>core() *Editor</code></td><td>The editing engine (selections, edits, undo) for scripted changes.</td></tr>
+<tr><td><code>caretRect()</code></td><td>Caret position, for IME placement.</td></tr>
+</table>
+<h2>Keys</h2>
+<p>Typing; Enter keeps indentation; Tab/Shift+Tab; Backspace/Delete (Ctrl or Alt for words); arrows, Home/End (Ctrl for document), PageUp/Down; Shift extends the selection; Ctrl+A/C/X/V; Ctrl+Z, Ctrl+Y, Ctrl+Shift+Z; click and drag, double-click selects a word, triple-click a line; Alt+click or Ctrl+Alt+Up/Down adds cursors; Esc drops extra cursors.</p>
+<h2>Example: a save flow</h2>
+<pre><code>fn save(self: *App) !void {
+    const text = try self.editor.textAlloc(self.gpa);
+    defer self.gpa.free(text);
+    try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = self.path, .data = text });
+    self.editor.markSaved();
+}</code></pre>
+<p>Not yet: find/replace, soft wrap, folding, bracket matching, IME preedit rendering.</p>
+<h2>Document</h2>
+<pre><code>.{ .type = "code_editor", .props = .{ .text = "const x = 1;", .line_numbers = false } }</code></pre>
+</main><script src="../nav.js"></script></body></html>

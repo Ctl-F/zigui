@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>TextField - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>TextField</h1>
+<p>A single-line text input: caret, selection, clipboard, IME, placeholder. Typing, Home/End, Ctrl/Alt+arrows for words, Shift to select, and Ctrl+A/C/X/V work. Not yet: undo/redo and password mode.</p>
+<pre><code>const name = try ui.add(zigui.TextField, parent, .{
+    .placeholder = "Project name",
+    .style = .{ .width = .px(240) },
+    .on_change = .bind(&amp;app, App.nameChanged),
+    .on_submit = .bind(&amp;app, App.create),
+});
+
+fn nameChanged(self: *App, _: *zigui.event.Event) void {
+    self.project_name = self.name_field.text();    // valid until the next edit
+}</code></pre>
+<h2>Options</h2>
+<table>
+<tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>style</code></td><td><code>.{}</code></td><td>Layout. With no padding set the theme's <code>field_padding</code> applies.</td></tr>
+<tr><td><code>text</code></td><td><code>""</code></td><td>Initial content; not counted as an edit.</td></tr>
+<tr><td><code>placeholder</code></td><td><code>""</code></td><td>Shown while empty.</td></tr>
+<tr><td><code>label</code></td><td><code>""</code></td><td>Accessible name (defaults to the placeholder).</td></tr>
+<tr><td><code>enabled</code>, <code>read_only</code></td><td>true, false</td><td></td></tr>
+<tr><td><code>font</code>, <code>size</code></td><td><code>.ui</code>, 0</td><td>As for <a href="label.html">Label</a>.</td></tr>
+<tr><td><code>on_change</code></td><td>null</td><td>After the user edits the text.</td></tr>
+<tr><td><code>on_submit</code></td><td>null</td><td>Enter was pressed.</td></tr>
+<tr><td><code>colors</code>, <code>painter</code></td><td>null</td><td>Overrides for the theme.</td></tr>
+</table>
+<h2>Out</h2>
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>changed</code>, <code>change_count</code></td><td>The user edited the text this frame / total edits.</td></tr>
+<tr><td><code>submitted</code>, <code>submit_count</code></td><td>Enter pressed.</td></tr>
+<tr><td><code>focused</code>, <code>hovered</code>, <code>composing</code></td><td>State; <code>composing</code> is true during IME composition.</td></tr>
+<tr><td><code>caret</code></td><td>Caret byte offset (selection fields follow it in the struct).</td></tr>
+</table>
+<h2>Methods</h2>
+<ul>
+<li><code>text() []const u8</code>: the content. The slice is invalidated by the next edit; copy it if you keep it.</li>
+<li><code>setText(text) !void</code>, <code>setPlaceholder(text) !void</code>, <code>setPainter</code>, <code>colors()</code></li>
+</ul>
+<div class="note"><code>setText</code> does not fire <code>on_change</code>; that callback is for user edits.</div>
+<h2>Document</h2>
+<pre><code>.{ .type = "text_field", .props = .{ .text = "hello", .placeholder = "name" } }</code></pre>
+</main><script src="../nav.js"></script></body></html>

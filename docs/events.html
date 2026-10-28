@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Events, commands, shortcuts - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Events, commands, shortcuts</h1>
+
+<h2>Events</h2>
+<p>Input becomes <code>Event</code>s dispatched through the tree in three phases: <b>capture</b> (root down to the target), <b>target</b>, then <b>bubble</b> (target up to the root). Kinds:</p>
+<table>
+<tr><th>Kind</th><th>Notes</th></tr>
+<tr><td><code>pointer_down</code>, <code>pointer_up</code>, <code>pointer_move</code></td><td>Position in <code>x,y</code> (window) and <code>local_x,local_y</code> (relative to the listening node); <code>button</code> (1 = left); <code>clicks</code> (2 = double click). While a button is held, the node that was pressed keeps receiving the pointer (pointer capture).</td></tr>
+<tr><td><code>pointer_enter</code>, <code>pointer_leave</code></td><td>Hover. Do not bubble.</td></tr>
+<tr><td><code>click</code></td><td>Press and release on the same node (or within its subtree).</td></tr>
+<tr><td><code>wheel</code></td><td><code>dx</code>, <code>dy</code>.</td></tr>
+<tr><td><code>key_down</code>, <code>key_up</code></td><td><code>key</code>, <code>mods</code>, <code>repeat</code>. Delivered to the focused node.</td></tr>
+<tr><td><code>text_input</code>, <code>text_editing</code></td><td>Typed/pasted text and IME composition; <code>text</code> is valid only during dispatch.</td></tr>
+<tr><td><code>focus_in</code>, <code>focus_out</code></td><td>Do not bubble.</td></tr>
+<tr><td><code>command</code></td><td>A named command ran; <code>text</code> is its name.</td></tr>
+</table>
+
+<h3>Listening</h3>
+<pre><code>try ui.tree.addListener(node, .{
+    .kind = .pointer_down,
+    .callback = .bind(&amp;app, App.onDown),
+});
+
+fn onDown(self: *App, ev: *zigui.event.Event) void {
+    if (ev.button != 1) return;
+    self.start_drag(ev.x, ev.y);
+    ev.stopPropagation();       // ancestors do not see this event
+}</code></pre>
+<ul>
+<li>A listener with <code>.capture = true</code> runs during the capture phase, before the target sees the event. The builder uses this to intercept clicks on its design surface.</li>
+<li><code>ev.stopPropagation()</code> stops further listeners on other nodes; <code>ev.markHandled()</code> tells the toolkit a default action (such as focusing, or moving the caret) should not run.</li>
+<li>Callbacks may destroy nodes: destruction is deferred until dispatch ends, and handles you hold stay safe to check.</li>
+<li>Attaching a pointer listener makes a node <code>interactive</code> (it takes part in hit-testing and hover).</li>
+</ul>
+
+<h2>Focus</h2>
+<p>One node has keyboard focus (<code>ui.focused()</code>, <code>ui.setFocus(h)</code>, <code>ui.setFocus(null)</code>). A node must have <code>flags.focusable = true</code> (widgets that take keys set this); Tab and Shift+Tab move between focusable nodes in tree order, adjusted by <code>node.tab_index</code>.</p>
+<p><b>Focus scopes</b> trap focus for dialogs and menus:</p>
+<pre><code>if (ui.pushFocusScope(dialog_root, true)) { ... }   // true: also block pointer input outside
+...
+ui.popFocusScope();                                  // focus returns to where it was</code></pre>
+
+<h2>Making your own nodes clickable</h2>
+<pre><code>try ui.makeClickable(row, .{ .label = "Open file", .on_click = .bind(&amp;app, App.open) });</code></pre>
+<p>This sets role, label, focusability, a pointer cursor, and click/Enter/Space activation.</p>
+
+<h2>Commands</h2>
+<p>A <b>command</b> is a named action ("file.save") that buttons, shortcuts, menus, and code can all run.</p>
+<pre><code>_ = try ui.registerCommand("file.save", .{
+    .title = "Save",
+    .run = .bind(&amp;app, App.save),
+    .enabled = true,
+    .repeat = false,          // holding the shortcut does not re-run it
+});
+
+_ = ui.invokeCommand("file.save");
+_ = ui.setCommandEnabled("file.save", app.dirty);</code></pre>
+<p>A button can run a command directly: <code>ui.add(Button, parent, .{ .text = "Save", .command = "file.save" })</code>. It is disabled automatically while the command is disabled.</p>
+
+<h2>Shortcuts</h2>
+<pre><code>try ui.bindShortcut("mod+s", "file.save", .app, null);
+try ui.bindShortcut("ctrl+k ctrl+c", "edit.comment", .app, null);          // a two-key sequence
+try ui.bindShortcut("alt+up", "builder.up", .panel, preview_panel_node);   // only while focus is inside that panel</code></pre>
+<ul>
+<li><code>mod</code> is Ctrl on Linux/Windows and Cmd on macOS.</li>
+<li>Scopes, least to most specific: <code>.app</code>, <code>.window</code>, <code>.panel</code> (focus inside a node's subtree), <code>.widget</code> (that node itself focused). The most specific matching binding wins; a binding whose command is disabled is skipped so a broader one can take over.</li>
+<li>Sequences wait up to 1.5 s for the next chord; a key that completes nothing is swallowed so a dead chord never types.</li>
+<li>In a text field, unmodified printable keys never trigger shortcuts.</li>
+<li><code>bindShortcut</code> returns <code>error.Conflict</code> if the sequence is a prefix of another binding in the same scope; use <code>rebindShortcut</code> to replace.</li>
+</ul>
+<h3>Keymap files</h3>
+<pre><code>const report = ui.loadKeymap(
+    \\ctrl+s = file.save
+    \\window: ctrl+k ctrl+c = edit.comment
+    \\ctrl+q = none            # unbind
+);</code></pre>
+<p>Only app and window scopes can be written in text. Bad lines are skipped and counted in the report. <code>ui.shortcutText("file.save", &amp;buf)</code> gives the text to show in a menu.</p>
+
+<h2>Cursors</h2>
+<p>Set <code>node.cursor</code> (<code>.default .text .pointer .resize_horizontal .resize_vertical</code>); <code>ui.cursor()</code> returns the one for the node under the pointer, and the platform shim applies it (<code>sdl.setUiCursor(ui.cursor())</code>).</p>
+</main><script src="nav.js"></script></body></html>

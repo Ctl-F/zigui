@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Getting started - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Getting started</h1>
+
+<h2>Requirements</h2>
+<ul>
+<li><b>Zig 0.17.0.</b></li>
+<li><b>SDL3</b> development files (<code>pkg-config sdl3</code> must work) to open windows. The library and <code>zig build test</code> do not need SDL.</li>
+<li>A <b>TrueType font</b>. The examples look in common system paths on Linux; set <code>ZIGUI_FONT=/path/ui.ttf</code> and <code>ZIGUI_MONO_FONT=/path/mono.ttf</code> to choose. There is no bundled font yet.</li>
+<li><code>glslc</code> only if you edit the GPU shaders (<code>zig build shaders</code>); the compiled SPIR-V is committed.</li>
+</ul>
+
+<h2>Build and run what exists</h2>
+<pre><code>zig build test           # all tests, no SDL needed
+zig build demo           # IDE-style demo window
+zig build builder        # the visual UI builder (edits ./ui.zon)
+zig build workbench      # text editor and builder side by side
+zig build paint          # paint program on a Canvas
+zig build install        # build all examples into zig-out/bin without running</code></pre>
+<p>Examples build in ReleaseSafe by default because software rendering in Debug is an order of magnitude slower; pass <code>-Dexample_optimize=debug</code> to change that.</p>
+
+<h2>The pieces of an application</h2>
+<p>zigui does not own your event loop. A program has four parts:</p>
+<ol>
+<li><b>A platform layer</b> (the <code>zigui_sdl</code> module): creates the window, turns OS events into calls on <code>Ui</code>, shows finished frames.</li>
+<li><b>A font backend</b> (the <code>zigui_stb</code> module): loads a font file and hands it to <code>Ui.addFont</code>.</li>
+<li><b>The <code>Ui</code></b> (the <code>zigui</code> module): the tree, layout, input, and widgets.</li>
+<li><b>A render backend</b>: <code>software_backend.SoftwareBackend</code> (CPU) or the GPU backend in <code>zigui_gpu</code>.</li>
+</ol>
+<p>The repository's <code>build.zig</code> exports the modules <code>zigui</code>, <code>zigui_sdl</code>, <code>zigui_gpu</code>, and <code>zigui_stb</code>. The simplest way to start a program today is to copy <code>examples/dedit.zig</code> to a new file and register it with <code>addExample</code> in <code>build.zig</code>.</p>
+
+<h2>Step 1: create the Ui and a font</h2>
+<pre><code>var ui = try zigui.Ui.init(gpa);   // DO NOT MOVE the Ui after adding widgets
+defer ui.deinit();
+
+const font_bytes = stb.loadFirst(io, gpa, environ.get("ZIGUI_FONT"), &amp;stb.ui_font_candidates);
+defer if (font_bytes) |b| gpa.free(b);
+var font: stb.StbFont = undefined;
+try font.init(font_bytes.?, 0);
+_ = try ui.addFont(font.backend());      // font id 0 is the UI font</code></pre>
+<div class="warn">A <code>Ui</code> must stay where it was created once widgets exist (widgets keep a pointer to it). Keep it on the stack of <code>main</code> or on the heap; never return it or put it in a growing container. Debug builds panic if it moves.</div>
+
+<h2>Step 2: build the tree</h2>
+<pre><code>const tree = &amp;ui.tree;
+tree.get(tree.root).?.style = .{ .direction = .column, .padding = zigui.style.Edges.all(12), .gap = .px(8) };
+tree.get(tree.root).?.visual = .{ .background = zigui.Color.rgb(32, 40, 60) };
+
+_ = try ui.add(zigui.Label, tree.root, .{ .text = "Hello" });
+_ = try ui.add(zigui.Button, tree.root, .{
+    .text = "Save",
+    .on_click = .bind(&amp;app, App.save),
+});</code></pre>
+<p><code>ui.add(WidgetType, parent, options)</code> creates the node, the widget state, and its listeners, and returns a pointer to the widget. Options are plain structs with defaults; see each widget page.</p>
+
+<h2>Step 3: the frame loop</h2>
+<p>Every iteration: tick timers, run per-frame updates, draw if anything changed, end the frame, then feed in the OS events.</p>
+<pre><code>var list = zigui.DrawList.init(commands, glyphs);   // storage allocated once
+var renderer = try zigui.software_backend.SoftwareBackend.init(gpa, presenter);
+const backend = renderer.backend();
+
+var force = true;
+while (running) {
+    _ = ui.tick(sdl.ticks());
+    ui.update();
+    if (force or ui.isDirty()) {
+        const px = window.pixelSize();
+        try ui.renderFrame(backend, &amp;list, .{
+            .pixel_w = px.w, .pixel_h = px.h, .scale = window.scale(),
+            .clear = zigui.Color.black,
+        });
+        force = false;
+    }
+    ui.endFrame();
+
+    // Sleep until an event arrives, or until a caret blink / animation is due.
+    const timeout: i32 = if (ui.nextWakeMs()) |ms| @intCast(ms) else -1;
+    var ev = sdl.waitEvent(timeout);
+    _ = ui.tick(sdl.ticks());
+    while (ev) |e| : (ev = sdl.pollEvent()) {
+        switch (e.data) {
+            .quit, .close_requested => running = false,
+            .resized, .expose => force = true,
+            .mouse_move => |m| ui.pointerMove(m.x, m.y),
+            .mouse_button => |m| ui.pointerButtonEx(m.x, m.y, @backingInt(m.button), m.down, m.clicks),
+            .mouse_wheel => |m| ui.wheel(m.px, m.py, m.x, m.y),
+            .pointer_left => ui.pointerLeft(),
+            .focus_lost => ui.pointerCancel(),
+            .text_input => |t| ui.textInput(t.bytes[0..t.len]),
+            .text_editing => |t| ui.textEditing(t.bytes[0..t.len], t.cursor),
+            .key => |k| _ = ui.keyHandled(k.key, k.mods, k.down, k.repeat),
+        }
+    }
+}</code></pre>
+<p>What each call does:</p>
+<table>
+<tr><th>Call</th><th>Purpose</th></tr>
+<tr><td><code>ui.tick(ms)</code></td><td>Advances time: caret blink, canvas frame timers. Pass a monotonic millisecond clock.</td></tr>
+<tr><td><code>ui.update()</code></td><td>Runs widget per-frame work (turning pointer state into <code>out</code> flags, shaping text).</td></tr>
+<tr><td><code>ui.isDirty()</code></td><td>True when something needs layout or painting. Skip drawing when false.</td></tr>
+<tr><td><code>ui.renderFrame(...)</code></td><td>Layout, paint into the draw list, submit to the backend (damaged area only).</td></tr>
+<tr><td><code>ui.endFrame()</code></td><td>Clears per-frame flags such as <code>out.clicked</code>.</td></tr>
+<tr><td><code>ui.nextWakeMs()</code></td><td>Milliseconds until the next timer needs a frame, or null to sleep until an event.</td></tr>
+<tr><td><code>ui.pointer*</code>, <code>ui.wheel</code>, <code>ui.key*</code>, <code>ui.text*</code></td><td>Input entry points. Coordinates are logical pixels (not device pixels).</td></tr>
+</table>
+<p>Escape-to-quit, text-input enabling for IMEs (<code>ui.textInputRect()</code>), and cursor shapes (<code>ui.cursor()</code>) are shown in <code>examples/builder.zig</code>.</p>
+
+<h2>Next</h2>
+<p>Read <a href="how-it-works.html">How it works</a> for the model, then <a href="layout.html">Layout</a> and the <a href="widgets/index.html">widget pages</a>.</p>
+</main><script src="nav.js"></script></body></html>
