@@ -16,7 +16,7 @@ atlas, fields), commands and scoped shortcuts, a piece-table editor core with
 undo/redo and multi-cursor, a code editor widget with incremental syntax
 highlighting, a software renderer, an SDL3 platform shim, a runtime widget
 schema and registry, generated forms and wizards, ZON UI documents, and a visual
-builder. About 475 tests.
+builder. About 495 tests.
 
 Not built yet (largest first): a renderer backend interface and GPU path, canvas
 and frame scheduling, damage tracking, list/tree widgets and a model interface,
@@ -179,112 +179,38 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   `.props` through the registry's `set_text`. `@embedFile` text loads the same way
   at startup; comptime validation and declarative wizards are not built.
 - Builder (`builder/builder.zig`, run with `zig build builder`): palette, outline,
-  live preview, and a generated inspector, all in the toolkit. Edits go through
-  `uidoc/edit.zig`, an undo/redo command editor (consecutive edits to the same
-  field of a record merge into one step; structural edits and selection changes
-  end the run). The inspector is `Form(Dynamic)` over the runtime schema of the
-  selected widget's live props and style, so the preview responds as you type;
-  `uidoc/diff.zig` turns the live value back into the document's sparse ZON record.
-  Inspector edits do not rebuild the preview or inspector (that would drop focus);
-  structural edits, undo, and redo do. Limits: no scroll container yet, so the
-  inspector shows Props, Style, or Events one at a time; no drag-and-drop or
-  clicking in the preview to select; enums are cycle buttons.
-- Renderer backend (`render/backend.zig`): a `Backend` vtable (begin frame,
-  submit a draw list with optional clear and damage rect, end frame/present,
-  create/update/destroy texture, upload atlas page, readback) with caps. Textures
-  are opaque generational handles the backend owns. The software renderer is the
-  first implementation (`render/software_backend.zig`, with an optional
-  `Presenter` that shows frames, e.g. in the SDL window). `Ui.renderFrame` lays
-  out and draws through any backend; for backends with `caps.atlas_upload` it
-  first makes sure every glyph is in the atlas (`prepareGlyphs`) and uploads
-  changed pages, so a GPU backend never sees a missing glyph. No draw command
-  samples textures yet, and no GPU backend exists; `software.render` remains as
-  the rasterizer underneath.
-- Canvas (`widgets/canvas.zig`): draw-list mode (`on_draw` emits commands clipped
-  to the node) and offscreen-texture mode (`createSurface`, `updateSurface`,
-  drawn with the new `image` draw command; the software renderer samples nearest
-  or bilinear). `redraw_policy` is `on_demand`, `continuous`, or `fixed_hz`, and
-  `Ui.tick`/`nextWakeMs` honor it (the SDL window now vsyncs). Input: pointer
-  events with local coordinates and press capture, `grab_input` to send all
-  pointer input to the canvas, and `raw_keys` so a focused canvas gets every key
-  before shortcuts and Tab (only Escape escapes; `NodeFlags.raw_keys`). Not built:
-  native-pass mode (needs the GPU backend), pointer lock, pen pressure and tilt,
-  motion coalescing. `Ui.backend` is set by `renderFrame` or `setBackend`.
-  Release a canvas surface before destroying the canvas.
-- Frame stats (`core/frame_stats.zig`): `Ui.renderFrame` records each frame's
-  update/layout/build/submit cost (from `Ui.clock`, a nanosecond clock the platform
-  sets, e.g. `sdl.ticksNs`; without one timings read zero), command and glyph
-  counts, into a 120-frame ring. `ui.show_stats` draws a bar chart overlay (rects
-  only, so no font needed; F3 in the demo) with a line at the 60 Hz budget.
-  Input handlers are timed: one over `handler_budget_ns` (default 8 ms) is counted
-  in `slow_handlers` and logs a warning in debug builds. A test runs 32 frames of a
-  real scene (label, button, field, code editor, canvas, hover, caret blink, full
-  relayout and repaint) under a counting allocator and asserts zero allocations
-  after warmup; paint errors (draw list full, out of memory) now propagate from
-  `paintHook` instead of being swallowed.
-- Damage and paint caching: the tree records what must be redrawn
-  (`core/damage.zig`: a node's old and new area when it changes or moves, grown
-  by 3 px for rings and by its text where the text is larger than the node; up
-  to 8 rects, then their bounding box). `Ui.renderFrame` hands the backend that
-  bounding box as `Submit.damage` when the backend keeps its contents
-  (`caps.partial_redraw`; the software backend does), and does a full redraw on
-  the first frame, a size or scale change, `RenderOptions.full`, or a root
-  resize. A property test renders random edits (text, enable, hover, focus, moves,
-  typing, canvas invalidation) incrementally and from scratch and requires
-  identical pixels. The draw list itself is still rebuilt each frame, except
-  that repaint-boundary subtrees (`NodeFlags.repaint_boundary`, set by code
-  editors and canvases) are recorded in `Ui.paint_cache` and replayed (translated
-  if the node moved) until something inside them is dirty; a pure move does not
-  dirty the moved node (`Tree.markMoved`). The stats overlay counts replays.
-- Accessibility and focus: node labels are owned (`Tree.setLabel` copies);
-  `Ui.makeClickable(node, .{ .label, .role, .on_click })` makes any node focusable
-  and activatable by click, Enter, or Space; a debug-build check warns once about
-  each interactive or focusable node with no name (a label, or text on it or
-  inside it; `a11y_warnings` counts them, `a11y_log` silences the log); text
-  fields, code editors, and canvases get default labels. Tab order honors
-  `Node.tab_index` (positive first, ascending; then zero in tree order; negative
-  skipped). Focus scopes (`Ui.pushFocusScope(root, modal)` / `popFocusScope`,
-  up to 8 deep) trap Tab and programmatic focus inside a subtree, a modal scope
-  also ignores pointer input outside it, focus returns to where it was on pop (or
-  when the scope root is destroyed), and a scope remembers its last focused node.
-  IME: `Ui.textEditing(text, caret)` delivers a composition (`text_editing`
-  event; the SDL shim converts SDL's character caret to bytes); text fields splice
-  it in at the caret, underlined, and the code editor draws it over the caret
-  line; the committed text arrives through `textInput`, and losing focus cancels
-  it. Candidate-window placement uses the composition-aware `caretRect`.
-- Large files (`CodeEditor.openFile(io, path)`): the file is memory-mapped
-  read-only without prefaulting (`editor/mapped_file.zig`), becomes the piece
-  table's borrowed original at once (`PieceTable.initMapped`), and a worker thread
-  scans newlines in 4 MiB chunks (`editor/indexer.zig`), handing each chunk to
-  the UI thread through a 32-slot ring (the worker waits if the UI falls behind;
-  nothing in the core is touched off-thread). `Ui.wake` (the SDL shim's `wake`)
-  lets the worker unblock the event loop. While `out.indexing` the line count
-  grows, line lookups work for the indexed part, and edits and undo return
-  `error.Indexing` (ignored by the widget); afterwards it is an ordinary
-  document. The index costs 8 bytes per line. Truncating a mapped file from
-  outside faults on the lost pages; save to a new file and rename.
-- SDL3 GPU backend (`platform/sdl_gpu.zig`, module `zigui_gpu`): the `Backend`
-  interface on Vulkan through SDL's GPU API (`ZIGUI_RENDERER=gpu` in the demo).
-  Frames draw into a persistent offscreen target (so damage rects work) that is
-  blitted to the window's swapchain; with no window (or one that cannot be
-  claimed, like the offscreen video driver) it is headless and `readback` works.
-  The draw list becomes one vertex stream (six vertices per quad, 96 bytes each),
-  batched by texture and scissor, uploaded once, drawn in one render pass with
-  one pipeline. Shapes are SDFs in the fragment shader (same math as the
-  software rasterizer), glyphs sample R8 atlas page textures uploaded through
-  `uploadAtlasPage`, images and canvas surfaces are RGBA8/R8 textures. Tests
-  (6, skipped if no GPU device exists) render a mixed scene at 1x and 2x, a real
-  Ui with text through the atlas, partial redraws, and textures, and require the
-  result to match the software renderer within rounding. Shaders are GLSL in
-  `platform/shaders/` compiled to SPIR-V and committed. Metal and D3D12 need the
-  same shaders converted (SDL_shadercross) and are not set up. Headless runs use
-  `SDL_VIDEO_DRIVER=offscreen`.
-- Monospace draw-list runs: `DrawList.monoRunAt` records a run of monospace
-  text as cells (one glyph id per column, `empty_cell` for spaces, a first x, a
-  baseline, and a cell width) instead of a positioned glyph each; refused (the
-  caller falls back to `glyphRunAt`) when positions are off the cell grid. Both
-  renderers, the paint cache, and `prepareGlyphs` handle it, the code editor
-  emits it, and a test requires identical pixels to positioned glyphs.
+  live preview, and a generated inspector, all in the toolkit, over the undoable
+  document editor in `uidoc/edit.zig` (edits made in one gesture, like a resize
+  drag, merge into one step; batches group multi-part edits such as wrap).
+  - *Design surface:* the preview is not running; clicks select the node under the
+    pointer (empty frame space selects the root), hover and selection are drawn
+    as overlays with resize handles, and the frame can be set to a device size.
+  - *Moving things:* drag in the preview or the outline to reorder and reparent
+    (over a box's middle: inside; over a widget or a box's edge: beside, with an
+    insertion marker; never into the node's own subtree); drag a palette entry
+    to create it where you drop it. The geometry lives in `builder/interact.zig`
+    and is unit tested.
+  - *Resizing:* right, bottom, and corner handles set pixel width and height.
+  - *Inspector* (scrolls): Props and Style are generated from the schema; Layout
+    is a hand-made panel (direction, gap, padding, align, justify, width and
+    height modes, grow, shrink, margin, align self); Events binds actions.
+  - *Structure:* duplicate, wrap in a box, unwrap, indent, outdent, move up/down,
+    delete, copy, cut, paste (ZON text through the system clipboard), each with a
+    toolbar button and a shortcut scoped to the builder's panel.
+  - *Hosting:* `command_prefix` lets several builders coexist, `modified()` /
+    `markSaved()` / `on_change` track the document, and `loadDocument` swaps it,
+    which is what an IDE embedding it needs.
+  Inspector edits write to the live widget and are diffed back into the document,
+  so typing focus survives; structural changes, undo, and redo rebuild the views.
+  Limits: no multi-selection, no zoom, no drag from the preview onto the
+  inspector, no live text editing on the canvas; enums are cycle buttons.
+- Scroll containers (`widgets/scroll_view.zig`): `Node.scroll_x/y` offsets what
+  its children draw, hit, and report (`absoluteRect`, hit testing, paint, and
+  damage all follow it); `ScrollView` is a clipped viewport onto a content node
+  with wheel scrolling, shift-wheel for horizontal, a draggable thumb,
+  `scrollTo`/`scrollIntoView`, and an `overlay` slot; `Node.overlay_hook` paints
+  after children. `Tree.nodeAt` picks the deepest node at a point, interactive or
+  not.
 - Widget registry (`widgets/registry.zig`): one list of widget types gives each a
   name, `Props`/`Out` schemas, and create-by-name. `Ui.add` tags the node
   (`Node.widget`, `Node.widget_type`) so a node maps back to its descriptor.

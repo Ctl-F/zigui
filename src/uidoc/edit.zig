@@ -44,6 +44,8 @@ pub const Editor = struct {
     /// The single top-level field that edit changed (edits to other fields do
     /// not merge into it), or null if it changed several.
     coalesce_key: ?[]const u8 = null,
+    /// Nonzero: the last record edit belongs to this gesture (see `setRecordIn`).
+    coalesce_group: u32 = 0,
     batch_depth: u32 = 0,
     batch_cmds: std.ArrayListUnmanaged(Command) = .empty,
 
@@ -309,6 +311,12 @@ pub const Editor = struct {
     /// Replace a node's style or props record. Consecutive calls for the same
     /// record merge into one undo step.
     pub fn setRecord(self: *Editor, uid: u32, which: Which, value: zon.Value) Error!void {
+        return self.setRecordIn(uid, which, value, 0);
+    }
+
+    /// Like `setRecord`, but edits made with the same nonzero `group` in a row
+    /// (a drag, say) merge into one undo step whatever fields they change.
+    pub fn setRecordIn(self: *Editor, uid: u32, which: Which, value: zon.Value, group: u32) Error!void {
         const n = try self.node(uid);
         const old = switch (which) {
             .style => n.style,
@@ -317,7 +325,9 @@ pub const Editor = struct {
         if (old.eql(value)) return;
         const copy = try self.doc.copyValue(value);
         const key = changedKey(old, copy);
-        if (self.coalescing and key != null and self.coalesce_key != null and std.mem.eql(u8, key.?, self.coalesce_key.?) and self.undo_stack.items.len > 0) {
+        const same_group = group != 0 and self.coalesce_group == group;
+        const same_key = group == 0 and key != null and self.coalesce_key != null and std.mem.eql(u8, key.?, self.coalesce_key.?);
+        if (self.coalescing and (same_group or same_key) and self.undo_stack.items.len > 0) {
             switch (self.undo_stack.items[self.undo_stack.items.len - 1]) {
                 .set_record => |*last| if (last.uid == uid and last.which == which) {
                     last.new = copy;
@@ -332,6 +342,7 @@ pub const Editor = struct {
         try self.exec(.{ .set_record = .{ .uid = uid, .which = which, .old = old, .new = copy } });
         self.coalescing = true;
         self.coalesce_key = key;
+        self.coalesce_group = group;
     }
 
     /// The one top-level field in which two records differ, if exactly one does.

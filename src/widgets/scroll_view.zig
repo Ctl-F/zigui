@@ -36,6 +36,8 @@ pub const ScrollView = struct {
     ui: *Ui,
     checker: shadow.Checker(Props),
     content: Handle = Handle.invalid,
+    /// Drawn on top of the content and the scrollbars (drop indicators, overlays).
+    overlay: ?tree_mod.PaintHook = null,
     dragging: bool = false,
     drag_from_y: f32 = 0,
     drag_from_x: f32 = 0,
@@ -106,6 +108,9 @@ pub const ScrollView = struct {
         if (o.vertical and !o.horizontal) cs.height = .fit;
         if (o.horizontal) cs.width = .fit;
         const tree = &self.ui.tree;
+        // Vertical views stack the content under the viewport's width, so rows
+        // stretch across it; horizontal ones lay it out left to right.
+        tree.get(self.node).?.style.direction = if (o.vertical and !o.horizontal) .column else .row;
         self.content = try tree.create(.{ .style = cs });
         errdefer _ = tree.destroySubtree(self.content);
         try tree.appendChild(self.node, self.content);
@@ -195,6 +200,7 @@ pub const ScrollView = struct {
         if (self.horizontalThumb(view)) |t| {
             try pc.list.fillRoundedRect(.{ .x = pc.rect.x + t.x, .y = pc.rect.y + t.y, .w = t.w, .h = t.h }, .{ bar_w / 2, bar_w / 2, bar_w / 2, bar_w / 2 }, .{ .color = color });
         }
+        if (self.overlay) |hook| try hook.run(hook.ctx, pc);
     }
 
     // ---- events ----

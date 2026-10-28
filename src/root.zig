@@ -25,6 +25,7 @@ pub const uiload = @import("uidoc/load.zig");
 pub const uidiff = @import("uidoc/diff.zig");
 pub const uiedit = @import("uidoc/edit.zig");
 pub const builder = @import("builder/builder.zig");
+pub const builder_interact = @import("builder/interact.zig");
 pub const registry = @import("widgets/registry.zig");
 pub const frame_stats = @import("core/frame_stats.zig");
 pub const keys = @import("core/keys.zig");
