@@ -66,14 +66,16 @@ pub fn lastError() []const u8 {
     return std.mem.span(c.SDL_GetError());
 }
 
-/// Window flags. `ZIGUI_WINDOW_FLAGS` (comma list: nohidpi, noresize) drops
+/// Window flags. `ZIGUI_WINDOW_FLAGS` (comma list: nohidpi) drops
 /// flags, to bisect platform problems.
 fn windowFlags() c.SDL_WindowFlags {
-    var flags: c.SDL_WindowFlags = c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    // Not created resizable: on Wayland (GNOME, libdecor) a window that is
+    // resizable from the start gets no pointer input until its first resize.
+    // `showAndSync` makes it resizable once the compositor has configured it.
+    var flags: c.SDL_WindowFlags = c.SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (c.SDL_getenv("ZIGUI_WINDOW_FLAGS")) |env| {
         const text = std.mem.span(env);
         if (std.mem.indexOf(u8, text, "nohidpi") != null) flags &= ~@as(c.SDL_WindowFlags, c.SDL_WINDOW_HIGH_PIXEL_DENSITY);
-        if (std.mem.indexOf(u8, text, "noresize") != null) flags &= ~@as(c.SDL_WindowFlags, c.SDL_WINDOW_RESIZABLE);
     }
     return flags;
 }
@@ -84,6 +86,20 @@ fn windowFlags() c.SDL_WindowFlags {
 fn showAndSync(handle: *c.SDL_Window) void {
     _ = c.SDL_ShowWindow(handle);
     _ = c.SDL_SyncWindow(handle);
+    _ = c.SDL_SetWindowResizable(handle, true);
+    _ = c.SDL_SyncWindow(handle);
+    // Fallback for compositors that still ignore the pointer: a one-pixel
+    // resize and back makes them configure the surface again (Wayland only).
+    const driver = c.SDL_GetCurrentVideoDriver() orelse return;
+    if (std.mem.eql(u8, std.mem.span(@as([*:0]const u8, driver)), "wayland") and c.SDL_getenv("ZIGUI_NO_NUDGE") == null) {
+        var w: c_int = 0;
+        var h: c_int = 0;
+        _ = c.SDL_GetWindowSize(handle, &w, &h);
+        _ = c.SDL_SetWindowSize(handle, w + 1, h);
+        _ = c.SDL_SyncWindow(handle);
+        _ = c.SDL_SetWindowSize(handle, w, h);
+        _ = c.SDL_SyncWindow(handle);
+    }
 }
 
 pub const Window = struct {
@@ -104,6 +120,10 @@ pub const Window = struct {
         std.log.info("sdl: video driver {s}, renderer {s}", .{ std.mem.span(@as([*:0]const u8, c.SDL_GetCurrentVideoDriver() orelse @ptrCast("?"))), std.mem.span(@as([*:0]const u8, c.SDL_GetRendererName(renderer) orelse @ptrCast("?"))) });
         // Pace presents to the display so continuous canvases do not spin.
         _ = c.SDL_SetRenderVSync(renderer, 1);
+
+        _ = c.SDL_SetWindowSize(handle, @intCast(logical_w + 1), @intCast(logical_h + 1));
+        _ = c.SDL_SetWindowSize(handle, @intCast(logical_w), @intCast(logical_h));
+
         return .{ .handle = handle, .renderer = renderer };
     }
 
@@ -179,11 +199,11 @@ fn sc(comptime v: anytype) u32 {
 
 fn mapKey(scancode: u32) Key {
     const a = sc(c.SDL_SCANCODE_A);
-    if (scancode >= a and scancode <= a + 25) return @enumFromInt(@intFromEnum(Key.a) + (scancode - a));
+    if (scancode >= a and scancode <= a + 25) return @fromBackingInt(@intCast(@backingInt(Key.a) + (scancode - a)));
     const f1 = sc(c.SDL_SCANCODE_F1);
-    if (scancode >= f1 and scancode <= f1 + 11) return @enumFromInt(@intFromEnum(Key.f1) + (scancode - f1));
+    if (scancode >= f1 and scancode <= f1 + 11) return @fromBackingInt(@intCast(@backingInt(Key.f1) + (scancode - f1)));
     const n1 = sc(c.SDL_SCANCODE_1);
-    if (scancode >= n1 and scancode <= n1 + 8) return @enumFromInt(@intFromEnum(Key.d1) + (scancode - n1));
+    if (scancode >= n1 and scancode <= n1 + 8) return @fromBackingInt(@intCast(@backingInt(Key.d1) + (scancode - n1)));
     return switch (scancode) {
         sc(c.SDL_SCANCODE_0) => .d0,
         sc(c.SDL_SCANCODE_MINUS) => .minus,
@@ -251,14 +271,14 @@ fn translate(ev: *const c.SDL_Event) ?Event {
             // window, so the release is never lost.
             _ = c.SDL_CaptureMouse(ev.type == c.SDL_EVENT_MOUSE_BUTTON_DOWN);
             return .{
-            .window = ev.button.windowID,
-            .data = .{ .mouse_button = .{
-                .x = ev.button.x,
-                .y = ev.button.y,
-                .button = @enumFromInt(ev.button.button),
-                .down = ev.type == c.SDL_EVENT_MOUSE_BUTTON_DOWN,
-                .clicks = ev.button.clicks,
-            } },
+                .window = ev.button.windowID,
+                .data = .{ .mouse_button = .{
+                    .x = ev.button.x,
+                    .y = ev.button.y,
+                    .button = @fromBackingInt(@intCast(ev.button.button)),
+                    .down = ev.type == c.SDL_EVENT_MOUSE_BUTTON_DOWN,
+                    .clicks = ev.button.clicks,
+                } },
             };
         },
         c.SDL_EVENT_MOUSE_WHEEL => return .{
@@ -368,7 +388,7 @@ var current_cursor: ?Cursor = null;
 
 pub fn setCursor(kind: Cursor) void {
     if (current_cursor == kind) return;
-    const idx = @intFromEnum(kind);
+    const idx = @backingInt(kind);
     if (cursors[idx] == null) {
         const sys: c_uint = switch (kind) {
             .default => c.SDL_SYSTEM_CURSOR_DEFAULT,

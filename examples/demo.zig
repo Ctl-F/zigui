@@ -434,7 +434,6 @@ fn clipSet(_: ?*anyopaque, text: []const u8) void {
     sdl.clipboardSet(text);
 }
 
-
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
