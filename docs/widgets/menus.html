@@ -30,6 +30,8 @@ fn onDown(self: *App, ev: *zigui.event.Event) void {
 <tr><td><code>separator</code></td><td>A divider line.</td></tr>
 <tr><td><code>checked</code></td><td>A check mark before the label.</td></tr>
 <tr><td><code>user</code></td><td>Yours.</td></tr>
+<tr><td><code>submenu</code></td><td>Items of a submenu that opens beside this one. The item is not picked itself.</td></tr>
+<tr><td><code>on_pick</code></td><td>For a submenu's items: called with the item's index <i>within that submenu</i>. Without it the root menu's <code>on_pick</code> gets that index.</td></tr>
 </table>
 <h3>Options</h3>
 <table>
@@ -42,6 +44,17 @@ fn onDown(self: *App, ev: *zigui.event.Event) void {
 </table>
 <p>The menu is kept inside the window. <code>ui.closeMenu()</code> closes it; <code>ui.menuOpen()</code> tells you if one is open.</p>
 
+<h2>Submenus</h2>
+<pre><code>const recent = [_]zigui.menu.Item{ .{ .label = "a.zig" }, .{ .label = "b.zig" } };
+try ui.openMenu(&amp;.{
+    .{ .label = "Open" , .command = "file.open" },
+    .{ .label = "Open recent", .submenu = &amp;recent, .on_pick = zigui.menu.PickHook.bind(&amp;app, App.onRecent) },
+}, x, y, .{});</code></pre>
+<p>A submenu opens when the pointer enters its item, or with Right or Enter, and closes when the pointer moves to another item, with Left, or with Escape (which closes only the innermost menu; a second Escape closes the rest). It opens to the right of its parent and flips to the left when there is no room. A press outside closes the whole chain. Submenus nest as deep as you like.</p>
+
+<h2>Long menus scroll</h2>
+<p>A menu taller than the window is held to the window's height and scrolls: mouse wheel, scrollbar, or the arrow keys, Home and End (the focused item is scrolled into view).</p>
+
 <h2>MenuBar</h2>
 <pre><code>const bar = try zigui.MenuBar.create(&amp;ui, parent, .{});
 defer bar.destroy();
@@ -51,11 +64,11 @@ try bar.addMenu("File", &amp;.{
     .{ .label = "Quit", .command = "app.quit" },
 }, null);
 try bar.addMenu("Edit", &amp;.{ .{ .label = "Undo", .command = "edit.undo" } }, null);</code></pre>
-<p>Clicking a title opens its menu below it; while one is open, moving over another title switches to it; clicking the open title again closes it. The optional last argument is a <code>PickHook</code> for that menu. Like <a href="../forms.html">Form</a>, the bar is a heap object you <code>destroy</code>. Put <code>bar.node</code> in your layout (it is a row; pass <code>.style</code> in the options to size it).</p>
+<p>Clicking a title opens its menu below it; while one is open, moving over another title switches to it; clicking the open title again closes it. The optional last argument is a <code>PickHook</code> for that menu. Like <a href="../forms.html">Form</a>, the bar is a heap object you <code>destroy</code>. Put <code>bar.node</code> in your layout. It looks like an application menu bar: a strip (<code>.background</code>) of plain titles that highlight on hover and while their menu is open. Pass <code>.style</code> in the options to size or pad it.</p>
 
 <h2>Limits</h2>
 <ul>
-<li>No submenus, no icons, no keyboard mnemonics (Alt+letter) or arrow-key switching between bar menus yet.</li>
+<li>No icons, no keyboard mnemonics (Alt+letter) or arrow-key switching between bar menus yet.</li>
 <li>Long menus do not scroll; keep them shorter than the window.</li>
 </ul>
 </main><script src="../nav.js"></script></body></html>

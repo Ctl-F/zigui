@@ -8,6 +8,7 @@
 //! and `min_second`.
 
 const std = @import("std");
+const common = @import("common.zig");
 const Handle = @import("../core/handle.zig").Handle;
 const shadow = @import("../core/shadow.zig");
 const Color = @import("../core/geometry.zig").Color;
@@ -71,6 +72,12 @@ pub const SplitView = struct {
         min_second: f32 = 48,
         divider_size: f32 = 6,
         anchor_second: bool = false,
+    };
+
+    /// Context-menu commands for editors.
+    pub const actions = [_]common.Action{
+        .{ .label = "Make vertical", .toggle = "vertical", .label_when_on = "Make horizontal" },
+        .{ .label = "Keep second pane fixed", .toggle = "anchor_second", .checkable = true },
     };
 
     pub const listened_kinds = [_]event.EventKind{};

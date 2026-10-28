@@ -25,6 +25,7 @@ const CodeEditor = @import("code_editor.zig").CodeEditor;
 const Canvas = @import("canvas.zig").Canvas;
 const ScrollView = @import("scroll_view.zig").ScrollView;
 const SplitView = @import("split_view.zig").SplitView;
+const common = @import("common.zig");
 const Select = @import("select.zig").Select;
 
 pub const Error = schema.Error || error{ UnknownWidget, NotAWidget, StaleHandle };
@@ -56,6 +57,8 @@ pub const Info = struct {
     /// Widgets with several panes: the node for child `index`, or null if the
     /// widget has no such pane.
     content_at: ?*const fn (w: *anyopaque, index: usize) ?Handle,
+    /// Widget-specific context-menu commands (see `common.Action`).
+    actions: []const common.Action,
 };
 
 /// Props fields named `on_*` that hold an optional callback.
@@ -138,6 +141,7 @@ fn describe(comptime name: []const u8, comptime W: type) Info {
         .setEvent = G.setEvent,
         .content = if (@hasDecl(W, "contentNode")) G.content else null,
         .content_at = if (@hasDecl(W, "contentNodeAt")) G.contentAt else null,
+        .actions = if (@hasDecl(W, "actions")) &W.actions else &.{},
         .set_text = if (!@hasField(W.Props, "text") and (@hasDecl(W, "loadText") or @hasDecl(W, "setText"))) G.setText else null,
     };
 }

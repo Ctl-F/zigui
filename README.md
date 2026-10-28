@@ -369,7 +369,11 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   its shortcut. `Select` is a widget over it (options kept as one
   newline-separated `Text` so the registry and documents can edit them);
   forms use it for enums. Right-click menus are just a `pointer_down` listener
-  on button 3. No submenus yet.
+  on button 3. Submenus nest (a child `Menu` with its own focus scope; Right,
+  Left, Escape, hover), and long menus scroll in an inner `ScrollView`. Widgets
+  can declare `pub const actions` (bool-prop toggles) which the builder shows
+  in a per-widget submenu of its right-click menu. `MenuBar` titles are
+  painted as plain text on a strip, not as buttons.
 - Keyboard focus by Tab selects a text field's whole text (`input.keyboard`
   tells the field how focus arrived). `SplitView.anchor_second` anchors the
   second pane's size; `TreeView.activate_toggles` lets hosts use double-click

@@ -612,9 +612,12 @@ pub const Builder = struct {
         }, null);
     }
 
-    /// The right-click menu for the selected node.
+    /// The right-click menu for the selected node: the common commands, then
+    /// a submenu of the widget's own actions (`registry.Info.actions`).
     fn openContextMenu(self: *Builder, x: f32, y: f32) void {
-        self.ui.openMenu(&.{
+        var items: [18]menu_mod.Item = undefined;
+        var n: usize = 0;
+        const common = [_]menu_mod.Item{
             self.cmdItem("Cut", .cut),
             self.cmdItem("Copy", .copy),
             self.cmdItem("Paste", .paste),
@@ -629,7 +632,53 @@ pub const Builder = struct {
             self.cmdItem("Move down", .down),
             separator,
             self.cmdItem("Rename id", .rename),
-        }, x, y, .{}) catch |e| self.updateStatus(e);
+        };
+        for (common) |it| {
+            items[n] = it;
+            n += 1;
+        }
+        var labels: [8][96]u8 = undefined;
+        var subs: [8]menu_mod.Item = undefined;
+        var sub_n: usize = 0;
+        const sel = self.selectedNode();
+        if (self.live(sel)) |l| {
+            if (l.info) |info| {
+                for (info.actions, 0..) |act, i| {
+                    if (sub_n == subs.len) break;
+                    const on = self.actionIsOn(l, act);
+                    const label = if (on and act.label_when_on.len > 0) act.label_when_on else act.label;
+                    const text = std.fmt.bufPrint(&labels[i], "{s}", .{label}) catch label;
+                    subs[sub_n] = .{ .label = text, .checked = act.checkable and on, .on_pick = menu_mod.PickHook.bind(self, onWidgetAction) };
+                    sub_n += 1;
+                }
+                if (sub_n > 0) {
+                    items[n] = separator;
+                    n += 1;
+                    items[n] = .{ .label = info.name, .submenu = subs[0..sub_n] };
+                    n += 1;
+                }
+            }
+        }
+        self.ui.openMenu(items[0..n], x, y, .{}) catch |e| self.updateStatus(e);
+    }
+
+    fn actionIsOn(self: *Builder, l: Live, act: anytype) bool {
+        const v = registry.getProp(self.ui, l.h, act.toggle) catch return false;
+        return v == .bool and v.bool;
+    }
+
+    /// A widget-specific menu action: flip its bool prop, then record it.
+    fn onWidgetAction(self: *Builder, index: usize) void {
+        const n = self.selectedNode();
+        const l = self.live(n) orelse return;
+        const info = l.info orelse return;
+        if (index >= info.actions.len) return;
+        const act = info.actions[index];
+        const on = self.actionIsOn(l, act);
+        registry.setProp(self.ui, l.h, act.toggle, .{ .bool = !on }) catch |e| return self.updateStatus(e);
+        var ev: event.Event = .{ .kind = .click };
+        self.onInspectorEdit(&ev);
+        self.rebuildInspector() catch |e| self.updateStatus(e);
     }
 
     // ---- renaming ----
@@ -971,7 +1020,7 @@ pub const Builder = struct {
 
     const layout_field_count = 13;
     const LayoutField = enum(u8) { gap, padding, margin, width_px, height_px, grow, shrink, grid_columns, grid_span, inset_left, inset_top, inset_right, inset_bottom };
-    const LayoutChoice = enum(u8) { direction, align_items, justify, width_mode, height_mode, align_self, position, wrap };
+    const LayoutChoice = enum(u8) { layout_mode, direction, align_items, justify, width_mode, height_mode, align_self, position, wrap };
 
     /// A drop-down for one of the Layout tab's choices.
     fn layoutButtonGroup(self: *Builder, label: []const u8, group: LayoutChoice, names: []const []const u8, current: usize) !void {
@@ -1032,13 +1081,13 @@ pub const Builder = struct {
         const st = self.ui.tree.get(l.h).?.style;
         if (interact.isContainer(n.type_name)) {
             _ = try self.ui.add(Label, self.content(), .{ .text = "Container", .size = 15 });
-            try self.layoutButtonGroup("direction", .direction, &.{ "row", "column" }, @intFromEnum(st.direction));
+            try self.layoutButtonGroup("layout", .layout_mode, &.{ "row", "column", "grid" }, if (st.grid_columns > 0) 2 else @intFromEnum(st.direction));
+            if (st.grid_columns > 0) try self.layoutField("grid columns", .grid_columns, @floatFromInt(st.grid_columns));
             try self.layoutField("gap", .gap, lengthPx(st.gap));
             try self.layoutField("padding", .padding, lengthPx(st.padding.left));
             try self.layoutButtonGroup("align", .align_items, &.{ "start", "center", "end", "stretch" }, @intFromEnum(st.align_items));
             try self.layoutButtonGroup("justify", .justify, &.{ "start", "center", "end" }, @min(@intFromEnum(st.justify), 2));
             try self.layoutButtonGroup("wrap", .wrap, &.{ "no", "yes" }, @intFromBool(st.wrap));
-            try self.layoutField("grid columns", .grid_columns, @floatFromInt(st.grid_columns));
         }
         if (n.parent) |p| {
             const pl = self.live(p);
@@ -1081,6 +1130,12 @@ pub const Builder = struct {
         const l = self.live(n) orelse return;
         const st = &self.ui.tree.get(l.h).?.style;
         switch (group) {
+            .layout_mode => if (choice == 2) {
+                if (st.grid_columns == 0) st.grid_columns = 2;
+            } else {
+                st.grid_columns = 0;
+                st.direction = @enumFromInt(choice);
+            },
             .direction => st.direction = @enumFromInt(choice),
             .align_items => st.align_items = @enumFromInt(choice),
             .justify => st.justify = @enumFromInt(choice),
@@ -2589,6 +2644,7 @@ test "the layout tab makes a container a grid and sets a child's span" {
     b.select(b.doc().root.uid);
     b.setTab(.layout);
     try r.frame();
+    try chooseOption(b, "grid");
     try testing.expect(b.layout_fields[@intFromEnum(Builder.LayoutField.grid_columns)] != null);
     typeInto(&r.ui, b.layout_fields[@intFromEnum(Builder.LayoutField.grid_columns)].?, "2");
     try testing.expectEqual(@as(i64, 2), b.doc().root.style.field("grid_columns").?.int);
@@ -2753,4 +2809,66 @@ test "new area widgets fill their parent, and the split view's divider can be dr
     const dragged = split.props.first_size;
     b.undo();
     try testing.expect(sv_node.props.field("first_size") == null or sv_node.props.field("first_size").?.float != dragged);
+}
+
+test "the context menu has a submenu of the widget's own actions" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    b.select(b.doc().root.uid);
+    clickButton(paletteButton(b, "split_view"));
+    const sv = b.selectedNode();
+    try r.frame();
+    try testing.expect(sv.props.field("vertical") == null);
+
+    b.openContextMenu(100, 100);
+    try r.frame();
+    var m = r.ui.menu.?;
+    var sub_idx: ?usize = null;
+    for (m.entries, 0..) |e, i| {
+        if (e.sub.len > 0 and std.mem.eql(u8, e.label, "split_view")) sub_idx = i;
+    }
+    try testing.expect(sub_idx != null);
+    const at = r.center(m.entries[sub_idx.?].row);
+    r.ui.pointerMove(at[0], at[1]);
+    try r.frame();
+    try r.frame();
+    const child = m.child.?;
+    try testing.expectEqualStrings("Make vertical", child.entries[0].label);
+    try testing.expect(child.entries[1].label.len > 0 and !child.entries[1].checked);
+    const pick = r.center(child.entries[0].row);
+    try r.click(pick[0], pick[1]);
+    try testing.expect(!r.ui.menuOpen());
+    try testing.expect(sv.props.field("vertical").?.bool);
+    const live: *SplitView = @ptrCast(@alignCast(r.ui.tree.get(r.liveOf(sv.uid)).?.widget.?));
+    try testing.expect(live.props.vertical);
+    b.undo();
+    try testing.expect(sv.props.field("vertical") == null or !sv.props.field("vertical").?.bool);
+
+    // With it vertical, the entry reads the other way round.
+    b.redo();
+    try r.frame();
+    b.openContextMenu(100, 100);
+    try r.frame();
+    m = r.ui.menu.?;
+    const at2 = r.center(m.entries[sub_idx.?].row);
+    r.ui.pointerMove(at2[0], at2[1]);
+    try r.frame();
+    try r.frame();
+    try testing.expectEqualStrings("Make horizontal", r.ui.menu.?.child.?.entries[0].label);
+    r.ui.closeMenu();
+}
+
+test "the Layout tab offers grid for containers" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    b.select(b.doc().root.uid);
+    b.setTab(.layout);
+    try r.frame();
+    try testing.expect(b.layout_fields[@intFromEnum(Builder.LayoutField.grid_columns)] == null);
+    try chooseOption(b, "grid");
+    try testing.expectEqual(@as(i64, 2), b.doc().root.style.field("grid_columns").?.int);
+    try chooseOption(b, "column");
+    try testing.expect(b.doc().root.style.field("grid_columns") == null or b.doc().root.style.field("grid_columns").?.int == 0);
 }

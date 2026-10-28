@@ -13,6 +13,7 @@
 //!     // later: align_pick.out.changed, align_pick.props.selected
 
 const std = @import("std");
+const common = @import("common.zig");
 const Handle = @import("../core/handle.zig").Handle;
 const shadow = @import("../core/shadow.zig");
 const geometry = @import("../core/geometry.zig");
@@ -81,6 +82,10 @@ pub const Select = struct {
         enabled: bool = true,
         on_change: ?event.Callback = null,
         painter: ?Painter = null,
+    };
+
+    pub const actions = [_]common.Action{
+        .{ .label = "Enabled", .toggle = "enabled", .checkable = true },
     };
 
     pub const listened_kinds = [_]event.EventKind{ .pointer_enter, .pointer_leave, .click, .key_down, .focus_in, .focus_out };
@@ -495,4 +500,119 @@ test "setItems keeps the selection when it fits, and setSelected ignores bad ind
     try testing.expectEqual(@as(usize, 2), s.count());
     try testing.expectEqualStrings("", s.selectedLabel()); // index 2 no longer exists
     try testing.expectEqualStrings("b", s.itemLabel(1));
+}
+
+test "submenus open on hover and with Right, pick through their own hook, and close with Left, Escape, or outside" {
+    const r = try Rig.init();
+    defer r.deinit();
+    const sub_items = [_]menu.Item{ .{ .label = "one" }, .{ .label = "two" } };
+    try r.ui.openMenu(&.{
+        .{ .label = "Plain" },
+        .{ .label = "More", .submenu = &sub_items },
+    }, 20, 20, .{ .on_pick = menu.PickHook.bind(r, Rig.onPick) });
+    try r.frame();
+    const root = r.ui.menu.?;
+    try testing.expect(root.child == null);
+
+    // Hovering the submenu item opens it beside the parent.
+    const more = r.centerOf(root.entries[1].row);
+    r.ui.pointerMove(more[0], more[1]);
+    try r.frame();
+    try r.frame();
+    const child = root.child.?;
+    try testing.expectEqual(@as(usize, 2), child.entries.len);
+    const pr = r.ui.tree.absoluteRect(root.panel).?;
+    const cr = r.ui.tree.absoluteRect(child.panel).?;
+    try testing.expect(cr.x >= pr.right() - 4);
+    try testing.expect(root.contains(cr.x + 5, cr.y + 5));
+
+    // Hovering a plain item of the parent closes it again.
+    const plain = r.centerOf(root.entries[0].row);
+    r.ui.pointerMove(plain[0], plain[1]);
+    try r.frame();
+    try testing.expect(root.child == null);
+
+    // Right opens it and focuses its first item; Down; Left goes back to the parent.
+    r.ui.setFocus(root.entries[1].row);
+    r.ui.input.keyboard = true;
+    r.ui.key(.right, .{}, true, false);
+    try r.frame();
+    const c2 = root.child.?;
+    try testing.expect(r.ui.tree.focused.eql(c2.entries[0].row));
+    r.ui.key(.down, .{}, true, false);
+    try testing.expect(r.ui.tree.focused.eql(c2.entries[1].row));
+    r.ui.key(.left, .{}, true, false);
+    try r.frame();
+    try testing.expect(root.child == null);
+    try testing.expect(r.ui.menuOpen());
+    try testing.expect(r.ui.tree.focused.eql(root.entries[1].row));
+
+    // Escape closes only the submenu; a second Escape closes the menu.
+    r.ui.key(.right, .{}, true, false);
+    try r.frame();
+    try testing.expect(root.child != null);
+    r.ui.key(.escape, .{}, true, false);
+    try r.frame();
+    try testing.expect(root.child == null and r.ui.menuOpen());
+    r.ui.key(.escape, .{}, true, false);
+    try r.frame();
+    try testing.expect(!r.ui.menuOpen());
+
+    // Pick a submenu item: the root's hook gets its index within the submenu.
+    try r.ui.openMenu(&.{.{ .label = "More", .submenu = &sub_items }}, 20, 20, .{ .on_pick = menu.PickHook.bind(r, Rig.onPick) });
+    try r.frame();
+    const m = r.centerOf(r.ui.menu.?.entries[0].row);
+    r.ui.pointerMove(m[0], m[1]);
+    try r.frame();
+    try r.frame();
+    const two = r.centerOf(r.ui.menu.?.child.?.entries[1].row);
+    try r.click(two[0], two[1]);
+    try testing.expect(!r.ui.menuOpen());
+    try testing.expectEqual(@as(?usize, 1), r.picked);
+
+    // A press outside closes the whole chain.
+    try r.ui.openMenu(&.{.{ .label = "More", .submenu = &sub_items }}, 20, 20, .{});
+    try r.frame();
+    const m2 = r.centerOf(r.ui.menu.?.entries[0].row);
+    r.ui.pointerMove(m2[0], m2[1]);
+    try r.frame();
+    try r.frame();
+    try testing.expect(r.ui.menu.?.child != null);
+    try r.click(290, 290);
+    try testing.expect(!r.ui.menuOpen());
+}
+
+test "a menu taller than the window scrolls instead of overflowing" {
+    const r = try Rig.init();
+    defer r.deinit();
+    try r.frame(); // the window size is known to the menu
+    var items: [40]menu.Item = undefined;
+    var labels: [40][8]u8 = undefined;
+    for (&items, 0..) |*it, i| {
+        const l = std.fmt.bufPrint(&labels[i], "item {d}", .{i}) catch "x";
+        it.* = .{ .label = l };
+    }
+    try r.ui.openMenu(&items, 10, 10, .{ .on_pick = menu.PickHook.bind(r, Rig.onPick) });
+    try r.frame();
+    try r.frame();
+    const m = r.ui.menu.?;
+    const pr = r.ui.tree.absoluteRect(m.panel).?;
+    try testing.expect(pr.bottom() <= 300.5 and pr.y >= 0);
+    try testing.expect(m.scroll.out.overflowing);
+
+    // The wheel scrolls it.
+    r.ui.wheel(pr.x + 20, pr.y + 40, 0, -3);
+    try r.frame();
+    try testing.expect(r.ui.tree.get(m.scroll.node).?.scroll_y > 0);
+
+    // Keyboard navigation to the end scrolls the focused row into view.
+    r.ui.key(.end, .{}, true, false);
+    try r.frame();
+    try r.frame();
+    const last = r.ui.tree.absoluteRect(m.entries[39].row).?;
+    const view = r.ui.tree.absoluteRect(m.scroll.node).?;
+    try testing.expect(last.bottom() <= view.bottom() + 0.5);
+    r.ui.key(.enter, .{}, true, false);
+    try r.frame();
+    try testing.expectEqual(@as(?usize, 39), r.picked);
 }

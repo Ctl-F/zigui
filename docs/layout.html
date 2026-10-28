@@ -66,6 +66,7 @@ for (names) |n| _ = try ui.add(zigui.Button, grid, .{ .text = n });</code></pre>
 <li>A child with <code>.width = .auto</code> fills its cell when <code>align_items</code> is <code>.stretch</code> (the default); with <code>.start/.center/.end</code> it keeps its natural width and is placed accordingly. A fixed <code>width</code> or <code>height</code> is honored. <code>align_self</code> overrides per child. Margins are respected inside the cell.</li>
 <li><code>grid_span = 2</code> makes a child cover two columns; a child that does not fit the rest of the row starts a new row. Spans larger than the column count are clamped.</li>
 <li>Hidden and absolute children take no cell.</li>
+<li>The builder's Layout tab chooses <code>row</code>, <code>column</code>, or <code>grid</code> for a container; a <a href="widgets/scroll-view.html">ScrollView</a> takes <code>content_columns</code>.</li>
 <li>Not yet: per-column sizes (fixed/fractional tracks), explicit row/column placement, auto-fit column counts, row spans.</li>
 </ul>
 

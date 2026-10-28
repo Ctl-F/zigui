@@ -11,6 +11,7 @@
 //! offset is re-clamped once per frame in `update`.
 
 const std = @import("std");
+const common = @import("common.zig");
 const Handle = @import("../core/handle.zig").Handle;
 const shadow = @import("../core/shadow.zig");
 const DirtyFlags = @import("../core/dirty.zig").DirtyFlags;
@@ -52,6 +53,9 @@ pub const ScrollView = struct {
         scrollbar: bool = true,
         /// Pixels per wheel notch.
         wheel_step: f32 = 40,
+        /// Lay the content out as a grid of this many equal columns (0: a plain
+        /// column or row, per `content_style`). See `Style.grid_columns`.
+        content_columns: u16 = 0,
         /// Thumb color; fully transparent uses a translucent white.
         thumb_color: Color = Color.transparent,
 
@@ -60,6 +64,7 @@ pub const ScrollView = struct {
             .horizontal = shadow.Category.layout,
             .scrollbar = shadow.Category.paint,
             .wheel_step = shadow.Category.none,
+            .content_columns = shadow.Category.layout,
             .thumb_color = shadow.Category.paint,
         };
     };
@@ -82,6 +87,12 @@ pub const ScrollView = struct {
         vertical: bool = true,
         horizontal: bool = false,
         scrollbar: bool = true,
+        content_columns: u16 = 0,
+    };
+
+    pub const actions = [_]common.Action{
+        .{ .label = "Scroll horizontally", .toggle = "horizontal", .checkable = true },
+        .{ .label = "Show scrollbar", .toggle = "scrollbar", .checkable = true },
     };
 
     pub const listened_kinds = [_]event.EventKind{ .wheel, .pointer_down, .pointer_move, .pointer_up };
@@ -103,7 +114,10 @@ pub const ScrollView = struct {
         self.props.vertical = o.vertical;
         self.props.horizontal = o.horizontal;
         self.props.scrollbar = o.scrollbar;
-        var cs = o.content_style;
+        self.props.content_columns = o.content_columns;
+        var cs0 = o.content_style;
+        cs0.grid_columns = o.content_columns;
+        var cs = cs0;
         cs.shrink = 0;
         if (o.vertical and !o.horizontal) cs.height = .fit;
         if (o.horizontal) cs.width = .fit;
@@ -271,6 +285,10 @@ pub const ScrollView = struct {
         const tree = &self.ui.tree;
         const node = tree.get(self.node).?;
         const c = tree.get(self.content) orelse return;
+        if (c.style.grid_columns != self.props.content_columns) {
+            c.style.grid_columns = self.props.content_columns;
+            tree.markDirty(self.content, .{ .layout = true, .paint = true });
+        }
         const lim = self.limits();
         if (node.scroll_x > lim.x or node.scroll_y > lim.y) {
             tree.setScroll(self.node, @min(node.scroll_x, lim.x), @min(node.scroll_y, lim.y));
@@ -501,4 +519,26 @@ test "nodeAt finds the deepest node under a point, interactive or not" {
     try testing.expect(Handle.eql(ui.tree.nodeAt(ui.tree.root, 3, 3).?, outer)); // in the padding
     try testing.expect(Handle.eql(ui.tree.nodeAt(outer, 50, 50).?, inner)); // from a subtree root
     try testing.expect(ui.tree.nodeAt(outer, 250, 250) == null);
+}
+
+test "content_columns lays the content out as a grid" {
+    const r = try Rig.init();
+    defer r.deinit();
+    const sv = try r.ui.add(ScrollView, r.ui.tree.root, .{
+        .style = .{ .width = Length.px(200), .height = Length.px(100), .shrink = 0 },
+        .content_columns = 2,
+    });
+    var bs: [4]*Button = undefined;
+    for (&bs) |*b| b.* = try r.ui.add(Button, sv.contentNode(), .{ .text = "x", .style = .{ .height = Length.px(20), .shrink = 0 } });
+    try r.frame();
+    const a = r.ui.tree.get(bs[0].node).?.rect;
+    const b = r.ui.tree.get(bs[1].node).?.rect;
+    const c = r.ui.tree.get(bs[2].node).?.rect;
+    try testing.expect(b.x > a.x and b.y == a.y); // two per row
+    try testing.expect(c.y > a.y and c.x == a.x);
+    // Turning it off at run time puts them back in a column.
+    sv.props.content_columns = 0;
+    try r.frame();
+    try r.frame();
+    try testing.expectEqual(r.ui.tree.get(bs[0].node).?.rect.x, r.ui.tree.get(bs[1].node).?.rect.x);
 }

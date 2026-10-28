@@ -16,6 +16,7 @@ for (names) |n| _ = try ui.add(zigui.Label, scroll.contentNode(), .{ .text = n }
 <tr><td><code>content_style</code></td><td>column</td><td>Layout of the content node: direction, gap, padding, alignment.</td></tr>
 <tr><td><code>vertical</code>, <code>horizontal</code></td><td>true, false</td><td>Which axes scroll.</td></tr>
 <tr><td><code>scrollbar</code></td><td>true</td><td>Draw the scrollbar.</td></tr>
+<tr><td><code>content_columns</code></td><td>0</td><td>Lay the content out as a <a href="../layout.html#grid">grid</a> of this many equal columns (0: a column per <code>content_style</code>). Also a prop, so documents and the builder can set it.</td></tr>
 </table>
 <h2>Methods</h2>
 <ul>

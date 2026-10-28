@@ -21,6 +21,9 @@ const Style = @import("../core/style.zig").Style;
 const Edges = @import("../core/style.zig").Edges;
 const Length = @import("../core/length.zig").Length;
 const Button = @import("button.zig").Button;
+const Color = @import("../core/geometry.zig").Color;
+const paint_ctx = @import("../core/paint_ctx.zig");
+const PaintCtx = paint_ctx.PaintCtx;
 const menu = @import("menu.zig");
 
 const Top = struct {
@@ -37,6 +40,8 @@ pub const MenuBar = struct {
 
     pub const Options = struct {
         style: Style = .{},
+        /// The strip behind the titles; transparent for none.
+        background: Color = Color.rgb(0x2b, 0x2d, 0x31),
     };
 
     pub fn create(ui: *Ui, parent: Handle, opts: Options) !*MenuBar {
@@ -45,7 +50,9 @@ pub const MenuBar = struct {
         var style = opts.style;
         style.direction = .row;
         if (style.gap == .pixels and style.gap.pixels == 0) style.gap = Length.px(2);
-        const node = try ui.tree.create(.{ .style = style, .role = .panel });
+        if (std.meta.eql(style.padding, .{})) style.padding = Edges.xy(4, 2);
+        style.align_items = .center;
+        const node = try ui.tree.create(.{ .style = style, .role = .panel, .visual = .{ .background = opts.background, .radius = 4 } });
         errdefer _ = ui.tree.destroySubtree(node);
         try ui.tree.appendChild(parent, node);
         try ui.tree.setLabel(node, "Menu bar");
@@ -87,10 +94,22 @@ pub const MenuBar = struct {
             .text = label,
             .variant = .flat,
             .style = .{ .padding = Edges.xy(10, 4), .shrink = 0 },
+            .painter = titlePainter,
         });
         top.button.props.on_click = event.Callback.bind(self, onClick);
         try self.ui.tree.addListener(top.button.node, .{ .kind = .pointer_enter, .callback = event.Callback.bind(self, onHover) });
         try self.tops.append(gpa, top);
+    }
+
+    /// A title looks like text on the bar: no box until it is hovered or its menu is open.
+    fn titlePainter(pc: *PaintCtx, b: *const Button) paint_ctx.Error!void {
+        const open = if (b.ui.menu) |m| m.owner.eql(b.node) else false;
+        if (open) {
+            try pc.box(.{ .background = Color.rgba(255, 255, 255, 46), .radius = 3 });
+        } else if (b.out.hovered) {
+            try pc.box(.{ .background = Color.rgba(255, 255, 255, 26), .radius = 3 });
+        }
+        pc.text_color = b.ui.theme.text_color;
     }
 
     fn indexOf(self: *const MenuBar, h: Handle) ?usize {

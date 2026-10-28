@@ -15,9 +15,11 @@
 
 <h2>Menus, right-click, rename</h2>
 <ul>
-<li>A <b>menu bar</b> (File, Edit, Structure) runs the same commands as the toolbar; items grey out when the command is unavailable and show their shortcuts.</li>
+<li>An application <b>menu bar</b> (File, Edit, Structure) runs the same commands as the toolbar; items grey out when the command is unavailable and show their shortcuts.</li>
 <li><b>Right-click</b> a node in the preview or the outline to select it and open a context menu (cut, copy, paste, duplicate, delete, wrap, unwrap, indent, outdent, move, rename).</li>
 <li><b>Rename:</b> double-click an outline row (or press F2, or use the menu) to edit the node's <code>id</code> in place. Enter or clicking away applies it, Escape cancels. It is one undo step.</li>
+<li><b>Widget actions:</b> the context menu ends with a submenu named for the widget (for example <code>split_view</code>) of that widget's own commands: a split view can switch between horizontal and vertical or anchor its second pane, a scroll view can scroll horizontally or hide its scrollbar, a code editor can toggle line numbers or read-only. They flip a prop and are recorded as one undo step. Widgets declare these with <code>pub const actions</code> (see <a href="maintaining.html">Maintaining these docs</a>).</li>
+<li><b>Layout mode:</b> a container's Layout tab has a <b>layout</b> drop-down: <code>row</code>, <code>column</code>, or <code>grid</code>. Choosing grid sets two columns and shows a "grid columns" field; children of a grid get a "grid span" field. A scroll view's content grid is its <code>content_columns</code> prop.</li>
 <li><b>Drop-downs:</b> the Layout tab's choices (direction, align, justify, wrap, size modes, position) and enum props are <a href="widgets/select.html">Select</a> drop-downs.</li>
 </ul>
 

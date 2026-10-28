@@ -7,6 +7,7 @@
 <h2>Checklist</h2>
 <ul>
 <li><b>New widget:</b> add <code>docs/widgets/NAME.html</code> (copy an existing page: description, example, Options table, Out table, Methods, Document form), add it to the table in <code>docs/widgets/index.html</code>, add one line to <code>docs/nav.js</code>, and add it to the lists on <code>docs/index.html</code> and <code>docs/documents.html</code>.</li>
+<li><b>Widget-specific context-menu commands:</b> a widget may declare <code>pub const actions = [_]common.Action{ .{ .label = "...", .toggle = "bool_prop" } }</code>; the builder shows them in the right-click submenu. List them on the widget's page.</li>
 <li><b>New layout mode or style field:</b> update <code>layout.html</code> (and the builder's Layout section in <code>builder.html</code> if it can edit it).</li>
 <li><b>New event, command, or shortcut behavior:</b> <code>events.html</code>.</li>
 <li><b>New theme field or painter:</b> <code>theming.html</code>.</li>

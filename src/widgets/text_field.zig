@@ -14,6 +14,7 @@
 //! max length.
 
 const std = @import("std");
+const common = @import("common.zig");
 const Handle = @import("../core/handle.zig").Handle;
 const shadow = @import("../core/shadow.zig");
 const event = @import("../core/event.zig");
@@ -123,6 +124,11 @@ pub const TextField = struct {
         on_submit: ?event.Callback = null,
         colors: ?FieldColors = null,
         painter: ?Painter = null,
+    };
+
+    pub const actions = [_]common.Action{
+        .{ .label = "Read only", .toggle = "read_only", .checkable = true },
+        .{ .label = "Enabled", .toggle = "enabled", .checkable = true },
     };
 
     pub const listened_kinds = [_]event.EventKind{

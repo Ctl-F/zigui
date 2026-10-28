@@ -10,6 +10,7 @@
 //! after widgets exist.
 
 const std = @import("std");
+const common = @import("common.zig");
 const Handle = @import("../core/handle.zig").Handle;
 const event = @import("../core/event.zig");
 const shadow = @import("../core/shadow.zig");
@@ -93,6 +94,10 @@ pub const Button = struct {
         command: ?[]const u8 = null,
         colors: ?ButtonColors = null,
         painter: ?Painter = null,
+    };
+
+    pub const actions = [_]common.Action{
+        .{ .label = "Enabled", .toggle = "enabled", .checkable = true },
     };
 
     pub const listened_kinds = [_]event.EventKind{ .pointer_enter, .pointer_leave, .pointer_down, .pointer_up, .click, .focus_in, .focus_out, .key_down };

@@ -19,6 +19,7 @@
 //! IME preedit, bracket matching.
 
 const std = @import("std");
+const common = @import("common.zig");
 const Handle = @import("../core/handle.zig").Handle;
 const event = @import("../core/event.zig");
 const keys = @import("../core/keys.zig");
@@ -225,6 +226,12 @@ pub const CodeEditor = struct {
         on_change: ?event.Callback = null,
         colors: ?EditorColors = null,
         painter: ?Painter = null,
+    };
+
+    pub const actions = [_]common.Action{
+        .{ .label = "Line numbers", .toggle = "line_numbers", .checkable = true },
+        .{ .label = "Read only", .toggle = "read_only", .checkable = true },
+        .{ .label = "Auto indent", .toggle = "auto_indent", .checkable = true },
     };
 
     pub const listened_kinds = [_]event.EventKind{
