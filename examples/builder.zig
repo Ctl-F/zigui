@@ -176,6 +176,7 @@ pub fn main(init: std.process.Init) !void {
     const backend = renderer.backend();
 
     var force = true;
+    var last_frame_ms: u64 = 0; // expose events that follow our own present would loop forever (Wayland)
     const screenshot = init.environ_map.get("ZIGUI_SCREENSHOT");
     var script = std.mem.tokenizeScalar(u8, init.environ_map.get("ZIGUI_SCRIPT") orelse "", ';');
     var text_input_on = false;
@@ -200,6 +201,7 @@ pub fn main(init: std.process.Init) !void {
             };
             try ui.renderFrame(backend, &list, .{ .pixel_w = px.w, .pixel_h = px.h, .scale = scale, .clear = zigui.Color.black });
             force = false;
+            last_frame_ms = sdl.ticks();
         }
         ui.endFrame();
 
@@ -254,7 +256,10 @@ pub fn main(init: std.process.Init) !void {
             if (trace_events) std.log.info("event {s} {any}", .{ @tagName(e.data), e.data });
             switch (e.data) {
                 .quit, .close_requested => running = false,
-                .resized, .expose => force = true,
+                .resized => force = true,
+                .expose => if (sdl.ticks() -% last_frame_ms > 100) {
+                    force = true;
+                },
                 .mouse_move => |m| ui.pointerMove(m.x, m.y),
                 .mouse_button => |m| ui.pointerButtonEx(m.x, m.y, @backingInt(m.button), m.down, m.clicks),
                 .mouse_wheel => |m| ui.wheel(m.px, m.py, m.x, m.y),

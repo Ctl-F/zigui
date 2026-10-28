@@ -112,6 +112,7 @@ pub fn main(init: std.process.Init) !void {
     // defer fb.deinit(gpa);
 
     var force = true;
+    var last_frame_ms: u64 = 0; // expose events that follow our own present would loop forever (Wayland)
     var frames_drawn: u64 = 0;
 
     var running = true;
@@ -134,6 +135,7 @@ pub fn main(init: std.process.Init) !void {
             try ui.renderFrame(backend, &list, .{ .pixel_w = px.w, .pixel_h = px.h, .scale = scale, .clear = zigui.Color.black });
 
             force = false;
+            last_frame_ms = sdl.ticks();
             frames_drawn += 1;
         }
 
@@ -145,7 +147,10 @@ pub fn main(init: std.process.Init) !void {
         while (ev) |e| : (ev = sdl.pollEvent()) {
             switch (e.data) {
                 .quit, .close_requested => running = false,
-                .resized, .expose => force = true,
+                .resized => force = true,
+                .expose => if (sdl.ticks() -% last_frame_ms > 100) {
+                    force = true;
+                },
                 .mouse_move => |m| ui.pointerMove(m.x, m.y),
                 .mouse_button => |m| ui.pointerButtonEx(m.x, m.y, @backingInt(m.button), m.down, m.clicks),
                 .mouse_wheel => |m| ui.wheel(m.px, m.py, m.x, m.y),
