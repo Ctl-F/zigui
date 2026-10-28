@@ -105,6 +105,13 @@ pub const Node = struct {
     /// Shaped text drawn inside this node's content box; owned by the node.
     text: ?*TextBlock = null,
     paint_hook: ?PaintHook = null,
+    /// Drawn after the node's children, inside its clip (scrollbars, selection
+    /// overlays): the counterpart of `paint_hook`, which runs before them.
+    overlay_hook: ?PaintHook = null,
+    /// How far this node's content is scrolled: children are drawn, hit, and
+    /// reported offset by (-scroll_x, -scroll_y). Set with `Tree.setScroll`.
+    scroll_x: f32 = 0,
+    scroll_y: f32 = 0,
 
     /// Intrusive link for the tree's dirty-boundary stack (engine-internal).
     layout_queue_next: Handle = Handle.invalid,
@@ -574,8 +581,8 @@ pub const Tree = struct {
         var r = node.rect;
         var cur = node.parent;
         while (self.get(cur)) |p| : (cur = p.parent) {
-            r.x += p.rect.x;
-            r.y += p.rect.y;
+            r.x += p.rect.x - p.scroll_x;
+            r.y += p.rect.y - p.scroll_y;
         }
         return r;
     }
@@ -597,7 +604,7 @@ pub const Tree = struct {
 
         var c = node.last_child;
         while (self.get(c)) |cn| : (c = cn.prev) {
-            if (self.hitNode(c, lx, ly)) |hit| return hit;
+            if (self.hitNode(c, lx + node.scroll_x, ly + node.scroll_y)) |hit| return hit;
         }
         if (inside and node.flags.interactive) return h;
         return null;
@@ -635,6 +642,38 @@ pub const Tree = struct {
             if (self.absoluteRect(h)) |r| self.damage.add(withTextOverhang(node, r));
             self.propagate(node.parent, .paint);
         }
+    }
+
+    /// Scroll `h`'s content to (x, y) (not clamped: the widget that owns the
+    /// scrolling decides the range). Repaints the node.
+    pub fn setScroll(self: *Tree, h: Handle, x: f32, y: f32) void {
+        const node = self.get(h) orelse return;
+        if (node.scroll_x == x and node.scroll_y == y) return;
+        node.scroll_x = x;
+        node.scroll_y = y;
+        self.markDirty(h, .{ .paint = true });
+    }
+
+    /// The deepest node under the window-space point inside `root`'s subtree,
+    /// whether or not it is interactive (design tools use this to pick what is
+    /// drawn there). Hidden nodes are skipped.
+    pub fn nodeAt(self: *Tree, root: Handle, x: f32, y: f32) ?Handle {
+        const r = self.absoluteRect(root) orelse return null;
+        return self.nodeAtIn(root, x - (r.x - (self.get(root).?.rect.x)), y - (r.y - self.get(root).?.rect.y));
+    }
+
+    fn nodeAtIn(self: *Tree, h: Handle, px: f32, py: f32) ?Handle {
+        const node = self.get(h) orelse return null;
+        if (node.flags.hidden) return null;
+        const lx = px - node.rect.x;
+        const ly = py - node.rect.y;
+        const inside = lx >= 0 and ly >= 0 and lx < node.rect.w and ly < node.rect.h;
+        if (node.flags.clip_children and !inside) return null;
+        var c = node.last_child;
+        while (self.get(c)) |cn| : (c = cn.prev) {
+            if (self.nodeAtIn(c, lx + node.scroll_x, ly + node.scroll_y)) |hit| return hit;
+        }
+        return if (inside) h else null;
     }
 
     /// A node moved without changing size or content (layout's doing): redraw

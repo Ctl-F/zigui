@@ -198,7 +198,11 @@ fn buildNode(c: *Ctx, parent: Handle, n: *const doc_mod.Node) anyerror!Handle {
             try c.inst.ids.put(c.inst.gpa, try c.arena().dupe(u8, n.id), h);
         }
     }
-    for (n.children.items) |child| _ = try buildNode(c, h, child);
+    var child_parent = h;
+    if (info) |i| {
+        if (i.content) |content| child_parent = content(node.widget.?);
+    }
+    for (n.children.items) |child| _ = try buildNode(c, child_parent, child);
     return h;
 }
 
@@ -604,3 +608,26 @@ test "instantiating allocates cleanly even when allocations fail" {
         inst.destroy();
     }
 }
+
+test "children of a scroll view go into its content node" {
+    var ui = try Ui.init(testing.allocator);
+    defer ui.deinit();
+    var r = try loadSample(&ui,
+        \\.{ .root = .{ .type = "scroll_view", .id = "sv", .style = .{ .height = 100 }, .children = .{
+        \\    .{ .type = "label", .id = "a", .props = .{ .text = "one" } },
+        \\    .{ .type = "label", .id = "b", .props = .{ .text = "two" } },
+        \\} } }
+    , .{});
+    defer r.doc.deinit();
+    defer r.inst.destroy();
+    try testing.expectEqual(@as(usize, 0), r.inst.problems.items.len);
+    const sv = r.inst.widget(zigui_scroll.ScrollView, "sv").?;
+    try testing.expectEqual(@as(u32, 1), ui.tree.childCount(sv.node)); // just the content node
+    try testing.expectEqual(@as(u32, 2), ui.tree.childCount(sv.contentNode()));
+    const a = r.inst.find("a").?;
+    try testing.expect(ui.tree.get(a).?.parent.eql(sv.contentNode()));
+}
+
+const zigui_scroll = struct {
+    const ScrollView = @import("../widgets/scroll_view.zig").ScrollView;
+};

@@ -273,7 +273,8 @@ fn paintSubtree(tree: *Tree, h: Handle, node: *@import("tree.zig").Node, abs: Re
     if (node.paint_hook) |hook| try hook.run(hook.ctx, &pc);
     if (node.text) |block| try paintText(block, node.style.padding, &pc);
     var it = tree.children(h);
-    while (it.next()) |c| try paintNode(tree, c, abs.x, abs.y, list, cache);
+    while (it.next()) |c| try paintNode(tree, c, abs.x - node.scroll_x, abs.y - node.scroll_y, list, cache);
+    if (node.overlay_hook) |hook| try hook.run(hook.ctx, &pc);
     if (clip) _ = try list.popClip();
 }
 

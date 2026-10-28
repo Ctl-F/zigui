@@ -45,6 +45,7 @@ const label = @import("../widgets/label.zig");
 const text_field = @import("../widgets/text_field.zig");
 const code_editor = @import("../widgets/code_editor.zig");
 const canvas_mod = @import("../widgets/canvas.zig");
+const scroll_mod = @import("../widgets/scroll_view.zig");
 const widget = @import("../widgets/widget.zig");
 
 pub const Scope = shortcuts_mod.Scope;
@@ -56,6 +57,7 @@ pub const Button = button.Button;
 pub const Label = label.Label;
 pub const TextField = text_field.TextField;
 pub const Canvas = canvas_mod.Canvas;
+const ScrollView = scroll_mod.ScrollView;
 const CodeEditor = code_editor.CodeEditor;
 
 /// A unique address per widget type, stored on nodes so the registry can tell
@@ -86,6 +88,7 @@ pub const Ui = struct {
     fields: Pool(TextField, 64),
     editors: Pool(CodeEditor, 16),
     canvases: Pool(Canvas, 16),
+    scrollers: Pool(ScrollView, 16),
     /// Recorded draw commands of repaint-boundary subtrees (see `paint.Cache`).
     paint_cache: paint.Cache,
     /// The renderer the app draws with (set by `renderFrame` or `setBackend`);
@@ -140,6 +143,7 @@ pub const Ui = struct {
             .fields = Pool(TextField, 64).init(gpa),
             .editors = Pool(CodeEditor, 16).init(gpa),
             .canvases = Pool(Canvas, 16).init(gpa),
+            .scrollers = Pool(ScrollView, 16).init(gpa),
             .paint_cache = paint.Cache.init(gpa),
             .commands = commands_mod.Commands.init(gpa),
             .shortcuts = shortcuts_mod.Shortcuts.init(gpa),
@@ -152,7 +156,7 @@ pub const Ui = struct {
         self.theme = theme;
         self.tree.markDirty(self.tree.root, DirtyFlags.layout_and_paint);
         // Widgets reshape text and repaint from the new theme in `update`.
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| self.tree.markDirty(e.ptr.node, DirtyFlags.layout_and_paint);
         }
@@ -172,7 +176,7 @@ pub const Ui = struct {
     }
 
     pub fn deinit(self: *Ui) void {
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| e.ptr.deinit();
             pool.deinit();
@@ -188,12 +192,13 @@ pub const Ui = struct {
 
     // ---- creating widgets --------------------------------------------------------
 
-    fn poolFor(self: *Ui, comptime W: type) *Pool(W, if (W == CodeEditor or W == Canvas) 16 else 64) {
+    fn poolFor(self: *Ui, comptime W: type) *Pool(W, if (W == CodeEditor or W == Canvas or W == ScrollView) 16 else 64) {
         if (W == Button) return &self.buttons;
         if (W == Label) return &self.labels;
         if (W == TextField) return &self.fields;
         if (W == CodeEditor) return &self.editors;
         if (W == Canvas) return &self.canvases;
+        if (W == ScrollView) return &self.scrollers;
         @compileError("not a widget type: " ++ @typeName(W));
     }
 
@@ -763,7 +768,7 @@ pub const Ui = struct {
 
     /// Run `method` on every live widget.
     fn forEachWidget(self: *Ui, comptime method: []const u8) void {
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| @field(@TypeOf(e.ptr.*), method)(e.ptr);
         }
@@ -781,6 +786,7 @@ pub const Ui = struct {
         self.sweep(&self.fields);
         self.sweep(&self.editors);
         self.sweep(&self.canvases);
+        self.sweep(&self.scrollers);
 
         if (self.shortcuts.count() > 0) self.shortcuts.prune(&self.tree, &self.commands);
 

@@ -289,7 +289,8 @@ pub const Layout = struct {
                 // The area it used to cover needs redrawing too (`markDirty`
                 // adds the new area).
                 if (tree.absoluteRect(h)) |pa| {
-                    tree.damage.add(Tree.withTextOverhang(cn, .{ .x = pa.x + old.x, .y = pa.y + old.y, .w = old.w, .h = old.h }));
+                    const hn = tree.get(h).?;
+                    tree.damage.add(Tree.withTextOverhang(cn, .{ .x = pa.x - hn.scroll_x + old.x, .y = pa.y - hn.scroll_y + old.y, .w = old.w, .h = old.h }));
                 }
                 if (size_changed) tree.markDirty(c, .{ .paint = true }) else tree.markMoved(c);
             }
