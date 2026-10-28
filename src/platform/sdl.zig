@@ -88,18 +88,17 @@ fn showAndSync(handle: *c.SDL_Window) void {
     _ = c.SDL_SyncWindow(handle);
     _ = c.SDL_SetWindowResizable(handle, true);
     _ = c.SDL_SyncWindow(handle);
-    // Fallback for compositors that still ignore the pointer: a one-pixel
-    // resize and back makes them configure the surface again (Wayland only).
-    const driver = c.SDL_GetCurrentVideoDriver() orelse return;
-    if (std.mem.eql(u8, std.mem.span(@as([*:0]const u8, driver)), "wayland") and c.SDL_getenv("ZIGUI_NO_NUDGE") == null) {
-        var w: c_int = 0;
-        var h: c_int = 0;
-        _ = c.SDL_GetWindowSize(handle, &w, &h);
-        _ = c.SDL_SetWindowSize(handle, w + 1, h);
-        _ = c.SDL_SyncWindow(handle);
-        _ = c.SDL_SetWindowSize(handle, w, h);
-        _ = c.SDL_SyncWindow(handle);
-    }
+    // Opt-in fallback for platforms that still ignore the pointer until the
+    // first resize: `ZIGUI_NUDGE=1` resizes the window by one pixel and back.
+    const nudge = c.SDL_getenv("ZIGUI_NUDGE") orelse return;
+    if (!std.mem.eql(u8, std.mem.span(nudge), "1")) return;
+    var w: c_int = 0;
+    var h: c_int = 0;
+    _ = c.SDL_GetWindowSize(handle, &w, &h);
+    _ = c.SDL_SetWindowSize(handle, w + 1, h);
+    _ = c.SDL_SyncWindow(handle);
+    _ = c.SDL_SetWindowSize(handle, w, h);
+    _ = c.SDL_SyncWindow(handle);
 }
 
 pub const Window = struct {
@@ -120,9 +119,6 @@ pub const Window = struct {
         std.log.info("sdl: video driver {s}, renderer {s}", .{ std.mem.span(@as([*:0]const u8, c.SDL_GetCurrentVideoDriver() orelse @ptrCast("?"))), std.mem.span(@as([*:0]const u8, c.SDL_GetRendererName(renderer) orelse @ptrCast("?"))) });
         // Pace presents to the display so continuous canvases do not spin.
         _ = c.SDL_SetRenderVSync(renderer, 1);
-
-        _ = c.SDL_SetWindowSize(handle, @intCast(logical_w + 1), @intCast(logical_h + 1));
-        _ = c.SDL_SetWindowSize(handle, @intCast(logical_w), @intCast(logical_h));
 
         return .{ .handle = handle, .renderer = renderer };
     }

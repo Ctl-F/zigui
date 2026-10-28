@@ -21,6 +21,8 @@ SDL_VIDEODRIVER=dummy ZIGUI_SCRIPT="click 700 22;type lay;key enter" ZIGUI_SCREE
 <tr><td><code>ZIGUI_SCREENSHOT=file.png</code></td><td>Write the final frame and exit.</td></tr>
 <tr><td><code>ZIGUI_SCRIPT</code></td><td>Scripted input (above).</td></tr>
 <tr><td><code>ZIGUI_TRACE=1</code></td><td>Examples print damage rectangles per frame and (builder) every input event.</td></tr>
+<tr><td><code>ZIGUI_NUDGE=1</code></td><td>Resize the window by one pixel and back at startup. Off by default; for platforms that ignore pointer input until the first resize (seen with a window created resizable on GNOME/Wayland; windows are now made resizable after the compositor configures them, which avoids it).</td></tr>
+<tr><td><code>ZIGUI_WINDOW_FLAGS=nohidpi</code></td><td>Create windows without the high-pixel-density flag, to bisect platform problems.</td></tr>
 <tr><td><code>ZIGUI_NOPRESENT=1</code></td><td>Render without presenting, to measure rendering cost without the vsync wait.</td></tr>
 </table>
 
