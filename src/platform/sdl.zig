@@ -66,6 +66,18 @@ pub fn lastError() []const u8 {
     return std.mem.span(c.SDL_GetError());
 }
 
+/// Window flags. `ZIGUI_WINDOW_FLAGS` (comma list: nohidpi, noresize) drops
+/// flags, to bisect platform problems.
+fn windowFlags() c.SDL_WindowFlags {
+    var flags: c.SDL_WindowFlags = c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    if (c.SDL_getenv("ZIGUI_WINDOW_FLAGS")) |env| {
+        const text = std.mem.span(env);
+        if (std.mem.indexOf(u8, text, "nohidpi") != null) flags &= ~@as(c.SDL_WindowFlags, c.SDL_WINDOW_HIGH_PIXEL_DENSITY);
+        if (std.mem.indexOf(u8, text, "noresize") != null) flags &= ~@as(c.SDL_WindowFlags, c.SDL_WINDOW_RESIZABLE);
+    }
+    return flags;
+}
+
 /// Map the window and wait for the compositor to finish configuring it before
 /// a renderer attaches a buffer. Wayland compositors may otherwise not route
 /// pointer input to a window until its first resize.
@@ -83,7 +95,7 @@ pub const Window = struct {
     tex_h: u32 = 0,
 
     pub fn create(title: [:0]const u8, logical_w: u32, logical_h: u32) Error!Window {
-        const flags = c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY;
+        const flags = windowFlags();
         const handle = c.SDL_CreateWindow(title.ptr, @intCast(logical_w), @intCast(logical_h), flags) orelse
             return error.WindowFailed;
         errdefer c.SDL_DestroyWindow(handle);
@@ -98,7 +110,7 @@ pub const Window = struct {
     /// A window for the SDL GPU backend (`zigui_gpu`): no software renderer is
     /// attached, so the GPU device can claim it. `present` is not available.
     pub fn createGpu(title: [:0]const u8, logical_w: u32, logical_h: u32) Error!Window {
-        const flags = c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY;
+        const flags = windowFlags();
         const handle = c.SDL_CreateWindow(title.ptr, @intCast(logical_w), @intCast(logical_h), flags) orelse
             return error.WindowFailed;
         showAndSync(handle);
