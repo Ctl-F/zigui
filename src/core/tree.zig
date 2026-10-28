@@ -36,7 +36,7 @@ pub const Role = enum(u16) {
 
 /// Mouse cursor shape to show while the pointer is over a node (nearest
 /// ancestor that sets one wins).
-pub const Cursor = enum(u8) { default = 0, text, pointer };
+pub const Cursor = enum(u8) { default = 0, text, pointer, resize_horizontal, resize_vertical };
 
 pub const NodeFlags = packed struct(u16) {
     focusable: bool = false,

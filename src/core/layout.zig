@@ -63,6 +63,7 @@ pub const Layout = struct {
     items: std.ArrayListUnmanaged(flex.Item) = .empty,
     sizes: std.ArrayListUnmanaged(f32) = .empty,
     frozen: std.ArrayListUnmanaged(bool) = .empty,
+    kids: std.ArrayListUnmanaged(Handle) = .empty,
     /// Count of percent lengths that fell back to auto since the last reset.
     circular_percent: u32 = 0,
 
@@ -74,6 +75,7 @@ pub const Layout = struct {
         self.items.deinit(self.allocator);
         self.sizes.deinit(self.allocator);
         self.frozen.deinit(self.allocator);
+        self.kids.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -106,6 +108,7 @@ pub const Layout = struct {
         try self.items.resize(self.allocator, n);
         try self.sizes.resize(self.allocator, n);
         try self.frozen.resize(self.allocator, n);
+        try self.kids.resize(self.allocator, n);
     }
 
     fn noteCircular(self: *Layout, r: length.Resolved) void {
@@ -136,7 +139,7 @@ pub const Layout = struct {
         it = tree.children(h);
         while (it.next()) |c| {
             const cn = tree.get(c).?;
-            if (cn.flags.hidden) continue;
+            if (cn.flags.hidden or cn.style.position == .absolute) continue;
             const o = preferredOuter(cn);
             main_sum += pick(row, o.w, o.h);
             cross_max = @max(cross_max, pick(row, o.h, o.w));
@@ -173,41 +176,80 @@ pub const Layout = struct {
     fn place(self: *Layout, tree: *Tree, h: Handle, pct_base: ?f32) error{OutOfMemory}!void {
         const node = tree.get(h) orelse return;
         const st = node.style;
-        const row = st.direction == .row;
         const pad = resolveEdges(st.padding, pct_base);
         const cw = @max(node.rect.w - pad.l - pad.r, 0);
-        const ch = @max(node.rect.h - pad.t - pad.b, 0);
-        const main_avail = pick(row, cw, ch);
-        const cross_avail = pick(row, ch, cw);
-        const main_definite = pick(row, st.width, st.height) != .fit;
-        const cross_definite = pick(row, st.height, st.width) != .fit;
-        const gap = length.resolve(st.gap, .{ .parent = if (main_definite) main_avail else null, .content = 0 }).value;
 
-        // Scratch is free again once the rects are written, so the recursion
-        // at the bottom can reuse it.
+        // Flow children only: hidden and absolute ones take no part in the flex solve.
         var n: usize = 0;
         {
             var it = tree.children(h);
             while (it.next()) |c| {
-                if (!tree.get(c).?.flags.hidden) n += 1;
+                if (isFlow(tree.get(c).?)) n += 1;
             }
         }
         node.dirty.layout = false;
         node.dirty.children = false;
         node.dirty.style = false;
         node.dirty.child_layout = false;
-        if (n == 0) return;
+        if (n > 0) try self.placeFlow(tree, h, node, n, pad, cw);
+        self.placeAbsolute(tree, h, node, pad);
+
+        // Descend only where something changed. The decision lives on the
+        // node because the recursive calls reuse the scratch buffers.
+        var it = tree.children(h);
+        while (it.next()) |c| {
+            const cn = tree.get(c).?;
+            if (!cn.place_pending) continue;
+            cn.place_pending = false;
+            try self.place(tree, c, cw);
+        }
+    }
+
+    fn isFlow(n: *const Node) bool {
+        return !n.flags.hidden and n.style.position == .flow;
+    }
+
+    /// Write `new` as `cn`'s rect (a child of `h`), damaging old and new areas.
+    fn setRect(tree: *Tree, h: Handle, c: Handle, cn: *Node, new: @TypeOf(cn.rect)) void {
+        const old = cn.rect;
+        cn.rect = new;
+        const size_changed = new.w != old.w or new.h != old.h;
+        if (size_changed or new.x != old.x or new.y != old.y) {
+            // The area it used to cover needs redrawing too (`markDirty` adds
+            // the new area).
+            if (tree.absoluteRect(h)) |pa| {
+                const hn = tree.get(h).?;
+                tree.damage.add(Tree.withTextOverhang(cn, .{ .x = pa.x - hn.scroll_x + old.x, .y = pa.y - hn.scroll_y + old.y, .w = old.w, .h = old.h }));
+            }
+            if (size_changed) tree.markDirty(c, .{ .paint = true }) else tree.markMoved(c);
+        }
+        cn.place_pending = size_changed or cn.dirty.needsLayout() or cn.dirty.child_layout;
+    }
+
+    /// The flex solve for `h`'s `n` flow children, in one line or (with `wrap`)
+    /// several, writing their rects.
+    fn placeFlow(self: *Layout, tree: *Tree, h: Handle, node: *Node, n: usize, pad: Pad, cw: f32) error{OutOfMemory}!void {
+        const st = node.style;
+        const row = st.direction == .row;
+        const ch = @max(node.rect.h - pad.t - pad.b, 0);
+        const main_avail = pick(row, cw, ch);
+        const cross_avail = pick(row, ch, cw);
+        const main_definite = pick(row, st.width, st.height) != .fit;
+        const cross_definite = pick(row, st.height, st.width) != .fit;
+        const gap = length.resolve(st.gap, .{ .parent = if (main_definite) main_avail else null, .content = 0 }).value;
         try self.ensure(n);
 
         const items = self.items.items[0..n];
         const sizes = self.sizes.items[0..n];
+        const kids = self.kids.items[0..n];
 
-        // Main axis: one flex item per visible child.
+        // Main axis: one flex item per flow child.
         var i: usize = 0;
         var it = tree.children(h);
         while (it.next()) |c| {
             const cn = tree.get(c).?;
-            if (cn.flags.hidden) continue;
+            if (!isFlow(cn)) continue;
+            kids[i] = c;
             const cs = cn.style;
             const m = resolveEdges(cs.margin, cw);
             const mm = pick(row, m.l + m.r, m.t + m.b);
@@ -227,86 +269,133 @@ pub const Layout = struct {
             };
             i += 1;
         }
-        flex.solve(items, main_avail, gap, sizes, self.frozen.items[0..n]);
 
-        var used: f32 = gap * @as(f32, @floatFromInt(n - 1));
-        for (sizes) |s| used += s;
-        const leftover = @max(main_avail - used, 0);
-        var pos = pick(row, pad.l, pad.t) + switch (st.justify) {
-            .start, .stretch => 0,
-            .center => leftover / 2,
-            .end => leftover,
-        };
         const cross_pad = pick(row, pad.t, pad.l);
+        const can_wrap = st.wrap and main_definite;
+        var cross_cursor: f32 = 0;
+        var start: usize = 0;
+        while (start < n) {
+            // This line: everything up to the first child that would overflow.
+            var end = start + 1;
+            if (can_wrap) {
+                var sum = items[start].basis;
+                while (end < n and sum + gap + items[end].basis <= main_avail) : (end += 1) sum += gap + items[end].basis;
+            } else end = n;
+            const count = end - start;
 
-        // Cross axis, alignment, and writing rects.
-        i = 0;
-        it = tree.children(h);
-        while (it.next()) |c| {
-            const cn = tree.get(c).?;
-            if (cn.flags.hidden) continue;
-            const cs = cn.style;
-            const m = resolveEdges(cs.margin, cw);
-            const mm = pick(row, m.l + m.r, m.t + m.b);
-            const cross_margin = pick(row, m.t + m.b, m.l + m.r);
-            const al = cs.align_self orelse st.align_items;
-
-            const clen = pick(row, cs.height, cs.width);
-            const cctx: length.ResolveCtx = .{
-                .parent = if (cross_definite) cross_avail else null,
-                .content = pick(row, cn.measured.h, cn.measured.w),
-            };
-            const lo = minOf(pick(row, cs.min_height, cs.min_width), cctx);
-            const hi = maxOf(pick(row, cs.max_height, cs.max_width), cctx);
-            var cross_size: f32 = undefined;
-            if (clen == .fill or (clen == .auto and al == .stretch)) {
-                cross_size = length.clampSize(@max(cross_avail - cross_margin, 0), lo, hi);
-            } else {
-                const r = length.resolve(clen, cctx);
-                self.noteCircular(r);
-                cross_size = length.clampSize(r.value, lo, hi);
-            }
-            const free = cross_avail - cross_size - cross_margin;
-            const cross_off = switch (al) {
+            flex.solve(items[start..end], main_avail, gap, sizes[start..end], self.frozen.items[start..end]);
+            var used: f32 = gap * @as(f32, @floatFromInt(count - 1));
+            for (sizes[start..end]) |sz| used += sz;
+            const leftover = @max(main_avail - used, 0);
+            var pos = pick(row, pad.l, pad.t) + switch (st.justify) {
                 .start, .stretch => 0,
-                .center => free / 2,
-                .end => free,
+                .center => leftover / 2,
+                .end => leftover,
             };
-            const cross_pos = cross_pad + pick(row, m.t, m.l) + cross_off;
 
-            const main_size = @max(sizes[i] - mm, 0);
-            const main_pos = pos + pick(row, m.l, m.t);
-            pos += sizes[i] + gap;
-
-            const old = cn.rect;
-            const new: @TypeOf(old) = if (row)
-                .{ .x = main_pos, .y = cross_pos, .w = main_size, .h = cross_size }
-            else
-                .{ .x = cross_pos, .y = main_pos, .w = cross_size, .h = main_size };
-            cn.rect = new;
-            const size_changed = new.w != old.w or new.h != old.h;
-            if (size_changed or new.x != old.x or new.y != old.y) {
-                // The area it used to cover needs redrawing too (`markDirty`
-                // adds the new area).
-                if (tree.absoluteRect(h)) |pa| {
-                    const hn = tree.get(h).?;
-                    tree.damage.add(Tree.withTextOverhang(cn, .{ .x = pa.x - hn.scroll_x + old.x, .y = pa.y - hn.scroll_y + old.y, .w = old.w, .h = old.h }));
+            // A wrapped line is as tall as its tallest child; a single line is
+            // the whole container's cross size.
+            var line_cross = cross_avail;
+            if (can_wrap) {
+                line_cross = 0;
+                for (kids[start..end]) |c| {
+                    const cn = tree.get(c).?;
+                    const cs = cn.style;
+                    const m = resolveEdges(cs.margin, cw);
+                    const cm = pick(row, m.t + m.b, m.l + m.r);
+                    const clen = pick(row, cs.height, cs.width);
+                    const cctx: length.ResolveCtx = .{ .parent = if (cross_definite) cross_avail else null, .content = pick(row, cn.measured.h, cn.measured.w) };
+                    const natural = length.resolveClamped(clen, pick(row, cs.min_height, cs.min_width), pick(row, cs.max_height, cs.max_width), cctx).value;
+                    line_cross = @max(line_cross, natural + cm);
                 }
-                if (size_changed) tree.markDirty(c, .{ .paint = true }) else tree.markMoved(c);
             }
-            cn.place_pending = size_changed or cn.dirty.needsLayout() or cn.dirty.child_layout;
-            i += 1;
-        }
 
-        // Descend only where something changed. The decision lives on the
-        // node because the recursive calls reuse the scratch buffers above.
-        it = tree.children(h);
+            // Cross axis, alignment, and writing rects.
+            for (kids[start..end], start..) |c, k| {
+                const cn = tree.get(c).?;
+                const cs = cn.style;
+                const m = resolveEdges(cs.margin, cw);
+                const mm = pick(row, m.l + m.r, m.t + m.b);
+                const cross_margin = pick(row, m.t + m.b, m.l + m.r);
+                const al = cs.align_self orelse st.align_items;
+
+                const clen = pick(row, cs.height, cs.width);
+                const cctx: length.ResolveCtx = .{
+                    .parent = if (cross_definite) cross_avail else null,
+                    .content = pick(row, cn.measured.h, cn.measured.w),
+                };
+                const lo = minOf(pick(row, cs.min_height, cs.min_width), cctx);
+                const hi = maxOf(pick(row, cs.max_height, cs.max_width), cctx);
+                var cross_size: f32 = undefined;
+                if (clen == .fill or (clen == .auto and al == .stretch)) {
+                    cross_size = length.clampSize(@max(line_cross - cross_margin, 0), lo, hi);
+                } else {
+                    const r = length.resolve(clen, cctx);
+                    self.noteCircular(r);
+                    cross_size = length.clampSize(r.value, lo, hi);
+                }
+                const free = line_cross - cross_size - cross_margin;
+                const cross_off = switch (al) {
+                    .start, .stretch => 0,
+                    .center => free / 2,
+                    .end => free,
+                };
+                const cross_pos = cross_pad + cross_cursor + pick(row, m.t, m.l) + cross_off;
+
+                const main_size = @max(sizes[k] - mm, 0);
+                const main_pos = pos + pick(row, m.l, m.t);
+                pos += sizes[k] + gap;
+
+                const new: @TypeOf(cn.rect) = if (row)
+                    .{ .x = main_pos, .y = cross_pos, .w = main_size, .h = cross_size }
+                else
+                    .{ .x = cross_pos, .y = main_pos, .w = cross_size, .h = main_size };
+                setRect(tree, h, c, cn, new);
+            }
+            cross_cursor += line_cross + gap;
+            start = end;
+        }
+    }
+
+    /// Place `h`'s absolutely positioned children against its box (padding
+    /// included): `inset` pins sides, an axis with both sides pinned and an auto
+    /// size stretches, and an unpinned axis starts at the content edge.
+    fn placeAbsolute(self: *Layout, tree: *Tree, h: Handle, node: *Node, pad: Pad) void {
+        _ = self;
+        var it = tree.children(h);
         while (it.next()) |c| {
             const cn = tree.get(c).?;
-            if (!cn.place_pending) continue;
-            cn.place_pending = false;
-            try self.place(tree, c, cw);
+            if (cn.flags.hidden or cn.style.position != .absolute) continue;
+            const cs = cn.style;
+            const pw = node.rect.w;
+            const ph = node.rect.h;
+            const l = insetPx(cs.inset.left, pw);
+            const r = insetPx(cs.inset.right, pw);
+            const t = insetPx(cs.inset.top, ph);
+            const b = insetPx(cs.inset.bottom, ph);
+            const w = absoluteSize(cs.width, cs.min_width, cs.max_width, pw, cn.measured.w, l, r);
+            const ht = absoluteSize(cs.height, cs.min_height, cs.max_height, ph, cn.measured.h, t, b);
+            const x = if (l) |v| v else if (r) |v| pw - v - w else pad.l;
+            const y = if (t) |v| v else if (b) |v| ph - v - ht else pad.t;
+            setRect(tree, h, c, cn, .{ .x = x, .y = y, .w = w, .h = ht });
         }
+    }
+
+    fn insetPx(len: Length, base: f32) ?f32 {
+        if (len == .auto) return null;
+        return length.resolve(len, .{ .parent = base, .content = 0 }).value;
+    }
+
+    /// An absolute child's size on one axis within a parent `parent` long, with
+    /// its near and far insets (null when free).
+    fn absoluteSize(len: Length, min: Length, max: Length, parent: f32, content: f32, near: ?f32, far: ?f32) f32 {
+        const ctx: length.ResolveCtx = .{ .parent = parent, .content = content };
+        const lo = minOf(min, ctx);
+        const hi = maxOf(max, ctx);
+        if (len == .fill or (len == .auto and near != null and far != null)) {
+            return length.clampSize(@max(parent - (near orelse 0) - (far orelse 0), 0), lo, hi);
+        }
+        return length.clampSize(length.resolve(len, ctx).value, lo, hi);
     }
 };
 
@@ -574,4 +663,126 @@ test "moved or resized nodes are marked paint-dirty" {
     t.tree.markDirty(a, .{ .layout = true });
     try t.run(300, 100);
     try std.testing.expect(t.tree.get(a).?.dirty.paint);
+}
+
+test "absolute children are pinned by insets and leave the flow alone" {
+    var t = try Harness.init(.{ .direction = .column });
+    defer t.deinit();
+    const parent = try t.add(t.tree.root, .{ .style = .{ .width = Length.px(200), .height = Length.px(120), .padding = Edges.all(8), .direction = .column, .gap = Length.px(4) } });
+    const a = try t.box(parent, 50, 20);
+    const pinned = try t.add(parent, .{ .style = .{ .position = .absolute, .width = Length.px(30), .height = Length.px(30), .inset = .{ .right = Length.px(10), .bottom = Length.px(6) } } });
+    const b = try t.box(parent, 50, 20);
+    try t.run(400, 300);
+    // The flow ignores the pinned node: b follows a directly (gap 4).
+    try expectRect(t.rect(a), 8, 8, 50, 20);
+    try expectRect(t.rect(b), 8, 32, 50, 20);
+    // Pinned against the 200x120 box, not the content box.
+    try expectRect(t.rect(pinned), 200 - 10 - 30, 120 - 6 - 30, 30, 30);
+}
+
+test "an absolute child with both sides pinned and no size stretches between them" {
+    var t = try Harness.init(.{});
+    defer t.deinit();
+    const parent = try t.add(t.tree.root, .{ .style = .{ .width = Length.px(200), .height = Length.px(100) } });
+    const s = try t.add(parent, .{ .style = .{ .position = .absolute, .inset = .{ .left = Length.px(10), .right = Length.px(20), .top = Length.px(5), .bottom = Length.px(15) } } });
+    const pct = try t.add(parent, .{ .style = .{ .position = .absolute, .width = Length.pct(50), .height = Length.px(10), .inset = .{ .left = Length.pct(25), .top = Length.px(0) } } });
+    const free = try t.add(parent, .{ .style = .{ .position = .absolute, .width = Length.px(40), .height = Length.px(40) } });
+    try t.run(400, 300);
+    try expectRect(t.rect(s), 10, 5, 170, 80);
+    try expectRect(t.rect(pct), 50, 0, 100, 10); // percent of the parent's width
+    try expectRect(t.rect(free), 0, 0, 40, 40); // no insets: the content corner
+}
+
+test "absolute children do not grow a fit parent and hidden ones are skipped" {
+    var t = try Harness.init(.{ .align_items = .start });
+    defer t.deinit();
+    const parent = try t.add(t.tree.root, .{ .style = .{ .width = .fit, .height = .fit, .direction = .column } });
+    _ = try t.box(parent, 60, 30);
+    const big = try t.add(parent, .{ .style = .{ .position = .absolute, .width = Length.px(500), .height = Length.px(500) } });
+    const hidden = try t.add(parent, .{ .style = .{ .position = .absolute, .width = Length.px(10), .height = Length.px(10) }, .flags = .{ .hidden = true } });
+    try t.run(800, 600);
+    try expectRect(t.rect(parent), 0, 0, 60, 30);
+    try expectRect(t.rect(big), 0, 0, 500, 500);
+    try expectRect(t.rect(hidden), 0, 0, 0, 0); // never placed
+}
+
+test "absolute children lay out their own children and move with the parent" {
+    var t = try Harness.init(.{ .direction = .column, .padding = Edges.all(0) });
+    defer t.deinit();
+    const parent = try t.add(t.tree.root, .{ .style = .{ .width = Length.px(200), .height = Length.px(200) } });
+    const panel = try t.add(parent, .{ .style = .{ .position = .absolute, .width = Length.px(100), .height = Length.px(80), .padding = Edges.all(10), .direction = .column, .inset = .{ .left = Length.px(30), .top = Length.px(40) } } });
+    const inner = try t.box(panel, 20, 20);
+    try t.run(400, 400);
+    try expectRect(t.rect(inner), 10, 10, 20, 20);
+    // Changing an inset relays out just that node.
+    t.tree.get(panel).?.style.inset.left = Length.px(60);
+    t.tree.markDirty(panel, .{ .layout = true, .paint = true });
+    try t.run(400, 400);
+    try expectRect(t.rect(panel), 60, 40, 100, 80);
+    try expectRect(t.rect(inner), 10, 10, 20, 20);
+}
+
+test "wrap starts a new line when a child does not fit" {
+    var t = try Harness.init(.{ .direction = .column, .align_items = .start });
+    defer t.deinit();
+    const row = try t.add(t.tree.root, .{ .style = .{ .direction = .row, .wrap = true, .width = Length.px(100), .height = Length.px(200), .gap = Length.px(10) } });
+    const a = try t.box(row, 40, 20);
+    const b = try t.box(row, 40, 30);
+    const c = try t.box(row, 40, 20);
+    const d = try t.box(row, 40, 25);
+    try t.run(400, 400);
+    // 40 + 10 + 40 = 90 fits; the third would need 140.
+    try expectRect(t.rect(a), 0, 0, 40, 20);
+    try expectRect(t.rect(b), 50, 0, 40, 30);
+    // The second line starts below the first line's tallest child (30) plus the gap.
+    try expectRect(t.rect(c), 0, 40, 40, 20);
+    try expectRect(t.rect(d), 50, 40, 40, 25);
+}
+
+test "wrapped lines justify and align within themselves; column wrap goes sideways" {
+    var t = try Harness.init(.{ .direction = .column, .align_items = .start });
+    defer t.deinit();
+    const row = try t.add(t.tree.root, .{ .style = .{ .direction = .row, .wrap = true, .justify = .center, .align_items = .center, .width = Length.px(100), .height = Length.px(200) } });
+    const a = try t.box(row, 60, 20);
+    const b = try t.box(row, 30, 40);
+    const c = try t.box(row, 30, 10);
+    try t.run(400, 400);
+    // Line one: a alone (60 + 30 does not fit... 90 <= 100 fits, so a and b share it).
+    try expectRect(t.rect(a), 5, 10, 60, 20); // centered in a 40-high line, 5px of slack either side
+    try expectRect(t.rect(b), 65, 0, 30, 40);
+    try expectRect(t.rect(c), 35, 40, 30, 10); // alone on line two: centered in x, the line is as tall as it is
+
+    var u = try Harness.init(.{ .direction = .row, .align_items = .start });
+    defer u.deinit();
+    const col = try u.add(u.tree.root, .{ .style = .{ .direction = .column, .wrap = true, .width = Length.px(200), .height = Length.px(70) } });
+    const e = try u.box(col, 30, 30);
+    const f = try u.box(col, 20, 30);
+    const g = try u.box(col, 25, 30);
+    try u.run(400, 400);
+    try expectRect(u.rect(e), 0, 0, 30, 30);
+    try expectRect(u.rect(f), 0, 30, 20, 30);
+    // The third does not fit in 70: next column, after the widest (30) of the first.
+    try expectRect(u.rect(g), 30, 0, 25, 30);
+}
+
+test "wrap needs a definite main size; fit containers stay on one line" {
+    var t = try Harness.init(.{ .direction = .column, .align_items = .start });
+    defer t.deinit();
+    const row = try t.add(t.tree.root, .{ .style = .{ .direction = .row, .wrap = true, .width = .fit } });
+    const a = try t.box(row, 60, 20);
+    const b = try t.box(row, 60, 20);
+    try t.run(400, 400);
+    try expectRect(t.rect(a), 0, 0, 60, 20);
+    try expectRect(t.rect(b), 60, 0, 60, 20);
+}
+
+test "without wrap nothing changes: a single line shrinks as before" {
+    var t = try Harness.init(.{ .direction = .column, .align_items = .start });
+    defer t.deinit();
+    const row = try t.add(t.tree.root, .{ .style = .{ .direction = .row, .width = Length.px(100), .height = Length.px(50) } });
+    const a = try t.add(row, .{ .style = .{ .width = Length.px(80), .height = Length.px(20) } });
+    const b = try t.add(row, .{ .style = .{ .width = Length.px(80), .height = Length.px(20) } });
+    try t.run(400, 400);
+    try expectRect(t.rect(a), 0, 0, 50, 20);
+    try expectRect(t.rect(b), 50, 0, 50, 20);
 }

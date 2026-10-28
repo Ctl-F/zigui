@@ -26,6 +26,25 @@ pub const Edges = struct {
     }
 };
 
+/// How a node takes part in its parent's layout.
+pub const Position = enum {
+    /// Laid out by the parent's flex rules, in order.
+    flow,
+    /// Taken out of the flow: placed against the parent's box by `inset`, not
+    /// counted in the parent's size, drawn above earlier siblings.
+    absolute,
+};
+
+/// Distances from the edges of the parent's box (padding included) for an
+/// `absolute` node. `auto` leaves that side free: with both sides of an axis
+/// set and the size `auto`, the node stretches between them.
+pub const Insets = struct {
+    left: Length = .auto,
+    top: Length = .auto,
+    right: Length = .auto,
+    bottom: Length = .auto,
+};
+
 /// Width, height, min, and max describe the border box (padding included).
 pub const Style = struct {
     width: Length = .auto,
@@ -48,6 +67,12 @@ pub const Style = struct {
     justify: Align = .start,
     /// Overrides the parent's `align_items` for this node.
     align_self: ?Align = null,
+    /// Let children that do not fit along the main axis continue on a new line
+    /// (needs a definite main-axis size; the container's own size is not
+    /// grown to hold the extra lines).
+    wrap: bool = false,
+    position: Position = .flow,
+    inset: Insets = .{},
 };
 
 /// Stopgap built-in look until painters and themes exist: a filled, optionally

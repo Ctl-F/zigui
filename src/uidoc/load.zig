@@ -202,7 +202,19 @@ fn buildNode(c: *Ctx, parent: Handle, n: *const doc_mod.Node) anyerror!Handle {
     if (info) |i| {
         if (i.content) |content| child_parent = content(node.widget.?);
     }
-    for (n.children.items) |child| _ = try buildNode(c, child_parent, child);
+    for (n.children.items, 0..) |child, index| {
+        var host = child_parent;
+        if (info) |i| {
+            if (i.content_at) |at| {
+                host = at(node.widget.?, index) orelse {
+                    c.uid = n.uid;
+                    try c.problem("{s} has no pane for child {d}", .{ n.type_name, index });
+                    continue;
+                };
+            }
+        }
+        _ = try buildNode(c, host, child);
+    }
     return h;
 }
 
@@ -631,3 +643,25 @@ test "children of a scroll view go into its content node" {
 const zigui_scroll = struct {
     const ScrollView = @import("../widgets/scroll_view.zig").ScrollView;
 };
+
+test "a split view takes exactly two children, one per pane" {
+    var ui = try Ui.init(testing.allocator);
+    defer ui.deinit();
+    var r = try loadSample(&ui,
+        \\.{ .root = .{ .type = "split_view", .id = "sv", .props = .{ .first_size = 120 }, .children = .{
+        \\    .{ .type = "label", .id = "left", .props = .{ .text = "L" } },
+        \\    .{ .type = "label", .id = "right", .props = .{ .text = "R" } },
+        \\    .{ .type = "label", .id = "extra", .props = .{ .text = "X" } },
+        \\} } }
+    , .{});
+    defer r.doc.deinit();
+    defer r.inst.destroy();
+    const SplitView = @import("../widgets/split_view.zig").SplitView;
+    const sv = r.inst.widget(SplitView, "sv").?;
+    try testing.expectEqual(@as(f32, 120), sv.props.first_size);
+    try testing.expect(ui.tree.get(r.inst.find("left").?).?.parent.eql(sv.firstNode()));
+    try testing.expect(ui.tree.get(r.inst.find("right").?).?.parent.eql(sv.secondNode()));
+    try testing.expect(r.inst.find("extra") == null);
+    try testing.expectEqual(@as(usize, 1), r.inst.problems.items.len);
+    try testing.expect(std.mem.indexOf(u8, r.inst.problems.items[0].message, "no pane for child 2") != null);
+}

@@ -337,6 +337,17 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   through the text system), so cost does not grow with document size. It paints
   through `Node.paint_hook`. Scroll follows the primary caret; the wheel scrolls
   independently.
+- Layout modes: `Style.position = .absolute` with `inset` places a child
+  relative to its parent outside the flex flow; `Style.wrap` wraps flex rows.
+  Wrap does not yet grow a fit-sized container. `SplitView` is a two-pane
+  container with a draggable divider and resize cursors; child hosts are
+  addressed through `content_at` in the registry. The builder edits all of this
+  (Layout tab, drag to move absolute children).
+- Workbench (`zig build workbench`): a code editor on the ZON text beside the
+  builder, synced both ways; parse errors go to the status line. Examples build
+  ReleaseSafe by default (`-Dexample_optimize`) because the software rasterizer
+  is too slow in Debug.
+
 
 ## Next steps
 
@@ -345,8 +356,8 @@ authority for rationale, and a few items are recommendations, not requirements.
 
 1. The C facade (`src/capi/`), once the core Zig library is done.
 
-Smaller gaps: theme metrics (padding, min sizes) and a painter measure override; layout follow-ups (width-constrained text measure, stack/absolute,
-split and scroll containers, wrap, grid, calc `Length`); draw commands for
+Smaller gaps: theme metrics (padding, min sizes) and a painter measure override; layout follow-ups (width-constrained text measure, grid, calc `Length`, wrap
+growing a fit-sized container); draw commands for
 transforms, image quads, shadows, paths; a model interface for lists and trees;
 more languages, bracket matching, find/replace, soft wrap, and folding in the
 editor; undo/redo and password mode in text fields; HarfBuzz/FreeType backend

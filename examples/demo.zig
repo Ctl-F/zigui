@@ -434,13 +434,6 @@ fn clipSet(_: ?*anyopaque, text: []const u8) void {
     sdl.clipboardSet(text);
 }
 
-fn sdlCursor(c: zigui.tree.Cursor) sdl.Cursor {
-    return switch (c) {
-        .default => .default,
-        .text => .text,
-        .pointer => .pointer,
-    };
-}
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -634,7 +627,7 @@ pub fn main(init: std.process.Init) !void {
             sdl.stopTextInput(&window);
             text_input_on = false;
         }
-        sdl.setCursor(sdlCursor(ui.cursor()));
+        sdl.setUiCursor(ui.cursor());
 
         // Sleep until input, or until the caret next needs to blink.
         const timeout: i32 = if (ui.nextWakeMs()) |ms| @intCast(ms) else -1;

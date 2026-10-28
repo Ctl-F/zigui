@@ -244,6 +244,7 @@ pub fn main(init: std.process.Init) !void {
             text_input_on = false;
         }
 
+        sdl.setUiCursor(ui.cursor());
         const timeout: i32 = if (ui.nextWakeMs()) |ms| @intCast(ms) else -1;
         var ev = sdl.waitEvent(timeout);
         _ = ui.tick(sdl.ticks());

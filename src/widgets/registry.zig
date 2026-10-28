@@ -24,6 +24,7 @@ const TextField = @import("text_field.zig").TextField;
 const CodeEditor = @import("code_editor.zig").CodeEditor;
 const Canvas = @import("canvas.zig").Canvas;
 const ScrollView = @import("scroll_view.zig").ScrollView;
+const SplitView = @import("split_view.zig").SplitView;
 
 pub const Error = schema.Error || error{ UnknownWidget, NotAWidget, StaleHandle };
 
@@ -51,6 +52,9 @@ pub const Info = struct {
     /// Widgets that hold their children in an inner node (scroll views): that
     /// node, where document children belong. Null: children go on the widget's node.
     content: ?*const fn (w: *anyopaque) Handle,
+    /// Widgets with several panes: the node for child `index`, or null if the
+    /// widget has no such pane.
+    content_at: ?*const fn (w: *anyopaque, index: usize) ?Handle,
 };
 
 /// Props fields named `on_*` that hold an optional callback.
@@ -94,6 +98,10 @@ fn describe(comptime name: []const u8, comptime W: type) Info {
                 try x.loadText(copy, true);
             } else try x.setText(text);
         }
+        fn contentAt(w: *anyopaque, index: usize) ?Handle {
+            const x: *W = @ptrCast(@alignCast(w));
+            return x.contentNodeAt(index);
+        }
         fn content(w: *anyopaque) Handle {
             const x: *W = @ptrCast(@alignCast(w));
             return x.contentNode();
@@ -128,6 +136,7 @@ fn describe(comptime name: []const u8, comptime W: type) Info {
         .events = &G.event_names,
         .setEvent = G.setEvent,
         .content = if (@hasDecl(W, "contentNode")) G.content else null,
+        .content_at = if (@hasDecl(W, "contentNodeAt")) G.contentAt else null,
         .set_text = if (!@hasField(W.Props, "text") and (@hasDecl(W, "loadText") or @hasDecl(W, "setText"))) G.setText else null,
     };
 }
@@ -140,6 +149,7 @@ pub const widgets = [_]Info{
     describe("code_editor", CodeEditor),
     describe("canvas", Canvas),
     describe("scroll_view", ScrollView),
+    describe("split_view", SplitView),
 };
 
 pub fn find(name: []const u8) ?*const Info {

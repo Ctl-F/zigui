@@ -144,6 +144,14 @@ const Resize = struct {
     sy: f32,
 };
 
+const AbsDrag = struct {
+    uid: u32,
+    start_left: f32,
+    start_top: f32,
+    sx: f32,
+    sy: f32,
+};
+
 pub const Builder = struct {
     ui: *Ui,
     gpa: Allocator,
@@ -190,6 +198,8 @@ pub const Builder = struct {
     last_overlay_n: usize = 0,
     last_outline_marker: bool = false,
     resize: ?Resize = null,
+    /// Moving an absolutely positioned node: it follows the pointer by insets.
+    abs_drag: ?AbsDrag = null,
     /// Counter for edit gestures (a resize drag): its edits merge into one step.
     gesture: u32 = 0,
     gesture_active: bool = false,
@@ -722,9 +732,9 @@ pub const Builder = struct {
 
     // ---- the Layout tab ----
 
-    const layout_field_count = 7;
-    const LayoutField = enum(u8) { gap, padding, margin, width_px, height_px, grow, shrink };
-    const LayoutChoice = enum(u8) { direction, align_items, justify, width_mode, height_mode, align_self };
+    const layout_field_count = 11;
+    const LayoutField = enum(u8) { gap, padding, margin, width_px, height_px, grow, shrink, inset_left, inset_top, inset_right, inset_bottom };
+    const LayoutChoice = enum(u8) { direction, align_items, justify, width_mode, height_mode, align_self, position, wrap };
 
     fn layoutButtonGroup(self: *Builder, label: []const u8, group: LayoutChoice, names: []const []const u8, current: usize) !void {
         const row = try self.fieldRow(label);
@@ -741,6 +751,22 @@ pub const Builder = struct {
         const text = std.fmt.bufPrint(&buf, "{d}", .{value}) catch "0";
         self.layout_fields[@intFromEnum(which)] = try self.ui.add(TextField, row, .{
             .text = text,
+            .style = .{ .grow = 1 },
+            .on_change = event.Callback.bind(self, onLayoutField),
+        });
+    }
+
+    /// An inset field: blank means auto (that side is free).
+    fn insetField(self: *Builder, label: []const u8, which: LayoutField, value: Length) !void {
+        const row = try self.fieldRow(label);
+        var buf: [32]u8 = undefined;
+        const text = switch (value) {
+            .pixels => |p| std.fmt.bufPrint(&buf, "{d}", .{p}) catch "",
+            else => "",
+        };
+        self.layout_fields[@intFromEnum(which)] = try self.ui.add(TextField, row, .{
+            .text = text,
+            .placeholder = "auto",
             .style = .{ .grow = 1 },
             .on_change = event.Callback.bind(self, onLayoutField),
         });
@@ -771,6 +797,17 @@ pub const Builder = struct {
             try self.layoutField("padding", .padding, lengthPx(st.padding.left));
             try self.layoutButtonGroup("align", .align_items, &.{ "start", "center", "end", "stretch" }, @intFromEnum(st.align_items));
             try self.layoutButtonGroup("justify", .justify, &.{ "start", "center", "end" }, @min(@intFromEnum(st.justify), 2));
+            try self.layoutButtonGroup("wrap", .wrap, &.{ "no", "yes" }, @intFromBool(st.wrap));
+        }
+        if (n != self.doc().root) {
+            _ = try self.ui.add(Label, self.content(), .{ .text = "Position", .size = 15 });
+            try self.layoutButtonGroup("mode", .position, &.{ "flow", "absolute" }, @intFromEnum(st.position));
+            if (st.position == .absolute) {
+                try self.insetField("left", .inset_left, st.inset.left);
+                try self.insetField("top", .inset_top, st.inset.top);
+                try self.insetField("right", .inset_right, st.inset.right);
+                try self.insetField("bottom", .inset_bottom, st.inset.bottom);
+            }
         }
         _ = try self.ui.add(Label, self.content(), .{ .text = "Size", .size = 15 });
         try self.layoutButtonGroup("width", .width_mode, &.{ "auto", "fill", "fit", "px" }, lengthMode(st.width));
@@ -799,6 +836,8 @@ pub const Builder = struct {
             .width_mode => st.width = modeLength(choice, st.width),
             .height_mode => st.height = modeLength(choice, st.height),
             .align_self => st.align_self = if (choice == 0) null else @enumFromInt(choice - 1),
+            .position => st.position = @enumFromInt(choice),
+            .wrap => st.wrap = choice == 1,
         }
         self.commitLiveStyle(l.h);
         // Pressed states change: rebuild the panel (a button press has no typing focus to keep).
@@ -824,6 +863,19 @@ pub const Builder = struct {
         const st = &self.ui.tree.get(l.h).?.style;
         for (self.layout_fields, 0..) |maybe, i| {
             const f = maybe orelse continue;
+            const which: LayoutField = @enumFromInt(i);
+            if (@intFromEnum(which) >= @intFromEnum(LayoutField.inset_left)) {
+                const text = std.mem.trim(u8, f.text(), " ");
+                const len: Length = if (text.len == 0) .auto else Length.px(std.fmt.parseFloat(f32, text) catch continue);
+                switch (which) {
+                    .inset_left => st.inset.left = len,
+                    .inset_top => st.inset.top = len,
+                    .inset_right => st.inset.right = len,
+                    .inset_bottom => st.inset.bottom = len,
+                    else => {},
+                }
+                continue;
+            }
             const v = std.fmt.parseFloat(f32, std.mem.trim(u8, f.text(), " ")) catch continue;
             if (!std.math.isFinite(v)) continue;
             switch (@as(LayoutField, @enumFromInt(i))) {
@@ -844,6 +896,7 @@ pub const Builder = struct {
                 },
                 .grow => st.grow = v,
                 .shrink => st.shrink = v,
+                else => {},
             }
         }
         self.commitLiveStyle(l.h);
@@ -986,12 +1039,25 @@ pub const Builder = struct {
     }
 
     fn addWidgetInner(self: *Builder, type_name: []const u8, parent: u32, index: usize) !void {
+        // A widget with starting children is one undo step.
+        const multi = std.mem.eql(u8, type_name, "split_view");
+        if (multi) self.editor.beginBatch();
+        errdefer if (multi) self.editor.abortBatch();
         const n = try self.editor.addNode(parent, index, type_name);
         // Starting values belong to the creation step: set them before any other edit.
         const a = self.doc().alloc();
         if (std.mem.eql(u8, type_name, "label")) n.props = try zon.parse(a, defaults.label_props, null);
         if (std.mem.eql(u8, type_name, "button")) n.props = try zon.parse(a, defaults.button_props, null);
         if (std.mem.eql(u8, type_name, doc_mod.box_type)) n.style = try zon.parse(a, defaults.box_style, null);
+        if (std.mem.eql(u8, type_name, "split_view")) {
+            n.style = try zon.parse(a, ".{ .height = 200 }", null);
+            // A split view always has two panes: start them as boxes.
+            for (0..2) |_| {
+                const pane = try self.editor.addNode(n.uid, n.children.items.len, doc_mod.box_type);
+                pane.style = try zon.parse(a, defaults.box_style, null);
+            }
+        }
+        if (multi) try self.editor.endBatch();
         self.editor.breakCoalescing();
         self.selected = n.uid;
         self.sync();
@@ -1334,14 +1400,56 @@ pub const Builder = struct {
 
     fn dragTo(self: *Builder, x: f32, y: f32) void {
         const p = self.press orelse return;
+        if (self.abs_drag != null) return self.absMoveTo(x, y);
         if (!self.dragging) {
             if (std.math.hypot(x - p.sx, y - p.sy) < drag_threshold) return;
             if (p.uid != 0 and p.uid == self.doc().root.uid) return; // the root does not move
+            if (p.source == .preview and self.beginAbsoluteDrag(p)) return self.absMoveTo(x, y);
             self.dragging = true;
         }
         const old = self.drop;
         self.drop = self.dropAt(x, y);
         if (!dropEql(old, self.drop)) self.repaintOverlays();
+    }
+
+    /// An absolutely positioned node is dragged by changing its insets, not
+    /// reordered. True if `p` is such a node (and the gesture has started).
+    fn beginAbsoluteDrag(self: *Builder, p: Press) bool {
+        const n = self.doc().find(p.uid) orelse return false;
+        const l = self.live(n) orelse return false;
+        const st = self.ui.tree.get(l.h).?.style;
+        if (st.position != .absolute) return false;
+        const parent_rect = self.ui.tree.absoluteRect(self.ui.tree.get(l.h).?.parent) orelse return false;
+        const my = self.ui.tree.absoluteRect(l.h) orelse return false;
+        const left = switch (st.inset.left) {
+            .pixels => |v| v,
+            else => my.x - parent_rect.x,
+        };
+        const top = switch (st.inset.top) {
+            .pixels => |v| v,
+            else => my.y - parent_rect.y,
+        };
+        self.abs_drag = .{ .uid = p.uid, .start_left = left, .start_top = top, .sx = p.sx, .sy = p.sy };
+        self.gesture +%= 1;
+        if (self.gesture == 0) self.gesture = 1;
+        self.gesture_active = true;
+        self.editor.breakCoalescing();
+        return true;
+    }
+
+    fn absMoveTo(self: *Builder, x: f32, y: f32) void {
+        const d = self.abs_drag orelse return;
+        const n = self.doc().find(d.uid) orelse return;
+        const l = self.live(n) orelse return;
+        const st = &self.ui.tree.get(l.h).?.style;
+        st.inset.left = Length.px(@round(d.start_left + (x - d.sx)));
+        st.inset.top = Length.px(@round(d.start_top + (y - d.sy)));
+        st.inset.right = .auto;
+        st.inset.bottom = .auto;
+        const saved = self.selected;
+        self.selected = d.uid;
+        self.commitLiveStyle(l.h);
+        self.selected = saved;
     }
 
     fn dropEql(a: ?interact.Drop, b: ?interact.Drop) bool {
@@ -1377,6 +1485,15 @@ pub const Builder = struct {
 
     fn finishDrag(self: *Builder, x: f32, y: f32) void {
         const p = self.press orelse return;
+        if (self.abs_drag != null) {
+            self.abs_drag = null;
+            self.press = null;
+            self.gesture_active = false;
+            self.editor.breakCoalescing();
+            self.rebuildInspector() catch |e| self.updateStatus(e);
+            self.repaintOverlays();
+            return;
+        }
         const was_dragging = self.dragging;
         const drop = if (was_dragging) self.dropAt(x, y) else null;
         self.press = null;
@@ -1921,6 +2038,119 @@ test "the layout tab changes direction, gap, alignment, and sizes live and in th
     try testing.expectEqualStrings("fill", byId(b, "a").style.field("width").?.tag);
     b.undo();
     try testing.expectEqual(@as(i64, 120), byId(b, "a").style.field("width").?.int);
+}
+
+test "the layout tab switches a node to absolute positioning and edits its insets" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    const a = byId(b, "a");
+    b.select(a.uid);
+    b.setTab(.layout);
+    // Find the "absolute" button in the Position group.
+    var abs_button: ?*Button = null;
+    var c = b.ui.tree.get(b.content()).?.first_child;
+    while (b.ui.tree.get(c)) |n| : (c = n.next) {
+        var cc = n.first_child;
+        while (b.ui.tree.get(cc)) |m| : (cc = m.next) {
+            if (m.widget_type == ui_mod.typeTag(Button)) {
+                const btn: *Button = @ptrCast(@alignCast(m.widget.?));
+                if (std.mem.eql(u8, btn.props.text.bytes, "absolute")) abs_button = btn;
+            }
+        }
+    }
+    clickButton(abs_button.?);
+    try testing.expectEqualStrings("absolute", a.style.field("position").?.tag);
+    try testing.expect(b.layout_fields[@intFromEnum(Builder.LayoutField.inset_left)] != null);
+    typeInto(&r.ui, b.layout_fields[@intFromEnum(Builder.LayoutField.inset_left)].?, "40");
+    typeInto(&r.ui, b.layout_fields[@intFromEnum(Builder.LayoutField.inset_top)].?, "25");
+    try testing.expectEqual(@as(i64, 40), a.style.field("inset").?.field("left").?.int);
+    try r.frame();
+    // It left the flow: b moved up to where a was, and a sits where the insets say.
+    const root_rect = r.ui.tree.absoluteRect(r.liveOf(b.doc().root.uid)).?;
+    const ra = r.ui.tree.absoluteRect(r.liveOf(a.uid)).?;
+    try testing.expectEqual(root_rect.x + 40, ra.x);
+    try testing.expectEqual(root_rect.y + 25, ra.y);
+    // Blank means auto again.
+    typeInto(&r.ui, b.layout_fields[@intFromEnum(Builder.LayoutField.inset_top)].?, "");
+    try testing.expect(a.style.field("inset").?.field("top") == null);
+    b.undo();
+    b.undo();
+    b.undo();
+    try testing.expect(a.style.field("position") == null);
+}
+
+test "dragging an absolute node changes its insets instead of reordering" {
+    const r = try Rig.init(try doc_mod.parseDoc(testing.allocator,
+        \\.{ .root = .{ .type = "box", .id = "root", .style = .{ .width = 300, .height = 200, .align_items = .start }, .children = .{
+        \\    .{ .type = "box", .id = "flow", .style = .{ .width = 50, .height = 20 } },
+        \\    .{ .type = "box", .id = "free", .style = .{ .position = .absolute, .width = 60, .height = 40, .inset = .{ .left = 100, .top = 80 } } },
+        \\} } }
+    , null, null), .{});
+    defer r.deinit();
+    const b = r.b;
+    try r.frame();
+    const free = byId(b, "free");
+    const c = r.center(r.liveOf(free.uid));
+    try r.drag(c, .{ c[0] + 30, c[1] - 20 });
+    try testing.expectEqual(free, b.doc().root.children.items[1]); // not reordered
+    try testing.expectEqual(@as(i64, 130), free.style.field("inset").?.field("left").?.int);
+    try testing.expectEqual(@as(i64, 60), free.style.field("inset").?.field("top").?.int);
+    b.undo(); // the whole drag is one step
+    try testing.expectEqual(@as(i64, 100), free.style.field("inset").?.field("left").?.int);
+    try testing.expectEqual(@as(i64, 80), free.style.field("inset").?.field("top").?.int);
+}
+
+test "adding a split view creates its two panes as one undoable step" {
+    const r = try Rig.init(null, .{});
+    defer r.deinit();
+    const b = r.b;
+    clickButton(paletteButton(b, "split_view"));
+    const sv = b.selectedNode();
+    try testing.expectEqualStrings("split_view", sv.type_name);
+    try testing.expectEqual(@as(usize, 2), sv.children.items.len);
+    b.undo();
+    try testing.expectEqual(@as(usize, 0), b.doc().root.children.items.len);
+    b.redo();
+    try testing.expectEqual(@as(usize, 2), b.doc().root.children.items[0].children.items.len);
+    // The panes show up in the preview, each hosting its box, and take drops.
+    try r.frame();
+    const pane = b.doc().root.children.items[0].children.items[1];
+    try testing.expect(r.ui.tree.absoluteRect(r.liveOf(pane.uid)).?.w > 0);
+    b.select(b.doc().root.uid);
+    clickButton(paletteButton(b, "label"));
+    try testing.expectEqual(@as(usize, 2), b.doc().root.children.items.len);
+}
+
+test "the layout tab's wrap toggle reflows a container" {
+    const r = try Rig.init(try doc_mod.parseDoc(testing.allocator,
+        \\.{ .root = .{ .type = "box", .id = "root", .style = .{ .direction = .row, .width = 100, .height = 100, .align_items = .start }, .children = .{
+        \\    .{ .type = "box", .style = .{ .width = 60, .height = 20, .shrink = 0 } },
+        \\    .{ .type = "box", .style = .{ .width = 60, .height = 20, .shrink = 0 } },
+        \\} } }
+    , null, null), .{});
+    defer r.deinit();
+    const b = r.b;
+    b.select(b.doc().root.uid);
+    b.setTab(.layout);
+    var yes: ?*Button = null;
+    var c = b.ui.tree.get(b.content()).?.first_child;
+    while (b.ui.tree.get(c)) |n| : (c = n.next) {
+        var cc = n.first_child;
+        while (b.ui.tree.get(cc)) |m| : (cc = m.next) {
+            if (m.widget_type == ui_mod.typeTag(Button)) {
+                const btn: *Button = @ptrCast(@alignCast(m.widget.?));
+                if (std.mem.eql(u8, btn.props.text.bytes, "yes")) yes = btn;
+            }
+        }
+    }
+    try r.frame();
+    const second = b.doc().root.children.items[1];
+    try testing.expectEqual(r.ui.tree.absoluteRect(r.liveOf(b.doc().root.children.items[0].uid)).?.y, r.ui.tree.absoluteRect(r.liveOf(second.uid)).?.y);
+    clickButton(yes.?);
+    try testing.expect(b.doc().root.style.field("wrap").?.bool);
+    try r.frame();
+    try testing.expect(r.ui.tree.absoluteRect(r.liveOf(second.uid)).?.y > r.ui.tree.absoluteRect(r.liveOf(b.doc().root.children.items[0].uid)).?.y);
 }
 
 test "the inspector and outline scroll when they overflow" {

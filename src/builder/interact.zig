@@ -46,6 +46,7 @@ pub fn docNodeAt(ui: *Ui, doc: *doc_mod.Doc, frame: Handle, h: Handle) ?*doc_mod
 pub fn childrenHost(ui: *Ui, inst: *const load.Instance, dn: *const doc_mod.Node) ?Handle {
     const h = inst.handleOf(dn.uid) orelse return null;
     if (registry.infoOf(ui, h)) |info| {
+        if (info.content_at != null) return null; // panes are the children, not a list
         if (info.content) |content| {
             const n = ui.tree.get(h) orelse return null;
             return content(n.widget.?);

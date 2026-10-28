@@ -330,9 +330,9 @@ pub fn ticksNs() u64 {
     return c.SDL_GetTicksNS();
 }
 
-pub const Cursor = enum { default, text, pointer };
+pub const Cursor = enum { default, text, pointer, resize_horizontal, resize_vertical };
 
-var cursors: [3]?*c.SDL_Cursor = .{ null, null, null };
+var cursors: [5]?*c.SDL_Cursor = .{ null, null, null, null, null };
 var current_cursor: ?Cursor = null;
 
 pub fn setCursor(kind: Cursor) void {
@@ -343,6 +343,8 @@ pub fn setCursor(kind: Cursor) void {
             .default => c.SDL_SYSTEM_CURSOR_DEFAULT,
             .text => c.SDL_SYSTEM_CURSOR_TEXT,
             .pointer => c.SDL_SYSTEM_CURSOR_POINTER,
+            .resize_horizontal => c.SDL_SYSTEM_CURSOR_EW_RESIZE,
+            .resize_vertical => c.SDL_SYSTEM_CURSOR_NS_RESIZE,
         };
         cursors[idx] = c.SDL_CreateSystemCursor(sys);
     }
@@ -401,4 +403,15 @@ pub fn pollEvent() ?Event {
 /// Block until an event arrives or `timeout_ms` passes (negative waits forever).
 pub fn waitEvent(timeout_ms: i32) ?Event {
     return nextEvent(timeout_ms);
+}
+
+/// Show the cursor shape the UI asks for (`Ui.cursor()`).
+pub fn setUiCursor(shape: zigui.tree.Cursor) void {
+    setCursor(switch (shape) {
+        .default => .default,
+        .text => .text,
+        .pointer => .pointer,
+        .resize_horizontal => .resize_horizontal,
+        .resize_vertical => .resize_vertical,
+    });
 }
