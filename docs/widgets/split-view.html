@@ -18,7 +18,9 @@ _ = try ui.add(zigui.CodeEditor, split.secondNode(), .{ .style = .{ .grow = 1 } 
 <tr><td><code>first_size</code></td><td>240</td><td>Size of the first pane in pixels.</td></tr>
 <tr><td><code>min_first</code>, <code>min_second</code></td><td>48</td><td>Minimum pane sizes.</td></tr>
 <tr><td><code>divider_size</code></td><td>6</td><td></td></tr>
+<tr><td><code>anchor_second</code></td><td>false</td><td>Keep the <b>second</b> pane at <code>first_size</code> pixels and let the first one flex (a fixed-width inspector on the right). Dragging the divider then changes the second pane. <code>first_size</code> is always the size of the anchored pane.</td></tr>
 </table>
+<p>Splits nest: a vertical split inside the first pane of a horizontal one gives the classic tools | editor | inspector layout. Give each nested split <code>.width = .fill, .height = .fill</code>. The builder itself is built this way.</p>
 <h2>Methods</h2>
 <ul><li><code>firstNode()</code>, <code>secondNode()</code>, <code>setFirstSize(px)</code></li></ul>
 <h2>Document</h2>

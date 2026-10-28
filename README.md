@@ -359,6 +359,26 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   keyboard and mouse navigation; `rowRect`/`itemAt` for drag and drop. The
   builder's outline is a TreeView and keeps expansion across rebuilds. Not in
   the registry (items are data, not props), not virtualized.
+- Popups (`widgets/menu.zig`, `select.zig`, `menu_bar.zig`): `Ui.openMenu` puts
+  an absolute panel as the last child of the root (so it draws above
+  everything), pushes a non-modal focus scope, and closes on pick, Escape, or a
+  press outside (`Ui.pointerButtonEx` checks before dispatch; a press on the
+  opener sets `menu_suppress` so its click toggles instead of reopening).
+  Closed menus are freed at the next `Ui.update`, so a pick callback can still
+  read them. Items with a `command` follow the command's enabled state and show
+  its shortcut. `Select` is a widget over it (options kept as one
+  newline-separated `Text` so the registry and documents can edit them);
+  forms use it for enums. Right-click menus are just a `pointer_down` listener
+  on button 3. No submenus yet.
+- Keyboard focus by Tab selects a text field's whole text (`input.keyboard`
+  tells the field how focus arrived). `SplitView.anchor_second` anchors the
+  second pane's size; `TreeView.activate_toggles` lets hosts use double-click
+  for something else (the builder renames).
+- Builder: its regions are nested `SplitView`s, new area widgets start
+  `fill`/`fill`, the Layout tab uses `Select`s, a menu bar and context menus run
+  its commands (whose enabled state tracks the selection), double-click or F2
+  renames an id in place, and dragging a split view's divider in the preview
+  records `first_size`.
 - Workbench (`zig build workbench`): a code editor on the ZON text beside the
   builder, synced both ways; parse errors go to the status line. Examples build
   ReleaseSafe by default (`-Dexample_optimize`) because the software rasterizer

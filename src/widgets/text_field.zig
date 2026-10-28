@@ -265,6 +265,9 @@ pub const TextField = struct {
         switch (ev.kind) {
             .focus_in => {
                 out.focused = true;
+                // Arriving by keyboard (Tab) selects everything so typing replaces
+                // the value; a click places the caret instead.
+                if (self.ui.input.keyboard and props.enabled) ed.selectAll();
                 self.touchCaret();
             },
             .focus_out => {

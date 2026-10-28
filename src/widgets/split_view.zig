@@ -37,13 +37,19 @@ pub const SplitView = struct {
         /// Stack the panes top to bottom (the divider is horizontal) instead of
         /// side by side.
         vertical: bool = false,
-        /// Size of the first pane along the split axis, in pixels.
+        /// Size in pixels, along the split axis, of the anchored pane: the first
+        /// one, or the second when `anchor_second` is set. The other pane takes
+        /// what is left.
         first_size: f32 = 240,
         min_first: f32 = 48,
         min_second: f32 = 48,
         divider_size: f32 = 6,
+        /// Keep the second pane at `first_size` and let the first one flex
+        /// (a fixed-width inspector on the right, say).
+        anchor_second: bool = false,
 
         pub const dirty_map = .{
+            .anchor_second = shadow.Category.layout,
             .vertical = shadow.Category.layout,
             .first_size = shadow.Category.layout,
             .min_first = shadow.Category.layout,
@@ -64,6 +70,7 @@ pub const SplitView = struct {
         min_first: f32 = 48,
         min_second: f32 = 48,
         divider_size: f32 = 6,
+        anchor_second: bool = false,
     };
 
     pub const listened_kinds = [_]event.EventKind{};
@@ -88,6 +95,7 @@ pub const SplitView = struct {
             .min_first = o.min_first,
             .min_second = o.min_second,
             .divider_size = o.divider_size,
+            .anchor_second = o.anchor_second,
         };
         const tree = &self.ui.tree;
         self.first = try tree.create(.{ .role = .panel, .flags = .{ .clip_children = true } });
@@ -135,18 +143,19 @@ pub const SplitView = struct {
         const fs = tree.get(self.first).?;
         const dv = tree.get(self.divider).?;
         const sc = tree.get(self.second).?;
-        fs.style = .{ .direction = .column, .shrink = 0, .grow = 0 };
+        const flex_style: Style = .{ .direction = .column, .grow = 1, .shrink = 1 };
+        const fixed_style: Style = .{ .direction = .column, .shrink = 0, .grow = 0 };
+        fs.style = if (p.anchor_second) flex_style else fixed_style;
+        sc.style = if (p.anchor_second) fixed_style else flex_style;
         dv.style = .{ .shrink = 0, .grow = 0 };
-        sc.style = .{ .direction = .column, .grow = 1, .shrink = 1 };
+        const anchored = if (p.anchor_second) sc else fs;
         if (p.vertical) {
-            fs.style.height = Length.px(p.first_size);
+            anchored.style.height = Length.px(p.first_size);
             dv.style.height = Length.px(p.divider_size);
-            sc.style.height = .auto;
             dv.cursor = .resize_vertical;
         } else {
-            fs.style.width = Length.px(p.first_size);
+            anchored.style.width = Length.px(p.first_size);
             dv.style.width = Length.px(p.divider_size);
-            sc.style.width = .auto;
             dv.cursor = .resize_horizontal;
         }
         tree.markDirty(self.node, .{ .layout = true, .paint = true });
@@ -160,8 +169,10 @@ pub const SplitView = struct {
         const tree = &self.ui.tree;
         const node = tree.get(self.node).?;
         const total = if (self.props.vertical) node.rect.h else node.rect.w;
-        const room = total - self.props.divider_size - self.props.min_second;
-        const clamped = std.math.clamp(size, self.props.min_first, @max(room, self.props.min_first));
+        const min_anchored = if (self.props.anchor_second) self.props.min_second else self.props.min_first;
+        const min_other = if (self.props.anchor_second) self.props.min_first else self.props.min_second;
+        const room = total - self.props.divider_size - min_other;
+        const clamped = std.math.clamp(size, min_anchored, @max(room, min_anchored));
         if (clamped == self.props.first_size) return;
         self.props.first_size = clamped;
         self.applyLayout();
@@ -190,7 +201,10 @@ pub const SplitView = struct {
                 ev.handled = true;
                 self.ui.tree.markDirty(self.divider, .{ .paint = true });
             },
-            .pointer_move => if (self.dragging) self.setFirstSize(self.drag_size + (along - self.drag_from)),
+            .pointer_move => if (self.dragging) {
+                const delta = along - self.drag_from;
+                self.setFirstSize(if (self.props.anchor_second) self.drag_size - delta else self.drag_size + delta);
+            },
             .pointer_up => if (self.dragging) {
                 self.dragging = false;
                 self.out.dragging = false;
@@ -217,11 +231,12 @@ pub const SplitView = struct {
     /// Notice prop changes written directly (the inspector, a loaded document).
     pub fn update(self: *SplitView) void {
         self.ui.verifyProps(self.node, &self.checker, &self.props, "split_view");
-        const fs = self.ui.tree.get(self.first) orelse return;
+        const fs = self.ui.tree.get(if (self.props.anchor_second) self.second else self.first) orelse return;
         const want = Length.px(self.props.first_size);
         const have = if (self.props.vertical) fs.style.height else fs.style.width;
+        const anchor_ok = (fs.style.grow == 0);
         const dir_ok = (self.ui.tree.get(self.node).?.style.direction == .column) == self.props.vertical;
-        if (!dir_ok or !std.meta.eql(have, want)) self.applyLayout();
+        if (!dir_ok or !anchor_ok or !std.meta.eql(have, want)) self.applyLayout();
     }
 
     pub fn endFrame(self: *SplitView) void {
@@ -341,4 +356,27 @@ test "content in the panes and prop changes written directly both work" {
     try r.frame();
     try r.frame();
     try testing.expectEqual(@as(f32, 200), r.ui.tree.get(s.firstNode()).?.rect.h);
+}
+
+test "anchoring the second pane keeps it at its size while the first flexes; dragging moves it the other way" {
+    const r = try Rig.init();
+    defer r.deinit();
+    const s = try r.split(.{ .first_size = 120, .anchor_second = true, .divider_size = 6 });
+    const a = r.ui.tree.get(s.firstNode()).?.rect;
+    const d = r.ui.tree.get(s.divider).?.rect;
+    const b = r.ui.tree.get(s.secondNode()).?.rect;
+    try testing.expectEqual(@as(f32, 120), b.w);
+    try testing.expectEqual(@as(f32, 400 - 120 - 6), a.w);
+    try testing.expectEqual(a.w, d.x);
+
+    // Dragging right shrinks the anchored (second) pane.
+    const ui = &r.ui;
+    const x = ui.tree.absoluteRect(s.divider).?.x + 3;
+    ui.pointerMove(x, 50);
+    ui.pointerButtonEx(x, 50, 1, true, 1);
+    ui.pointerMove(x + 40, 50);
+    try r.frame();
+    try testing.expectEqual(@as(f32, 80), s.props.first_size);
+    try testing.expectEqual(@as(f32, 80), ui.tree.get(s.secondNode()).?.rect.w);
+    ui.pointerButtonEx(x + 40, 50, 1, false, 1);
 }

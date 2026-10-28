@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Menus - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>Menus: popup, context, and menu bar</h1>
+<p>A <b>menu</b> is a popup list drawn over everything else. One is open at a time. It closes when an item is picked, on Escape, or when the pointer is pressed outside it. While open it holds keyboard focus (Up/Down/Home/End move, Enter or Space pick, Tab stays inside) and returns focus when it closes. The <a href="select.html">Select</a> drop-down, the <b>menu bar</b>, and right-click menus are all this one thing.</p>
+
+<h2>Popup and context menus</h2>
+<pre><code>const items = [_]zigui.menu.Item{
+    .{ .label = "Cut", .command = "edit.cut" },
+    .{ .label = "Copy", .command = "edit.copy" },
+    .{ .separator = true },
+    .{ .label = "Properties", .enabled = false },
+};
+try ui.openMenu(&amp;items, x, y, .{ .on_pick = zigui.menu.PickHook.bind(&amp;app, App.onPick) });
+
+fn onPick(self: *App, index: usize) void { ... }   // called after the menu has closed</code></pre>
+<p>A <b>right-click menu</b> is a listener that opens one at the pointer:</p>
+<pre><code>try ui.tree.addListener(editor_node, .{ .kind = .pointer_down, .callback = .bind(&amp;app, App.onDown) });
+
+fn onDown(self: *App, ev: *zigui.event.Event) void {
+    if (ev.button != 3) return;                      // 1 left, 2 middle, 3 right
+    self.ui.openMenu(&amp;items, ev.x, ev.y, .{}) catch {};
+}</code></pre>
+<h3>Item</h3>
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>label</code></td><td>Text (copied).</td></tr>
+<tr><td><code>command</code></td><td>A registered command name: picking runs it, the item is enabled only while the command is, and the command's shortcut is shown on the right.</td></tr>
+<tr><td><code>enabled</code></td><td>Greyed out and unpickable when false.</td></tr>
+<tr><td><code>separator</code></td><td>A divider line.</td></tr>
+<tr><td><code>checked</code></td><td>A check mark before the label.</td></tr>
+<tr><td><code>user</code></td><td>Yours.</td></tr>
+</table>
+<h3>Options</h3>
+<table>
+<tr><th>Option</th><th>Meaning</th></tr>
+<tr><td><code>on_pick</code></td><td>A <code>PickHook</code> called with the picked item's index. Items with a <code>command</code> run it too.</td></tr>
+<tr><td><code>anchor</code></td><td>A rectangle (window coordinates) the menu drops from: below it, or above if there is no room. Without it the menu opens at (x, y).</td></tr>
+<tr><td><code>owner</code></td><td>The opener's node. Pressing it while the menu is open closes the menu and does not reopen it.</td></tr>
+<tr><td><code>min_width</code></td><td>Minimum width (a select uses its own width).</td></tr>
+<tr><td><code>focus_index</code></td><td>Which item starts focused.</td></tr>
+</table>
+<p>The menu is kept inside the window. <code>ui.closeMenu()</code> closes it; <code>ui.menuOpen()</code> tells you if one is open.</p>
+
+<h2>MenuBar</h2>
+<pre><code>const bar = try zigui.MenuBar.create(&amp;ui, parent, .{});
+defer bar.destroy();
+try bar.addMenu("File", &amp;.{
+    .{ .label = "Save", .command = "file.save" },
+    .{ .separator = true },
+    .{ .label = "Quit", .command = "app.quit" },
+}, null);
+try bar.addMenu("Edit", &amp;.{ .{ .label = "Undo", .command = "edit.undo" } }, null);</code></pre>
+<p>Clicking a title opens its menu below it; while one is open, moving over another title switches to it; clicking the open title again closes it. The optional last argument is a <code>PickHook</code> for that menu. Like <a href="../forms.html">Form</a>, the bar is a heap object you <code>destroy</code>. Put <code>bar.node</code> in your layout (it is a row; pass <code>.style</code> in the options to size it).</p>
+
+<h2>Limits</h2>
+<ul>
+<li>No submenus, no icons, no keyboard mnemonics (Alt+letter) or arrow-key switching between bar menus yet.</li>
+<li>Long menus do not scroll; keep them shorter than the window.</li>
+</ul>
+</main><script src="../nav.js"></script></body></html>

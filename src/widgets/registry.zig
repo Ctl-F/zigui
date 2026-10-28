@@ -25,6 +25,7 @@ const CodeEditor = @import("code_editor.zig").CodeEditor;
 const Canvas = @import("canvas.zig").Canvas;
 const ScrollView = @import("scroll_view.zig").ScrollView;
 const SplitView = @import("split_view.zig").SplitView;
+const Select = @import("select.zig").Select;
 
 pub const Error = schema.Error || error{ UnknownWidget, NotAWidget, StaleHandle };
 
@@ -150,6 +151,7 @@ pub const widgets = [_]Info{
     describe("canvas", Canvas),
     describe("scroll_view", ScrollView),
     describe("split_view", SplitView),
+    describe("select", Select),
 };
 
 pub fn find(name: []const u8) ?*const Info {

@@ -61,6 +61,8 @@ pub const Canvas = canvas_mod.Canvas;
 const ScrollView = scroll_mod.ScrollView;
 const SplitView = split_mod.SplitView;
 const TreeView = @import("../widgets/tree_view.zig").TreeView;
+const menu_mod = @import("../widgets/menu.zig");
+const Select = @import("../widgets/select.zig").Select;
 const CodeEditor = code_editor.CodeEditor;
 
 /// A unique address per widget type, stored on nodes so the registry can tell
@@ -94,6 +96,13 @@ pub const Ui = struct {
     scrollers: Pool(ScrollView, 16),
     splitters: Pool(SplitView, 16),
     tree_views: Pool(TreeView, 16),
+    selects: Pool(Select, 64),
+    /// The open menu, if any (see `openMenu`).
+    menu: ?*menu_mod.Menu = null,
+    /// Closed menus waiting to be freed at the next `update`.
+    menu_closed: std.ArrayListUnmanaged(*menu_mod.Menu) = .empty,
+    /// The widget whose press just closed a menu; it must not reopen it on the click.
+    menu_suppress: Handle = Handle.invalid,
     /// Recorded draw commands of repaint-boundary subtrees (see `paint.Cache`).
     paint_cache: paint.Cache,
     /// The renderer the app draws with (set by `renderFrame` or `setBackend`);
@@ -151,6 +160,7 @@ pub const Ui = struct {
             .scrollers = Pool(ScrollView, 16).init(gpa),
             .splitters = Pool(SplitView, 16).init(gpa),
             .tree_views = Pool(TreeView, 16).init(gpa),
+            .selects = Pool(Select, 64).init(gpa),
             .paint_cache = paint.Cache.init(gpa),
             .commands = commands_mod.Commands.init(gpa),
             .shortcuts = shortcuts_mod.Shortcuts.init(gpa),
@@ -163,7 +173,7 @@ pub const Ui = struct {
         self.theme = theme;
         self.tree.markDirty(self.tree.root, DirtyFlags.layout_and_paint);
         // Widgets reshape text and repaint from the new theme in `update`.
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| self.tree.markDirty(e.ptr.node, DirtyFlags.layout_and_paint);
         }
@@ -183,7 +193,10 @@ pub const Ui = struct {
     }
 
     pub fn deinit(self: *Ui) void {
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views }) |pool| {
+        if (self.menu) |m| m.close();
+        for (self.menu_closed.items) |m| m.destroyClosed();
+        self.menu_closed.deinit(self.gpa);
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| e.ptr.deinit();
             pool.deinit();
@@ -208,6 +221,7 @@ pub const Ui = struct {
         if (W == ScrollView) return &self.scrollers;
         if (W == SplitView) return &self.splitters;
         if (W == TreeView) return &self.tree_views;
+        if (W == Select) return &self.selects;
         @compileError("not a widget type: " ++ @typeName(W));
     }
 
@@ -463,9 +477,30 @@ pub const Ui = struct {
     /// (2 = double click) for text selection.
     pub fn pointerButtonEx(self: *Ui, x: f32, y: f32, btn: u32, down: bool, clicks: u32) void {
         const t0 = self.nowNs();
-        if (down) self.shortcuts.clearPending();
+        if (down) {
+            self.shortcuts.clearPending();
+            self.menu_suppress = Handle.invalid;
+            if (self.menu) |m| {
+                if (!m.contains(x, y)) m.dismissByPress(x, y);
+            }
+        }
         self.input.pointerButtonEx(&self.tree, x, y, btn, down, clicks);
         self.endHandler(t0, "pointer_button");
+    }
+
+    /// Open a popup menu at window point (`x`, `y`) (see `widgets/menu.zig`).
+    /// Replaces any menu that is open.
+    pub fn openMenu(self: *Ui, items: []const menu_mod.Item, x: f32, y: f32, opts: menu_mod.Options) !void {
+        try menu_mod.Menu.open(self, items, x, y, opts);
+    }
+
+    /// Close the open menu without picking anything.
+    pub fn closeMenu(self: *Ui) void {
+        if (self.menu) |m| m.close();
+    }
+
+    pub fn menuOpen(self: *const Ui) bool {
+        return self.menu != null;
     }
 
     /// The window lost focus: end any press in progress without a click.
@@ -797,7 +832,7 @@ pub const Ui = struct {
 
     /// Run `method` on every live widget.
     fn forEachWidget(self: *Ui, comptime method: []const u8) void {
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| @field(@TypeOf(e.ptr.*), method)(e.ptr);
         }
@@ -810,6 +845,9 @@ pub const Ui = struct {
         const t0 = self.nowNs();
         defer self.pending_update_ns += self.nowNs() -| t0;
         self.checkPinned();
+        for (self.menu_closed.items) |m| m.destroyClosed();
+        self.menu_closed.clearRetainingCapacity();
+        if (self.menu) |m| m.update();
         // Container widgets that create and destroy child widgets do it first,
         // so what they destroy is reclaimed below and what they create is
         // prepared and updated like the rest.
@@ -825,6 +863,7 @@ pub const Ui = struct {
         self.sweep(&self.scrollers);
         self.sweep(&self.splitters);
         self.sweep(&self.tree_views);
+        self.sweep(&self.selects);
 
         if (self.shortcuts.count() > 0) self.shortcuts.prune(&self.tree, &self.commands);
 
@@ -3647,4 +3686,29 @@ test "monospace runs draw exactly the pixels positioned glyphs would" {
     software.render(&a, &t.h.list, .{ .clear = geometry.Color.black, .glyphs = ui.glyphProvider() });
     software.render(&b, &expanded, .{ .clear = geometry.Color.black, .glyphs = ui.glyphProvider() });
     try std.testing.expectEqualSlices(u8, a.bytes(), b.bytes());
+}
+
+test "tabbing into a text field selects its text so typing replaces it; clicking only places the caret" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.tree.get(ui.tree.root).?.style = .{ .align_items = .start };
+    const tf = try ui.add(TextField, ui.tree.root, .{ .text = "hello", .style = .{ .width = Length.px(200), .height = Length.px(28) } });
+    try t.h.frame();
+    try press(t, .tab, .{});
+    try std.testing.expect(tf.out.focused);
+    try type_(t, "x");
+    try std.testing.expectEqualStrings("x", tf.text());
+
+    // A click focuses without selecting everything.
+    ui.setFocus(null);
+    try t.h.frame();
+    try tf.setText("hello");
+    try t.h.frame();
+    ui.pointerMove(190, 14);
+    ui.pointerButton(190, 14, 1, true);
+    ui.pointerButton(190, 14, 1, false);
+    try t.h.frame();
+    try type_(t, "!");
+    try std.testing.expectEqualStrings("hello!", tf.text());
 }

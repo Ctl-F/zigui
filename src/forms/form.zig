@@ -1,7 +1,7 @@
 //! Struct-to-form generation (design doc section 11).
 //!
 //! `Form(T)` builds a dialog body from the runtime schema of `T`: a bool becomes
-//! an On/Off toggle, an enum a button that cycles through its names, numbers,
+//! an On/Off toggle, an enum a drop-down (`Select`) of its names, numbers,
 //! colors, lengths, and strings text fields, an optional a "Set" toggle plus the
 //! control, and a nested struct or array an indented group. Field defaults are
 //! the initial values (or pass `initial`). A `pub const ui` block on `T` supplies
@@ -37,6 +37,7 @@ const Button = @import("../widgets/button.zig").Button;
 const Text = @import("../widgets/common.zig").Text;
 const Label = @import("../widgets/label.zig").Label;
 const TextField = @import("../widgets/text_field.zig").TextField;
+const Select = @import("../widgets/select.zig").Select;
 
 /// Collects validation messages. See `Form`.
 pub const Report = struct {
@@ -272,6 +273,8 @@ pub fn Form(comptime T: type) type {
             ty: *const schema.Type,
             meta: schema.Meta,
             button: ?*Button = null,
+            /// The drop-down of an enum field.
+            select: ?*Select = null,
             field: ?*TextField = null,
             err: ?*Label = null,
             parse_error: ?[]const u8 = null,
@@ -551,8 +554,13 @@ pub fn Form(comptime T: type) type {
                 },
                 .choice => {
                     const b = try self.bind(.cycle, path, ty, meta);
-                    b.button = try self.ui.add(Button, row, .{ .text = formatValue(ty, current, &vbuf), .enabled = !meta.readonly });
-                    b.button.?.props.on_click = event.Callback.bind(b, onClick);
+                    b.select = try self.ui.add(Select, row, .{
+                        .items = ty.enum_names,
+                        .selected = if (current == .choice) @intCast(current.choice) else 0,
+                        .enabled = !meta.readonly,
+                        .style = .{ .grow = 1, .min_width = Length.px(120) },
+                        .on_change = event.Callback.bind(b, onChoice),
+                    });
                 },
                 else => {
                     const b = try self.bind(.field, path, ty, meta);
@@ -635,6 +643,13 @@ pub fn Form(comptime T: type) type {
             self.afterChange();
         }
 
+        fn onChoice(b: *Binding, _: *event.Event) void {
+            const self = b.form;
+            b.parse_error = null;
+            if (!self.write(b, .{ .choice = b.select.?.props.selected })) return;
+            self.afterChange();
+        }
+
         fn onClick(b: *Binding, _: *event.Event) void {
             const self = b.form;
             switch (b.kind) {
@@ -647,14 +662,7 @@ pub fn Form(comptime T: type) type {
                     btn.props.variant = if (next) .primary else .normal;
                     self.ui.tree.markDirty(btn.node, .{ .paint = true });
                 },
-                .cycle => {
-                    const cur = schema.get(self.root_type, self.base, b.path) catch return;
-                    const n = b.ty.enum_names.len;
-                    if (n == 0 or cur != .choice) return;
-                    const next: u32 = @intCast((cur.choice + 1) % n);
-                    if (!self.write(b, .{ .choice = next })) return;
-                    b.button.?.setText(b.ty.enum_names[next]) catch {};
-                },
+                .cycle => return,
                 .presence => {
                     const present = schema.isPresent(self.root_type, self.base, b.path) catch return;
                     if (present) {
@@ -808,7 +816,7 @@ test "initial text comes from the field defaults, formatted per kind" {
     try testing.expectEqualStrings("#0a141eff", findBinding(f, "accent").field.?.text());
     try testing.expectEqualStrings("auto", findBinding(f, "width").field.?.text());
     try testing.expectEqualStrings("Off", findBinding(f, "shared").button.?.props.text.bytes);
-    try testing.expectEqualStrings("medium", findBinding(f, "level").button.?.props.text.bytes);
+    try testing.expectEqualStrings("medium", findBinding(f, "level").select.?.selectedLabel());
 }
 
 test "typing parses into the value; bad input blocks submit and shows a message" {
@@ -846,7 +854,7 @@ test "typing parses into the value; bad input blocks submit and shows a message"
     try testing.expect(!f.out.valid);
 }
 
-test "toggles and enum buttons write through and update their labels" {
+test "toggles and enum drop-downs write through and update their labels" {
     var ui = try Ui.init(testing.allocator);
     defer ui.deinit();
     const f = try Form(Project).create(&ui, ui.tree.root, .{});
@@ -859,11 +867,11 @@ test "toggles and enum buttons write through and update their labels" {
     try testing.expect(!f.value.shared);
 
     const level = findBinding(f, "level");
-    clickBinding(level);
+    level.select.?.setSelected(2);
     try testing.expectEqual(Level.high, f.value.level);
-    clickBinding(level); // wraps
+    level.select.?.setSelected(0);
     try testing.expectEqual(Level.low, f.value.level);
-    try testing.expectEqualStrings("low", level.button.?.props.text.bytes);
+    try testing.expectEqualStrings("low", level.select.?.selectedLabel());
 }
 
 test "optional fields rebuild with controls when set and drop them when unset" {
@@ -899,8 +907,8 @@ test "validate gates submit with per-field and form-level messages" {
     try testing.expect(f.out.valid);
 
     clickBinding(findBinding(f, "shared"));
-    clickBinding(findBinding(f, "level")); // medium -> high
-    clickBinding(findBinding(f, "level")); // -> low
+    findBinding(f, "level").select.?.setSelected(2); // medium -> high
+    findBinding(f, "level").select.?.setSelected(0); // -> low
     try testing.expect(!f.out.valid);
     try testing.expectEqualStrings("Shared projects need a higher level", f.form_error.?.props.text.bytes);
 }

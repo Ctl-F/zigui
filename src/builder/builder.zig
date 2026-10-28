@@ -57,6 +57,10 @@ const Button = @import("../widgets/button.zig").Button;
 const Label = @import("../widgets/label.zig").Label;
 const TextField = @import("../widgets/text_field.zig").TextField;
 const ScrollView = @import("../widgets/scroll_view.zig").ScrollView;
+const Select = @import("../widgets/select.zig").Select;
+const SplitView = @import("../widgets/split_view.zig").SplitView;
+const menu_mod = @import("../widgets/menu.zig");
+const MenuBar = @import("../widgets/menu_bar.zig").MenuBar;
 const tree_view = @import("../widgets/tree_view.zig");
 const TreeView = tree_view.TreeView;
 const registry = @import("../widgets/registry.zig");
@@ -115,10 +119,11 @@ const Command = enum {
     down,
     indent,
     outdent,
+    rename,
 };
 const command_count = @typeInfo(Command).@"enum".field_names.len;
 const command_titles = [command_count][]const u8{
-    "Undo", "Redo", "Save", "Delete node", "Duplicate", "Copy", "Cut", "Paste", "Wrap in box", "Unwrap", "Move up", "Move down", "Indent", "Outdent",
+    "Undo", "Redo", "Save", "Delete node", "Duplicate", "Copy", "Cut", "Paste", "Wrap in box", "Unwrap", "Move up", "Move down", "Indent", "Outdent", "Rename id",
 };
 
 /// Most rectangles the preview overlay can occupy: hover and selection outlines
@@ -135,6 +140,14 @@ const Press = struct {
     type_name: []const u8 = "",
     sx: f32,
     sy: f32,
+};
+
+/// Dragging a split view's divider in the preview.
+const SplitDrag = struct {
+    uid: u32,
+    sv: *SplitView,
+    start_size: f32,
+    start: f32,
 };
 
 const Resize = struct {
@@ -210,6 +223,11 @@ pub const Builder = struct {
     last_overlay_n: usize = 0,
     last_outline_marker: bool = false,
     resize: ?Resize = null,
+    split_drag: ?SplitDrag = null,
+    menu_bar: ?*MenuBar = null,
+    /// The inline editor for a node's id (double-click in the outline).
+    rename: ?*TextField = null,
+    rename_uid: u32 = 0,
     /// Moving an absolutely positioned node: it follows the pointer by insets.
     abs_drag: ?AbsDrag = null,
     /// Counter for edit gestures (a resize drag): its edits merge into one step.
@@ -240,8 +258,10 @@ pub const Builder = struct {
         }
         try self.buildChrome(parent);
         errdefer _ = ui.tree.destroySubtree(self.root);
+        errdefer if (self.menu_bar) |mb| mb.destroy();
         try self.registerCommands();
         errdefer self.unregisterCommands();
+        try self.addMenus();
         errdefer {
             self.clearInspector();
             if (self.inst) |*i| i.destroy();
@@ -257,6 +277,9 @@ pub const Builder = struct {
         self.clearInspector();
         if (self.inst) |*i| i.destroy();
         self.inst = null;
+        self.ui.closeMenu();
+        if (self.menu_bar) |mb| mb.destroy();
+        self.menu_bar = null;
         self.unregisterCommands();
         _ = self.ui.tree.destroySubtree(self.root);
         self.event_fields.deinit(self.gpa);
@@ -323,6 +346,11 @@ pub const Builder = struct {
         return h;
     }
 
+    /// Width of the dividers between the main regions (the gap they replace).
+    const split_gap: f32 = 8;
+    /// The palette's starting height: its title and five rows of buttons.
+    const palette_height: f32 = 184;
+
     const tool_button_style: Style = .{ .padding = Edges.xy(7, 3), .shrink = 0 };
 
     fn toolbarButton(self: *Builder, parent: Handle, text: []const u8, cmd: Command) !void {
@@ -338,6 +366,11 @@ pub const Builder = struct {
         errdefer _ = ui.tree.destroySubtree(self.root);
         ui.tree.get(self.root).?.role = .panel;
 
+        self.menu_bar = try MenuBar.create(ui, self.root, .{});
+        errdefer {
+            self.menu_bar.?.destroy();
+            self.menu_bar = null;
+        }
         const bar = try self.node(self.root, .{ .direction = .row, .gap = Length.px(4), .align_items = .center });
         const order = [_]struct { []const u8, Command }{
             .{ "Undo", .undo },   .{ "Redo", .redo },       .{ "Dup", .duplicate }, .{ "Wrap", .wrap },    .{ "Unwrap", .unwrap },
@@ -354,15 +387,33 @@ pub const Builder = struct {
             ui.tree.get(b.node).?.user_data = @ptrFromInt(i + 1);
         }
 
-        const main = try self.node(self.root, .{ .direction = .row, .gap = Length.px(8), .grow = 1 });
-        const left = try self.node(main, .{ .direction = .column, .gap = Length.px(8), .width = Length.px(self.opts.side_width), .shrink = 0 });
-        self.palette = try self.panel(left, .{ .direction = .column, .gap = Length.px(2), .padding = Edges.all(8), .shrink = 0 }, panel_bg);
-        const outline_panel = try self.panel(left, .{ .direction = .column, .gap = Length.px(4), .padding = Edges.all(8), .grow = 1 }, panel_bg);
+        // Three resizable regions: tools and outline | preview | inspector.
+        // The dividers are as wide as the old gaps, so the default look holds.
+        const fill: Style = .{ .width = .fill, .height = .fill };
+        const outer = try ui.add(SplitView, self.root, .{
+            .style = fill,
+            .first_size = self.opts.side_width,
+            .min_first = 140,
+            .min_second = 360,
+            .divider_size = split_gap,
+        });
+        const tools = try ui.add(SplitView, outer.firstNode(), .{
+            .style = fill,
+            .vertical = true,
+            .first_size = palette_height,
+            .min_first = 60,
+            .min_second = 80,
+            .divider_size = split_gap,
+        });
+        self.palette = try self.panel(tools.firstNode(), .{ .direction = .column, .gap = Length.px(2), .padding = Edges.all(8), .width = .fill, .height = .fill }, panel_bg);
+        const outline_panel = try self.panel(tools.secondNode(), .{ .direction = .column, .gap = Length.px(4), .padding = Edges.all(8), .width = .fill, .height = .fill }, panel_bg);
         _ = try ui.add(Label, outline_panel, .{ .text = "Outline", .size = 15 });
         self.outline = try ui.add(TreeView, outline_panel, .{
             .style = .{ .grow = 1 },
             .label = "Outline",
             .on_select = event.Callback.bind(self, onOutlineSelect),
+            .on_activate = event.Callback.bind(self, onOutlineActivate),
+            .activate_toggles = false,
         });
         for ([_]event.EventKind{ .pointer_down, .pointer_move, .pointer_up }) |kind| {
             try ui.tree.addListener(self.outline.node, .{ .kind = kind, .callback = event.Callback.bind(self, onOutlinePointer) });
@@ -370,7 +421,15 @@ pub const Builder = struct {
         self.outline_scroll = self.outline.scroll;
         self.outline_scroll.overlay = tree_mod.PaintHook.bind(self, paintOutlineOverlay);
 
-        self.preview_host = try self.panel(main, .{ .direction = .column, .padding = Edges.all(12), .grow = 1 }, host_bg);
+        const inner = try ui.add(SplitView, outer.secondNode(), .{
+            .style = fill,
+            .first_size = self.opts.inspector_width,
+            .anchor_second = true,
+            .min_first = 200,
+            .min_second = 220,
+            .divider_size = split_gap,
+        });
+        self.preview_host = try self.panel(inner.firstNode(), .{ .direction = .column, .padding = Edges.all(12), .width = .fill, .height = .fill }, host_bg);
         {
             const h = ui.tree.get(self.preview_host).?;
             h.flags.clip_children = true;
@@ -387,12 +446,12 @@ pub const Builder = struct {
         ui.tree.get(self.preview_frame).?.visual = .{ .background = frame_bg };
         try self.applyFrameSize();
 
-        const inspector = try self.panel(main, .{
+        const inspector = try self.panel(inner.secondNode(), .{
             .direction = .column,
             .gap = Length.px(6),
             .padding = Edges.all(8),
-            .width = Length.px(self.opts.inspector_width),
-            .shrink = 0,
+            .width = .fill,
+            .height = .fill,
         }, panel_bg);
         self.inspector_tabs = try self.node(inspector, .{ .direction = .column, .gap = Length.px(6), .shrink = 0 });
         self.inspector_scroll = try ui.add(ScrollView, inspector, .{
@@ -443,7 +502,7 @@ pub const Builder = struct {
         .{ "ctrl+z", .undo },       .{ "ctrl+shift+z", .redo }, .{ "ctrl+y", .redo },      .{ "ctrl+s", .save },
         .{ "ctrl+d", .duplicate },  .{ "ctrl+c", .copy },       .{ "ctrl+x", .cut },       .{ "ctrl+v", .paste },
         .{ "ctrl+g", .wrap },       .{ "ctrl+shift+g", .unwrap }, .{ "delete", .delete },  .{ "alt+up", .up },
-        .{ "alt+down", .down },     .{ "alt+right", .indent },  .{ "alt+left", .outdent },
+        .{ "alt+down", .down },     .{ "alt+right", .indent },  .{ "alt+left", .outdent }, .{ "f2", .rename },
     };
 
     fn registerCommands(self: *Builder) !void {
@@ -514,7 +573,141 @@ pub const Builder = struct {
             .down => self.moveSelected(1),
             .indent => self.runStructural(.indent),
             .outdent => self.runStructural(.outdent),
+            .rename => self.beginRename(self.selected),
         }
+    }
+
+    // ---- menus ----
+
+    fn cmdItem(self: *Builder, label: []const u8, cmd: Command) menu_mod.Item {
+        return .{ .label = label, .command = self.command_names[@intFromEnum(cmd)] };
+    }
+
+    const separator: menu_mod.Item = .{ .separator = true };
+
+    fn addMenus(self: *Builder) !void {
+        const mb = self.menu_bar orelse return;
+        try mb.addMenu("File", &.{self.cmdItem("Save", .save)}, null);
+        try mb.addMenu("Edit", &.{
+            self.cmdItem("Undo", .undo),
+            self.cmdItem("Redo", .redo),
+            separator,
+            self.cmdItem("Cut", .cut),
+            self.cmdItem("Copy", .copy),
+            self.cmdItem("Paste", .paste),
+            separator,
+            self.cmdItem("Duplicate", .duplicate),
+            self.cmdItem("Delete", .delete),
+            separator,
+            self.cmdItem("Rename id", .rename),
+        }, null);
+        try mb.addMenu("Structure", &.{
+            self.cmdItem("Wrap in box", .wrap),
+            self.cmdItem("Unwrap", .unwrap),
+            separator,
+            self.cmdItem("Indent", .indent),
+            self.cmdItem("Outdent", .outdent),
+            self.cmdItem("Move up", .up),
+            self.cmdItem("Move down", .down),
+        }, null);
+    }
+
+    /// The right-click menu for the selected node.
+    fn openContextMenu(self: *Builder, x: f32, y: f32) void {
+        self.ui.openMenu(&.{
+            self.cmdItem("Cut", .cut),
+            self.cmdItem("Copy", .copy),
+            self.cmdItem("Paste", .paste),
+            self.cmdItem("Duplicate", .duplicate),
+            self.cmdItem("Delete", .delete),
+            separator,
+            self.cmdItem("Wrap in box", .wrap),
+            self.cmdItem("Unwrap", .unwrap),
+            self.cmdItem("Indent", .indent),
+            self.cmdItem("Outdent", .outdent),
+            self.cmdItem("Move up", .up),
+            self.cmdItem("Move down", .down),
+            separator,
+            self.cmdItem("Rename id", .rename),
+        }, x, y, .{}) catch |e| self.updateStatus(e);
+    }
+
+    // ---- renaming ----
+
+    /// Edit a node's id in place over its outline row.
+    pub fn beginRename(self: *Builder, uid: u32) void {
+        self.cancelRename();
+        const item = self.outline_items.get(uid) orelse return;
+        const row = self.outline.rowRect(item) orelse return;
+        const root_r = self.ui.tree.absoluteRect(self.root) orelse return;
+        const n = self.doc().find(uid) orelse return;
+        const tf = self.ui.add(TextField, self.root, .{
+            .text = n.id,
+            .placeholder = "id",
+            .label = "Node id",
+            .style = .{
+                .position = .absolute,
+                .width = Length.px(@max(row.w, 140)),
+                .height = Length.px(row.h + 4),
+                .inset = .{ .left = Length.px(row.x - root_r.x), .top = Length.px(row.y - root_r.y - 2) },
+            },
+            .on_submit = event.Callback.bind(self, onRenameSubmit),
+        }) catch return;
+        self.ui.tree.addListener(tf.node, .{ .kind = .key_down, .callback = event.Callback.bind(self, onRenameKey) }) catch {};
+        self.ui.tree.addListener(tf.node, .{ .kind = .focus_out, .callback = event.Callback.bind(self, onRenameBlur) }) catch {};
+        self.rename = tf;
+        self.rename_uid = uid;
+        self.ui.setFocus(tf.node);
+        tf.editor.selectAll();
+    }
+
+    fn endRename(self: *Builder) ?*TextField {
+        const tf = self.rename orelse return null;
+        self.rename = null;
+        return tf;
+    }
+
+    fn cancelRename(self: *Builder) void {
+        const tf = self.endRename() orelse return;
+        _ = self.ui.tree.destroySubtree(tf.node);
+    }
+
+    /// Apply the typed id to the node and close the editor.
+    fn commitRename(self: *Builder) void {
+        const tf = self.endRename() orelse return;
+        const before = self.editor.version;
+        const failed = if (self.editor.setId(self.rename_uid, tf.text())) |_| false else |e| blk: {
+            self.updateStatus(e);
+            break :blk true;
+        };
+        _ = self.ui.tree.destroySubtree(tf.node);
+        if (failed) return;
+        self.markInspectorEdit(before);
+        self.rebuildInspector() catch |e| self.updateStatus(e);
+    }
+
+    fn onRenameSubmit(self: *Builder, _: *event.Event) void {
+        self.commitRename();
+        self.ui.setFocus(self.outline.node);
+    }
+
+    fn onRenameBlur(self: *Builder, _: *event.Event) void {
+        self.commitRename();
+    }
+
+    fn onRenameKey(self: *Builder, ev: *event.Event) void {
+        if (ev.key != .escape) return;
+        ev.markHandled();
+        self.cancelRename();
+        self.ui.setFocus(self.outline.node);
+    }
+
+    fn onOutlineActivate(self: *Builder, _: *event.Event) void {
+        const item = self.outline.out.activated_item;
+        if (item == tree_view.no_item) return;
+        const uid: u32 = @intCast(self.outline.userData(item));
+        self.select(uid);
+        self.beginRename(uid);
     }
 
     // ---- rebuilding views ----
@@ -780,13 +973,16 @@ pub const Builder = struct {
     const LayoutField = enum(u8) { gap, padding, margin, width_px, height_px, grow, shrink, grid_columns, grid_span, inset_left, inset_top, inset_right, inset_bottom };
     const LayoutChoice = enum(u8) { direction, align_items, justify, width_mode, height_mode, align_self, position, wrap };
 
+    /// A drop-down for one of the Layout tab's choices.
     fn layoutButtonGroup(self: *Builder, label: []const u8, group: LayoutChoice, names: []const []const u8, current: usize) !void {
         const row = try self.fieldRow(label);
-        for (names, 0..) |name, i| {
-            const b = try self.ui.add(Button, row, .{ .text = name, .variant = if (i == current) .primary else .flat });
-            b.props.on_click = event.Callback.bind(self, onLayoutButton);
-            self.ui.tree.get(b.node).?.user_data = @ptrFromInt((@as(usize, @intFromEnum(group)) << 8) | i);
-        }
+        const sel = try self.ui.add(Select, row, .{
+            .items = names,
+            .selected = @intCast(current),
+            .style = .{ .grow = 1 },
+            .on_change = event.Callback.bind(self, onLayoutSelect),
+        });
+        self.ui.tree.get(sel.node).?.user_data = @ptrFromInt(@as(usize, @intFromEnum(group)) << 8);
     }
 
     fn layoutField(self: *Builder, label: []const u8, which: LayoutField, value: f32) !void {
@@ -872,11 +1068,15 @@ pub const Builder = struct {
         try self.layoutButtonGroup("align self", .align_self, &.{ "auto", "start", "center", "end", "stretch" }, self_idx);
     }
 
-    fn onLayoutButton(self: *Builder, ev: *event.Event) void {
+    fn onLayoutSelect(self: *Builder, ev: *event.Event) void {
         if (self.building) return;
-        const tag = self.tagOf(ev.current);
-        const group: LayoutChoice = @enumFromInt(tag >> 8);
-        const choice = tag & 0xff;
+        const tn = self.ui.tree.get(ev.current) orelse return;
+        const sel: *Select = @ptrCast(@alignCast(tn.widget orelse return));
+        const group: LayoutChoice = @enumFromInt(self.tagOf(ev.current) >> 8);
+        self.applyLayoutChoice(group, sel.props.selected);
+    }
+
+    fn applyLayoutChoice(self: *Builder, group: LayoutChoice, choice: usize) void {
         const n = self.selectedNode();
         const l = self.live(n) orelse return;
         const st = &self.ui.tree.get(l.h).?.style;
@@ -891,7 +1091,7 @@ pub const Builder = struct {
             .wrap => st.wrap = choice == 1,
         }
         self.commitLiveStyle(l.h);
-        // Pressed states change: rebuild the panel (a button press has no typing focus to keep).
+        // The panel may change shape (absolute insets, grid span): rebuild it.
         self.rebuildInspector() catch |e| self.updateStatus(e);
     }
 
@@ -1022,9 +1222,14 @@ pub const Builder = struct {
             idx != null and idx.? + 1 < siblings,
             can_indent,
             n.parent != null and n.parent.?.parent != null,
+            true,
         };
         for (self.buttons, 0..) |maybe, i| {
             if (maybe) |b| b.setEnabled(enabled[i]);
+        }
+        // Menu items follow their commands.
+        for (self.command_names, 0..) |name, i| {
+            if (name.len > 0) _ = self.ui.setCommandEnabled(name, enabled[i]);
         }
     }
 
@@ -1078,7 +1283,9 @@ pub const Builder = struct {
         const label_props = ".{ .text = \"Label\" }";
         const button_props = ".{ .text = \"Button\" }";
         const pane_style = ".{ .direction = .column, .gap = 6, .padding = .{ .left = 8, .top = 8, .right = 8, .bottom = 8 }, .width = .fill, .height = .fill }";
-        const box_style = ".{ .direction = .column, .gap = 6, .padding = .{ .left = 8, .top = 8, .right = 8, .bottom = 8 } }";
+        const box_style = ".{ .direction = .column, .gap = 6, .padding = .{ .left = 8, .top = 8, .right = 8, .bottom = 8 }, .width = .fill, .height = .fill }";
+        /// Area widgets start filling their parent.
+        const area_style = ".{ .width = .fill, .height = .fill }";
     };
 
     /// Add a node of `type_name` inside the selected box, or after the selected
@@ -1110,8 +1317,11 @@ pub const Builder = struct {
         if (std.mem.eql(u8, type_name, "label")) n.props = try zon.parse(a, defaults.label_props, null);
         if (std.mem.eql(u8, type_name, "button")) n.props = try zon.parse(a, defaults.button_props, null);
         if (std.mem.eql(u8, type_name, doc_mod.box_type)) n.style = try zon.parse(a, defaults.box_style, null);
+        for ([_][]const u8{ "scroll_view", "code_editor", "canvas" }) |area| {
+            if (std.mem.eql(u8, type_name, area)) n.style = try zon.parse(a, defaults.area_style, null);
+        }
         if (std.mem.eql(u8, type_name, "split_view")) {
-            n.style = try zon.parse(a, ".{ .width = .fill, .height = 200 }", null);
+            n.style = try zon.parse(a, defaults.area_style, null);
             // A split view always has two panes: start them as boxes.
             for (0..2) |_| {
                 const pane = try self.editor.addNode(n.uid, n.children.items.len, doc_mod.box_type);
@@ -1380,8 +1590,25 @@ pub const Builder = struct {
         ev.handled = true;
         switch (ev.kind) {
             .pointer_down => {
+                if (ev.button == 3) {
+                    self.ui.setFocus(self.preview_host);
+                    const hit = self.framePick(ev.x, ev.y) orelse self.doc().root;
+                    self.select(hit.uid);
+                    self.openContextMenu(ev.x, ev.y);
+                    return;
+                }
                 if (ev.button != 1) return;
                 self.ui.setFocus(self.preview_host);
+                if (self.dividerAt(ev.x, ev.y)) |d| {
+                    self.select(d.uid);
+                    const vertical = d.sv.props.vertical;
+                    self.split_drag = .{ .uid = d.uid, .sv = d.sv, .start_size = d.sv.props.first_size, .start = if (vertical) ev.y else ev.x };
+                    self.gesture +%= 1;
+                    if (self.gesture == 0) self.gesture = 1;
+                    self.gesture_active = true;
+                    self.editor.breakCoalescing();
+                    return;
+                }
                 if (self.selectionRect()) |r| {
                     if (self.selected != self.doc().root.uid) {
                         if (interact.handleAt(r, ev.x, ev.y)) |h| {
@@ -1400,6 +1627,7 @@ pub const Builder = struct {
                 self.press = .{ .source = .preview, .uid = hit.uid, .sx = ev.x, .sy = ev.y };
             },
             .pointer_move => {
+                if (self.split_drag != null) return self.splitDragTo(ev.x, ev.y);
                 if (self.resize != null) return self.resizeTo(ev.x, ev.y);
                 if (self.press != null) return self.dragTo(ev.x, ev.y);
                 const hover: u32 = if (self.framePick(ev.x, ev.y)) |n| n.uid else 0;
@@ -1409,11 +1637,48 @@ pub const Builder = struct {
                 }
             },
             .pointer_up => {
+                if (self.split_drag != null) return self.finishSplitDrag();
                 if (self.resize != null) return self.finishResize();
                 self.finishDrag(ev.x, ev.y);
             },
             else => {},
         }
+    }
+
+    /// The split view whose divider is under the point, if any.
+    fn dividerAt(self: *Builder, x: f32, y: f32) ?struct { uid: u32, sv: *SplitView } {
+        const hit = self.ui.tree.nodeAt(self.preview_frame, x, y) orelse return null;
+        const hn = self.ui.tree.get(hit) orelse return null;
+        const pn = self.ui.tree.get(hn.parent) orelse return null;
+        if (pn.widget_type != ui_mod.typeTag(SplitView)) return null;
+        const sv: *SplitView = @ptrCast(@alignCast(pn.widget orelse return null));
+        if (!sv.divider.eql(hit)) return null;
+        const uid: u32 = @intCast(@intFromPtr(pn.user_data));
+        if (uid == 0) return null;
+        return .{ .uid = uid, .sv = sv };
+    }
+
+    fn splitDragTo(self: *Builder, x: f32, y: f32) void {
+        const d = self.split_drag orelse return;
+        const delta = (if (d.sv.props.vertical) y else x) - d.start;
+        d.sv.setFirstSize(@round(if (d.sv.props.anchor_second) d.start_size - delta else d.start_size + delta));
+        const n = self.doc().find(d.uid) orelse return;
+        const l = self.live(n) orelse return;
+        var scratch = std.heap.ArenaAllocator.init(self.gpa);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        const info = l.info orelse return;
+        const props = (diff.diff(a, info.props, info.propsPtr(l.w.?), info.props_default) catch |e| return self.updateStatus(e)) orelse zon.Value{ .record = &.{} };
+        self.editor.setRecordIn(n.uid, .props, props, self.gesture) catch |e| return self.updateStatus(e);
+        self.repaintOverlays();
+    }
+
+    fn finishSplitDrag(self: *Builder) void {
+        self.split_drag = null;
+        self.gesture_active = false;
+        self.editor.breakCoalescing();
+        self.rebuildInspector() catch |e| self.updateStatus(e);
+        self.repaintOverlays();
     }
 
     fn resizeTo(self: *Builder, x: f32, y: f32) void {
@@ -1573,11 +1838,16 @@ pub const Builder = struct {
 
     fn onOutlinePointer(self: *Builder, ev: *event.Event) void {
         switch (ev.kind) {
-            .pointer_down => if (ev.button == 1) {
+            .pointer_down => {
                 const item = self.outline.itemAt(ev.x, ev.y);
                 if (item == tree_view.no_item) return;
                 const uid: u32 = @intCast(self.outline.userData(item));
-                self.press = .{ .source = .outline, .uid = uid, .sx = ev.x, .sy = ev.y };
+                if (ev.button == 3) {
+                    self.select(uid);
+                    self.openContextMenu(ev.x, ev.y);
+                } else if (ev.button == 1) {
+                    self.press = .{ .source = .outline, .uid = uid, .sx = ev.x, .sy = ev.y };
+                }
             },
             .pointer_move => if (self.press != null and self.press.?.source == .outline) self.dragTo(ev.x, ev.y),
             .pointer_up => if (self.press != null and self.press.?.source == .outline) self.finishDrag(ev.x, ev.y),
@@ -1765,6 +2035,25 @@ fn outlineRow(b: *Builder, uid: u32) Handle {
 
 fn outlineCount(b: *Builder) u32 {
     return @intCast(b.outline.visibleItems().len);
+}
+
+/// Pick the option named `name` in the first Layout-tab drop-down that offers it.
+fn chooseOption(b: *Builder, name: []const u8) !void {
+    var c = b.ui.tree.get(b.content()).?.first_child;
+    while (b.ui.tree.get(c)) |n| : (c = n.next) {
+        var cc = n.first_child;
+        while (b.ui.tree.get(cc)) |m| : (cc = m.next) {
+            if (m.widget_type != ui_mod.typeTag(Select)) continue;
+            const sel: *Select = @ptrCast(@alignCast(m.widget.?));
+            for (0..sel.count()) |i| {
+                if (std.mem.eql(u8, sel.itemLabel(i), name)) {
+                    sel.setSelected(i);
+                    return;
+                }
+            }
+        }
+    }
+    return error.NoSuchOption;
 }
 
 fn formBinding(f: *DynForm, path: []const u8) @TypeOf(f.bindings.items[0]) {
@@ -2059,19 +2348,8 @@ test "the layout tab changes direction, gap, alignment, and sizes live and in th
     try testing.expectEqual(@as(i64, 6), root_n.style.field("padding").?.field("left").?.int);
 
     // A direction button changes the container and the preview's layout.
-    var row_button: ?*Button = null;
-    var c = b.ui.tree.get(b.content()).?.first_child;
-    while (b.ui.tree.get(c)) |n| : (c = n.next) {
-        var cc = n.first_child;
-        while (b.ui.tree.get(cc)) |m| : (cc = m.next) {
-            if (m.widget_type == ui_mod.typeTag(Button)) {
-                const btn: *Button = @ptrCast(@alignCast(m.widget.?));
-                if (std.mem.eql(u8, btn.props.text.bytes, "row")) row_button = btn;
-            }
-        }
-    }
-    clickButton(row_button.?);
-    try testing.expect(root_n.style.field("direction") == null); // row is the default: nothing to record
+    try chooseOption(b, "row");
+        try testing.expect(root_n.style.field("direction") == null); // row is the default: nothing to record
     try r.frame();
     const ra = r.ui.tree.absoluteRect(r.liveOf(byId(b, "a").uid)).?;
     const rb = r.ui.tree.absoluteRect(r.liveOf(byId(b, "b").uid)).?;
@@ -2081,18 +2359,7 @@ test "the layout tab changes direction, gap, alignment, and sizes live and in th
     // Size section for a child: width mode "fill".
     b.select(byId(b, "a").uid);
     b.setTab(.layout);
-    var fill: ?*Button = null;
-    c = b.ui.tree.get(b.content()).?.first_child;
-    while (b.ui.tree.get(c)) |n| : (c = n.next) {
-        var cc = n.first_child;
-        while (b.ui.tree.get(cc)) |m| : (cc = m.next) {
-            if (m.widget_type == ui_mod.typeTag(Button)) {
-                const btn: *Button = @ptrCast(@alignCast(m.widget.?));
-                if (std.mem.eql(u8, btn.props.text.bytes, "fill") and fill == null) fill = btn;
-            }
-        }
-    }
-    clickButton(fill.?);
+    try chooseOption(b, "fill");
     try testing.expectEqualStrings("fill", byId(b, "a").style.field("width").?.tag);
     b.undo();
     try testing.expectEqual(@as(i64, 120), byId(b, "a").style.field("width").?.int);
@@ -2106,18 +2373,7 @@ test "the layout tab switches a node to absolute positioning and edits its inset
     b.select(a.uid);
     b.setTab(.layout);
     // Find the "absolute" button in the Position group.
-    var abs_button: ?*Button = null;
-    var c = b.ui.tree.get(b.content()).?.first_child;
-    while (b.ui.tree.get(c)) |n| : (c = n.next) {
-        var cc = n.first_child;
-        while (b.ui.tree.get(cc)) |m| : (cc = m.next) {
-            if (m.widget_type == ui_mod.typeTag(Button)) {
-                const btn: *Button = @ptrCast(@alignCast(m.widget.?));
-                if (std.mem.eql(u8, btn.props.text.bytes, "absolute")) abs_button = btn;
-            }
-        }
-    }
-    clickButton(abs_button.?);
+    try chooseOption(b, "absolute");
     try testing.expectEqualStrings("absolute", a.style.field("position").?.tag);
     try testing.expect(b.layout_fields[@intFromEnum(Builder.LayoutField.inset_left)] != null);
     typeInto(&r.ui, b.layout_fields[@intFromEnum(Builder.LayoutField.inset_left)].?, "40");
@@ -2191,21 +2447,10 @@ test "the layout tab's wrap toggle reflows a container" {
     const b = r.b;
     b.select(b.doc().root.uid);
     b.setTab(.layout);
-    var yes: ?*Button = null;
-    var c = b.ui.tree.get(b.content()).?.first_child;
-    while (b.ui.tree.get(c)) |n| : (c = n.next) {
-        var cc = n.first_child;
-        while (b.ui.tree.get(cc)) |m| : (cc = m.next) {
-            if (m.widget_type == ui_mod.typeTag(Button)) {
-                const btn: *Button = @ptrCast(@alignCast(m.widget.?));
-                if (std.mem.eql(u8, btn.props.text.bytes, "yes")) yes = btn;
-            }
-        }
-    }
     try r.frame();
     const second = b.doc().root.children.items[1];
     try testing.expectEqual(r.ui.tree.absoluteRect(r.liveOf(b.doc().root.children.items[0].uid)).?.y, r.ui.tree.absoluteRect(r.liveOf(second.uid)).?.y);
-    clickButton(yes.?);
+    try chooseOption(b, "yes");
     try testing.expect(b.doc().root.style.field("wrap").?.bool);
     try r.frame();
     try testing.expect(r.ui.tree.absoluteRect(r.liveOf(second.uid)).?.y > r.ui.tree.absoluteRect(r.liveOf(b.doc().root.children.items[0].uid)).?.y);
@@ -2353,4 +2598,159 @@ test "the layout tab makes a container a grid and sets a child's span" {
     try testing.expect(b.layout_fields[@intFromEnum(Builder.LayoutField.grid_span)] != null);
     typeInto(&r.ui, b.layout_fields[@intFromEnum(Builder.LayoutField.grid_span)].?, "2");
     try testing.expectEqual(@as(i64, 2), first.style.field("grid_span").?.int);
+}
+
+fn doubleClick(r: *Rig, pt: [2]f32) !void {
+    r.ui.pointerMove(pt[0], pt[1]);
+    r.ui.pointerButtonEx(pt[0], pt[1], 1, true, 1);
+    r.ui.pointerButtonEx(pt[0], pt[1], 1, false, 1);
+    r.ui.pointerButtonEx(pt[0], pt[1], 1, true, 2);
+    r.ui.pointerButtonEx(pt[0], pt[1], 1, false, 2);
+    try r.frame();
+}
+
+test "double-clicking an outline row edits the node's id in place" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    try r.frame();
+    const t = byId(b, "t");
+    try doubleClick(r, r.center(outlineRow(b, t.uid)));
+    try testing.expect(b.rename != null);
+    try testing.expectEqual(t.uid, b.rename_uid);
+    try testing.expectEqualStrings("t", b.rename.?.text());
+    // The old id is selected, so typing replaces it; Enter applies it.
+    r.ui.textInput("label_1");
+    try r.frame();
+    r.ui.key(.enter, .{}, true, false);
+    try r.frame();
+    try testing.expect(b.rename == null);
+    try testing.expectEqualStrings("label_1", t.id);
+    try testing.expect(b.outline.itemText(b.outline_items.get(t.uid).?).len > 0);
+    // It is one undo step.
+    b.undo();
+    try testing.expectEqualStrings("t", t.id);
+}
+
+test "Escape cancels a rename; clicking away applies it" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    try r.frame();
+    const a = byId(b, "a");
+    b.select(a.uid);
+    b.beginRename(a.uid);
+    try testing.expect(b.rename != null);
+    r.ui.textInput("zzz");
+    r.ui.key(.escape, .{}, true, false);
+    try r.frame();
+    try testing.expect(b.rename == null);
+    try testing.expectEqualStrings("a", a.id);
+
+    b.beginRename(a.uid);
+    r.ui.textInput("kept");
+    try r.frame();
+    try r.click(r.center(outlineRow(b, byId(b, "b").uid))[0], r.center(outlineRow(b, byId(b, "b").uid))[1]);
+    try testing.expect(b.rename == null);
+    try testing.expectEqualStrings("kept", a.id);
+}
+
+test "right-clicking a node in the preview selects it and opens a menu of commands" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    try r.frame();
+    const a = byId(b, "a");
+    const pt = r.center(r.liveOf(a.uid));
+    r.ui.pointerMove(pt[0], pt[1]);
+    r.ui.pointerButtonEx(pt[0], pt[1], 3, true, 1);
+    r.ui.pointerButtonEx(pt[0], pt[1], 3, false, 1);
+    try r.frame();
+    try testing.expectEqual(a.uid, b.selected);
+    try testing.expect(r.ui.menuOpen());
+    try r.frame();
+    var dup: ?usize = null;
+    for (r.ui.menu.?.entries, 0..) |e, i| {
+        if (std.mem.eql(u8, e.label, "Duplicate")) dup = i;
+    }
+    try testing.expect(dup != null);
+    try testing.expect(r.ui.menu.?.entries[dup.?].enabled);
+    const before = b.doc().root.children.items.len;
+    const row = r.center(r.ui.menu.?.entries[dup.?].row);
+    try r.click(row[0], row[1]);
+    try testing.expect(!r.ui.menuOpen());
+    try testing.expectEqual(before + 1, b.doc().root.children.items.len);
+}
+
+test "right-clicking an outline row opens the menu; the root's Delete is disabled" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    try r.frame();
+    const pt = r.center(outlineRow(b, b.doc().root.uid));
+    r.ui.pointerMove(pt[0], pt[1]);
+    r.ui.pointerButtonEx(pt[0], pt[1], 3, true, 1);
+    r.ui.pointerButtonEx(pt[0], pt[1], 3, false, 1);
+    try r.frame();
+    try testing.expect(r.ui.menuOpen());
+    for (r.ui.menu.?.entries) |e| {
+        if (std.mem.eql(u8, e.label, "Delete")) try testing.expect(!e.enabled);
+    }
+    r.ui.key(.escape, .{}, true, false);
+    try r.frame();
+    try testing.expect(!r.ui.menuOpen());
+}
+
+test "the menu bar offers the commands and runs them" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    try r.frame();
+    const mb = b.menu_bar.?;
+    try testing.expectEqual(@as(usize, 3), mb.tops.items.len);
+    const edit_btn = r.center(mb.tops.items[1].button.node);
+    try r.click(edit_btn[0], edit_btn[1]);
+    try testing.expect(r.ui.menuOpen());
+    try r.frame();
+    var undo_entry: ?usize = null;
+    for (r.ui.menu.?.entries, 0..) |e, i| {
+        if (std.mem.eql(u8, e.label, "Undo")) undo_entry = i;
+    }
+    try testing.expect(!r.ui.menu.?.entries[undo_entry.?].enabled); // nothing to undo yet
+    r.ui.closeMenu();
+}
+
+test "new area widgets fill their parent, and the split view's divider can be dragged in the preview" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    b.select(b.doc().root.uid);
+    clickButton(paletteButton(b, "split_view"));
+    const sv_node = b.selectedNode();
+    try testing.expectEqualStrings("fill", sv_node.style.field("width").?.tag);
+    try testing.expectEqualStrings("fill", sv_node.style.field("height").?.tag);
+    for (sv_node.children.items) |pane| {
+        try testing.expectEqualStrings("fill", pane.style.field("width").?.tag);
+        try testing.expectEqualStrings("fill", pane.style.field("height").?.tag);
+    }
+    b.select(b.doc().root.uid);
+    clickButton(paletteButton(b, "canvas"));
+    try testing.expectEqualStrings("fill", b.selectedNode().style.field("height").?.tag);
+    b.select(b.doc().root.uid);
+    clickButton(paletteButton(b, "box"));
+    try testing.expectEqualStrings("fill", b.selectedNode().style.field("width").?.tag);
+
+    // Drag the divider: the document records the new first_size.
+    try r.frame();
+    const sv = r.ui.tree.get(r.liveOf(sv_node.uid)).?;
+    const split: *SplitView = @ptrCast(@alignCast(sv.widget.?));
+    try testing.expect(sv_node.props.field("first_size") == null);
+    const dv = r.ui.tree.absoluteRect(split.divider).?;
+    const from = [2]f32{ dv.x + dv.w / 2, dv.y + dv.h / 2 };
+    try r.drag(from, .{ from[0] + 30, from[1] });
+    try testing.expect(sv_node.props.field("first_size") != null);
+    try testing.expect(split.props.first_size > 240);
+    const dragged = split.props.first_size;
+    b.undo();
+    try testing.expect(sv_node.props.field("first_size") == null or sv_node.props.field("first_size").?.float != dragged);
 }

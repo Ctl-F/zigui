@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Select - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>Select</h1>
+<p>A drop-down list. It shows the chosen option; clicking it (or Enter, Space, Up, Down when focused) opens a <a href="menus.html">menu</a> of the options below it, or above it when there is no room. Choosing one closes the menu and fires <code>on_change</code>. Clicking the select again while its menu is open closes it.</p>
+<pre><code>const align_pick = try ui.add(zigui.Select, parent, .{
+    .items = &amp;.{ "start", "center", "end", "stretch" },
+    .selected = 3,
+    .on_change = .bind(&amp;app, App.onAlign),
+});
+
+fn onAlign(self: *App, _: *zigui.event.Event) void {
+    self.align_value = self.align_pick.props.selected;   // 0-based index
+}</code></pre>
+<h2>Options</h2>
+<table>
+<tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>style</code></td><td><code>.{}</code></td><td>Layout. With no padding set the theme's <code>field_padding</code> applies, with extra room on the right for the arrow. Give it a width or <code>.grow = 1</code>.</td></tr>
+<tr><td><code>items</code></td><td><code>&amp;.{}</code></td><td>The options (copied).</td></tr>
+<tr><td><code>selected</code></td><td>0</td><td>Index of the chosen option.</td></tr>
+<tr><td><code>enabled</code></td><td>true</td><td>A disabled select cannot be opened or focused.</td></tr>
+<tr><td><code>on_change</code></td><td>null</td><td>The user chose a different option.</td></tr>
+<tr><td><code>painter</code></td><td>null</td><td>Override <code>theme.select_painter</code>.</td></tr>
+</table>
+<h2>Props and Out</h2>
+<p><code>props.options</code> holds the options as one text, one per line, so the registry, <a href="../documents.html">documents</a> and the builder can edit them like any text; <code>props.selected</code> is the index. <code>out</code>: <code>changed</code> / <code>change_count</code> (the user chose something), <code>open</code> (its menu is showing), <code>hovered</code>, <code>focused</code>, <code>focus_visible</code>.</p>
+<h2>Methods</h2>
+<ul>
+<li><code>setItems(items) !void</code>, <code>setOptionsText(text) !void</code>: replace the options. The selection index is kept (it may then point past the end).</li>
+<li><code>setSelected(index)</code>: choose an option programmatically; fires <code>on_change</code> only if it changed.</li>
+<li><code>count()</code>, <code>itemLabel(i)</code>, <code>selectedLabel()</code>, <code>openMenu()</code>, <code>setPainter(...)</code></li>
+</ul>
+<h2>Document</h2>
+<pre><code>.{ .type = "select", .props = .{ .options = "small\nmedium\nlarge", .selected = 1 } }</code></pre>
+<h2>Limits</h2>
+<p>No type-ahead search, no scrolling for lists taller than the window, one line per option.</p>
+</main><script src="../nav.js"></script></body></html>

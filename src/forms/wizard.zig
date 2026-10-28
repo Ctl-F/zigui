@@ -405,7 +405,7 @@ test "explicit pages: named fields, a custom page, and can_next conditions" {
     clickToggle(w, "debug");
     try testing.expect(!w.next.props.enabled);
     try testing.expectEqualStrings("Debug needs slow mode", w.block_label.props.text.bytes);
-    clickToggle(w, "mode"); // fast -> slow
+    bindingFor(w, "mode").select.?.setSelected(1); // fast -> slow
     try testing.expect(w.next.props.enabled);
 
     click(w.next);

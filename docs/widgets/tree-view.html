@@ -43,6 +43,7 @@ fn onSelect(self: *App, _: *zigui.event.Event) void {
 <tr><td><code>on_select</code></td><td>null</td><td>The selection changed (also for programmatic <code>select</code>); read <code>out.selected</code>.</td></tr>
 <tr><td><code>on_activate</code></td><td>null</td><td>An item was activated; <code>out.activated_item</code> says which.</td></tr>
 <tr><td><code>on_toggle</code></td><td>null</td><td>An item was expanded or collapsed.</td></tr>
+<tr><td><code>activate_toggles</code></td><td>true</td><td>A double-click also expands or collapses an item that has children. Turn it off when double-click means something else, such as rename (the builder does).</td></tr>
 </table>
 
 <h2>Out</h2>

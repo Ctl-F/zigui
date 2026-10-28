@@ -8,6 +8,7 @@ const button = @import("button.zig");
 const label = @import("label.zig");
 const text_field = @import("text_field.zig");
 const code_editor = @import("code_editor.zig");
+const select = @import("select.zig");
 const syntax = @import("../editor/syntax.zig");
 
 pub const ButtonColors = struct {
@@ -128,4 +129,5 @@ pub const Theme = struct {
     label_painter: label.Painter = label.defaultPainter,
     field_painter: text_field.Painter = text_field.defaultPainter,
     editor_painter: code_editor.Painter = code_editor.defaultPainter,
+    select_painter: select.Painter = select.defaultPainter,
 };

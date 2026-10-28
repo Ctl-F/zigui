@@ -22,6 +22,8 @@
       ["widgets/scroll-view.html", "ScrollView"],
       ["widgets/split-view.html", "SplitView"],
       ["widgets/tree-view.html", "TreeView"],
+      ["widgets/select.html", "Select"],
+      ["widgets/menus.html", "Menus and MenuBar"],
     ]],
     ["Tools", [
       ["documents.html", "UI documents (ZON)"],

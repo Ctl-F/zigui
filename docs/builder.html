@@ -13,8 +13,22 @@
 <li><b>Toolbar</b>: Undo, Redo, Duplicate, Wrap in box, Unwrap, Indent, Outdent, Up, Down, Delete, Cut, Copy, Paste (as ZON text through the system clipboard), Save.</li>
 </ul>
 
+<h2>Menus, right-click, rename</h2>
+<ul>
+<li>A <b>menu bar</b> (File, Edit, Structure) runs the same commands as the toolbar; items grey out when the command is unavailable and show their shortcuts.</li>
+<li><b>Right-click</b> a node in the preview or the outline to select it and open a context menu (cut, copy, paste, duplicate, delete, wrap, unwrap, indent, outdent, move, rename).</li>
+<li><b>Rename:</b> double-click an outline row (or press F2, or use the menu) to edit the node's <code>id</code> in place. Enter or clicking away applies it, Escape cancels. It is one undo step.</li>
+<li><b>Drop-downs:</b> the Layout tab's choices (direction, align, justify, wrap, size modes, position) and enum props are <a href="widgets/select.html">Select</a> drop-downs.</li>
+</ul>
+
+<h2>Resizable regions</h2>
+<p>The tools and outline, the preview, and the inspector are <a href="widgets/split-view.html">SplitViews</a>: drag the dividers to resize them. The palette sits above the outline in a vertical split. In the preview, drag a <code>split_view</code>'s own divider to set its <code>first_size</code> (recorded as one undo step) instead of typing the number.</p>
+
+<h2>Defaults for new nodes</h2>
+<p>Area widgets added from the palette (<code>box</code>, <code>scroll_view</code>, <code>split_view</code>, <code>code_editor</code>, <code>canvas</code>) start with <code>.width = .fill, .height = .fill</code>, and a split view's two panes are boxes that fill their halves. Change them in the Layout tab.</p>
+
 <h2>Shortcuts</h2>
-<p>Active while focus is in the preview panel: Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y, Ctrl+S, Ctrl+D (duplicate), Ctrl+C/X/V, Ctrl+G (wrap), Ctrl+Shift+G (unwrap), Delete, Alt+Up/Down (move), Alt+Right (indent), Alt+Left (outdent).</p>
+<p>Active while focus is in the preview panel: Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y, Ctrl+S, Ctrl+D (duplicate), Ctrl+C/X/V, Ctrl+G (wrap), Ctrl+Shift+G (unwrap), Delete, Alt+Up/Down (move), Alt+Right (indent), Alt+Left (outdent), F2 (rename).</p>
 
 <h2>Absolute positioning in the builder</h2>
 <p>Set a child's <b>position</b> to <code>absolute</code> in the Layout tab; it can then be dragged freely inside its parent and its insets are written for you.</p>

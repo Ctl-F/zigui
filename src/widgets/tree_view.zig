@@ -93,6 +93,9 @@ pub const TreeView = struct {
         on_activate: ?event.Callback = null,
         /// An item was expanded or collapsed.
         on_toggle: ?event.Callback = null,
+        /// A double-click also expands or collapses an item that has children.
+        /// Turn it off when double-click means something else (rename, open).
+        activate_toggles: bool = true,
 
         pub const dirty_map = .{
             .indent = shadow.Category.layout,
@@ -124,6 +127,7 @@ pub const TreeView = struct {
         on_select: ?event.Callback = null,
         on_activate: ?event.Callback = null,
         on_toggle: ?event.Callback = null,
+        activate_toggles: bool = true,
     };
 
     pub const listened_kinds = [_]event.EventKind{ .pointer_down, .pointer_move, .pointer_leave, .key_down, .focus_in, .focus_out };
@@ -157,6 +161,7 @@ pub const TreeView = struct {
         self.props.on_select = o.on_select;
         self.props.on_activate = o.on_activate;
         self.props.on_toggle = o.on_toggle;
+        self.props.activate_toggles = o.activate_toggles;
         try self.ui.tree.setLabel(self.node, o.label);
         self.scroll = try self.ui.add(ScrollView, self.node, .{
             .style = .{ .grow = 1 },
@@ -518,20 +523,27 @@ pub const TreeView = struct {
 
     fn onPointerDown(self: *TreeView, ev: *event.Event) void {
         if (ev.button != 1) return;
-        const id = self.itemAt(ev.x, ev.y);
-        if (id == no_item) return;
+        // We focus the tree ourselves (and an app may move focus again from an
+        // activate callback), so the default focus action must not run after us.
+        ev.markHandled();
+        // Focusing can run app code (a text field losing focus applies its
+        // edit and may rebuild the items), so look the item up afterwards.
         self.ui.setFocus(self.node);
-        const it = self.get(id).?;
+        const id = self.itemAt(ev.x, ev.y);
+        const it = self.get(id) orelse return;
         const row = self.ui.tree.absoluteRect(it.row) orelse return;
+        const has_children = it.children.items.len > 0;
+        const expanded = it.expanded;
         const arrow_end = row.x + row_pad + self.props.indent * @as(f32, @floatFromInt(self.depthOf(id))) + arrow_w;
-        if (it.children.items.len > 0 and ev.x < arrow_end) {
-            self.setExpanded(id, !it.expanded);
+        if (has_children and ev.x < arrow_end) {
+            self.setExpanded(id, !expanded);
             return;
         }
         self.setSelected(id, true);
         if (ev.clicks >= 2) {
-            if (it.children.items.len > 0) self.setExpanded(id, !it.expanded);
-            self.activate(id);
+            // Callbacks above may have changed the tree: only use `id` if it is still there.
+            if (self.props.activate_toggles and self.exists(id) and has_children) self.setExpanded(id, !self.isExpanded(id));
+            if (self.exists(id)) self.activate(id);
         }
     }
 
