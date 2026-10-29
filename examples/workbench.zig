@@ -29,11 +29,35 @@ const App = struct {
     path: []const u8,
     ui: *Ui,
     builder: *Builder,
+    output: *zigui.ide.OutputPanel = undefined,
     editor: *zigui.CodeEditor,
     status: *zigui.Label,
+    dock: *zigui.Dock = undefined,
     /// Set while one side is writing the other, so the echo is ignored.
     syncing: bool = false,
     dirty: bool = false,
+
+    /// Run `zig build` (or another step) and show its output in the Output panel.
+    fn runBuild(self: *App, step: []const u8) void {
+        if (self.dock.panelNamed("Output")) |p| {
+            if (p.state == .hidden) self.dock.showPanel(p) catch {};
+        }
+        const argv: []const []const u8 = if (step.len == 0) &.{ "zig", "build" } else &.{ "zig", "build", step };
+        self.output.run(self.io, argv, null, sdl.wake) catch |err| {
+            std.log.err("could not start zig build: {s}", .{@errorName(err)});
+        };
+    }
+
+    fn onBuildCommand(self: *App, ev: *zigui.Event) void {
+        if (std.mem.eql(u8, ev.text, "ide.build")) self.runBuild("") else if (std.mem.eql(u8, ev.text, "ide.test")) self.runBuild("test");
+    }
+
+    /// A double-clicked diagnostic: show the file in the document editor.
+    fn openAt(self: *App, path: []const u8, line: u32, col: u32) void {
+        _ = col;
+        std.log.info("open {s}:{d}", .{ path, line });
+        self.status.setText(path) catch {};
+    }
 
     /// The builder changed the document: show its ZON in the editor.
     fn onBuilderChange(self: *App, _: *zigui.Event) void {
@@ -89,6 +113,12 @@ const App = struct {
 };
 
 fn runCommand(app: *App, ui: *Ui, cmd: []const u8) void {
+    if (std.mem.startsWith(u8, cmd, "sleep ")) {
+        const ms = std.fmt.parseInt(u64, cmd["sleep ".len..], 10) catch 0;
+        var ts: std.os.linux.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) };
+        _ = std.os.linux.nanosleep(&ts, null);
+        return;
+    }
     const b = app.builder;
     const sp = std.mem.indexOfScalar(u8, cmd, ' ') orelse return;
     const verb = cmd[0..sp];
@@ -236,6 +266,21 @@ pub fn main(init: std.process.Init) !void {
     try app.builder.arrange();
     try dock.dockRoot(text_panel, .left, 460);
 
+    // The Output panel and the Build menu.
+    app.dock = dock;
+    const output_panel = try dock.addPanel("Output");
+    app.output = try zigui.ide.OutputPanel.create(&ui, output_panel.content, .{ .style = .{ .grow = 1 }, .on_open = zigui.ide.output_panel.OpenHook.bind(&app, App.openAt) });
+    defer app.output.destroy();
+    try dock.dockRoot(output_panel, .bottom, 200);
+    _ = try ui.registerCommand("ide.build", .{ .title = "Build", .run = zigui.event.Callback.bind(&app, App.onBuildCommand) });
+    _ = try ui.registerCommand("ide.test", .{ .title = "Run tests", .run = zigui.event.Callback.bind(&app, App.onBuildCommand) });
+    try ui.bindShortcut("f5", "ide.build", .app, null);
+    try ui.bindShortcut("mod+shift+t", "ide.test", .app, null);
+    if (app.builder.menu_bar) |mb| try mb.addMenu("Build", &.{
+        .{ .label = "Build", .command = "ide.build" },
+        .{ .label = "Run tests", .command = "ide.test" },
+    }, null);
+
     const commands = try gpa.alloc(zigui.draw_list.Command, 32768);
     defer gpa.free(commands);
     const glyphs = try gpa.alloc(zigui.draw_list.Glyph, 65536);
@@ -255,6 +300,7 @@ pub fn main(init: std.process.Init) !void {
     var running = true;
     while (running) {
         _ = ui.tick(sdl.ticks());
+        app.output.poll();
         ui.update();
         if (force or ui.isDirty()) {
             const px = window.pixelSize();

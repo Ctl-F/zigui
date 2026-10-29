@@ -76,6 +76,10 @@ pub const EditorColors = struct {
     squiggle_error: Color = Color.rgb(0xf0, 0x50, 0x50),
     squiggle_warning: Color = Color.rgb(0xe6, 0xbe, 0x3c),
     squiggle_info: Color = Color.rgb(0x5a, 0xa0, 0xf0),
+    /// Whole-line tints for build output.
+    line_error: Color = Color.rgba(0xf0, 0x50, 0x50, 0x2a),
+    line_warning: Color = Color.rgba(0xe6, 0xbe, 0x3c, 0x24),
+    line_note: Color = Color.rgba(0x5a, 0xa0, 0xf0, 0x1e),
 
     pub fn tokenColor(self: *const EditorColors, kind: syntax.TokenKind) Color {
         return self.syntax[@intFromEnum(kind)];

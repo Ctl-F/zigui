@@ -74,6 +74,10 @@ pub const DecorationKind = enum {
     error_squiggle,
     warning_squiggle,
     info_squiggle,
+    /// Whole-line background tints (build output: errors, warnings, notes).
+    error_line,
+    warning_line,
+    note_line,
 };
 
 /// A byte range of the text with a look. Ranges follow edits: text before
@@ -132,6 +136,7 @@ pub const CodeEditor = struct {
     deco_max_len: [deco_owners]usize = @splat(0),
     /// Folded regions, sorted by `start`, never overlapping.
     folds: std.ArrayListUnmanaged(Fold) = .empty,
+    follow: bool = false,
     /// A file opened with `openFile`: the mapping the text borrows, and the
     /// background scan still indexing its lines.
     mapped: ?MappedFile = null,
@@ -353,7 +358,7 @@ pub const CodeEditor = struct {
 
     // ---- metrics -------------------------------------------------------------------
 
-    const Metrics = struct {
+    pub const Metrics = struct {
         font: u32,
         size: f32,
         line_h: f32,
@@ -363,7 +368,7 @@ pub const CodeEditor = struct {
         cell_w: f32,
     };
 
-    fn metrics(self: *CodeEditor) ?Metrics {
+    pub fn metrics(self: *CodeEditor) ?Metrics {
         const theme = &self.ui.theme;
         const f = switch (self.props.font) {
             .ui => theme.ui_font,
@@ -384,7 +389,7 @@ pub const CodeEditor = struct {
         };
     }
 
-    const Geo = struct {
+    pub const Geo = struct {
         /// Padding of the node, and the text area inside it (window-relative
         /// offsets from the node's top-left).
         pad: layout_mod.Pad,
@@ -393,7 +398,7 @@ pub const CodeEditor = struct {
         view_h: f32,
     };
 
-    fn geometry(self: *CodeEditor, m: Metrics) Geo {
+    pub fn geometry(self: *CodeEditor, m: Metrics) Geo {
         const node = self.ui.tree.get(self.node).?;
         const pad = layout_mod.resolveEdges(node.style.padding, null);
         var gutter: f32 = 0;
@@ -593,6 +598,7 @@ pub const CodeEditor = struct {
                 self.ensureCaretVisible(m, geo);
                 self.want_visible = false;
             }
+            if (self.follow) self.scroll_y = self.maxScrollY(m, geo);
             self.scroll_y = std.math.clamp(self.scroll_y, 0, self.maxScrollY(m, geo));
             self.scroll_x = @max(self.scroll_x, 0);
         }
@@ -909,6 +915,31 @@ pub const CodeEditor = struct {
         self.repaint = true;
     }
 
+    /// Add text at the end of the document without touching the caret or the
+    /// undo history (a log, a terminal scrollback). With `follow` the view stays
+    /// at the bottom while text arrives, until the user scrolls up.
+    pub fn appendText(self: *CodeEditor, bytes: []const u8) !void {
+        if (bytes.len == 0) return;
+        try self.editor.doc.apply(.{ .kind = .insert, .offset = self.editor.doc.len(), .text = bytes });
+        self.repaint = true;
+    }
+
+    /// Keep the view scrolled to the end as text is appended (set false when
+    /// the user scrolls up; true again at the bottom).
+    pub fn setFollowEnd(self: *CodeEditor, follow: bool) void {
+        self.follow = follow;
+    }
+
+    /// The document line shown at a point relative to the node's top-left.
+    pub fn lineAtPoint(self: *CodeEditor, local_y: f32) usize {
+        const m = self.metrics() orelse return 0;
+        const geo = self.geometry(m);
+        const rel_y = local_y - geo.pad.t + self.scroll_y;
+        const last = self.editor.doc.lineCount() - 1;
+        if (rel_y <= 0) return self.lineAtRow(0);
+        return @min(self.lineAtRow(@intFromFloat(rel_y / m.line_h)), last);
+    }
+
     fn remapPos(pos: usize, c: @import("../editor/document.zig").Change) usize {
         if (pos >= c.offset + c.removed_len) return pos - c.removed_len + c.inserted_len;
         if (pos > c.offset) return c.offset;
@@ -956,7 +987,10 @@ pub const CodeEditor = struct {
             while (i < ds.items.len and ds.items[i].start <= le) : (i += 1) {
                 const d = ds.items[i];
                 if (d.end < ls or d.end == d.start) continue;
-                const is_bg = d.kind == .highlight or d.kind == .current;
+                const is_bg = switch (d.kind) {
+                    .highlight, .current, .error_line, .warning_line, .note_line => true,
+                    else => false,
+                };
                 if (is_bg != backgrounds) continue;
                 const a = @max(d.start, ls);
                 const b = @min(d.end, le);
@@ -966,6 +1000,15 @@ pub const CodeEditor = struct {
                 switch (d.kind) {
                     .highlight => try list.fillRect(.{ .x = x0, .y = row_y, .w = x1 - x0, .h = m.line_h }, Paint.solid(colors.find_match)),
                     .current => try list.fillRect(.{ .x = x0, .y = row_y, .w = x1 - x0, .h = m.line_h }, Paint.solid(colors.find_current)),
+                    .error_line, .warning_line, .note_line => {
+                        const tint = switch (d.kind) {
+                            .error_line => colors.line_error,
+                            .warning_line => colors.line_warning,
+                            else => colors.line_note,
+                        };
+                        // The whole row, not just the text.
+                        try list.fillRect(.{ .x = origin_x + self.scroll_x, .y = row_y, .w = 4000, .h = m.line_h }, Paint.solid(tint));
+                    },
                     .error_squiggle, .warning_squiggle, .info_squiggle => {
                         const color = switch (d.kind) {
                             .error_squiggle => colors.squiggle_error,

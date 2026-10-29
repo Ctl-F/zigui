@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Background work and processes - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Background work and processes</h1>
+<p>The UI core is single-threaded: only the UI thread touches the tree and widgets. Anything slow &mdash; reading a pipe, searching files, talking to another program &mdash; runs on a worker thread that hands its results to the UI thread through a queue.</p>
+<h2>worker.Queue</h2>
+<pre><code>var q: zigui.worker.Queue(Line) = .{ .gpa = gpa, .wake = sdl.wake };
+defer q.deinit();
+
+// on a worker thread
+try q.push(line);                      // also calls `wake`, so a sleeping loop runs
+
+// on the UI thread, once per loop iteration
+var batch: std.ArrayListUnmanaged(Line) = .empty;
+defer batch.deinit(gpa);
+q.drain(&amp;batch);                       // everything queued so far, in order per producer
+for (batch.items) |item| { ... }
+batch.clearRetainingCapacity();</code></pre>
+<p>The lock is a tiny spin lock (the critical sections are an append or a swap), so no <code>Io</code> instance is needed. <code>q.pending()</code> says whether anything is waiting. The window loops pass <code>sdl.wake</code> (also set as <code>ui.wake</code>).</p>
+<h2>process.Runner</h2>
+<p>Run a child process with its output delivered as events, without blocking:</p>
+<pre><code>const run = try zigui.process.Runner.start(gpa, io, .{
+    .argv = &amp;.{ "zig", "build", "test" },
+    .cwd = project_dir,        // optional
+    .stdin = false,            // true to keep a pipe for writeStdin
+    .wake = sdl.wake,
+});
+defer run.destroy();           // stops the process if it is still running, joins the threads
+
+// each loop iteration
+var batch: std.ArrayListUnmanaged(zigui.process.Event) = .empty;
+run.drain(&amp;batch);
+for (batch.items) |*e| {
+    switch (e.*) {
+        .chunk => |c| show(c.stream, c.bytes),   // .stdout or .stderr: kept separate
+        .exited => |term| report(term),
+    }
+    e.deinit(gpa);                               // chunks own their bytes
+}
+batch.clearRetainingCapacity();</code></pre>
+<table>
+<tr><th>Call</th><th>Purpose</th></tr>
+<tr><td><code>start(gpa, io, options)</code></td><td>Spawn with piped stdin/stdout/stderr; a reader thread per output stream and one that reaps the child.</td></tr>
+<tr><td><code>drain(list)</code></td><td>Move the queued events onto <code>list</code> (UI thread).</td></tr>
+<tr><td><code>finished()</code></td><td>The process has exited and its <code>.exited</code> event is queued.</td></tr>
+<tr><td><code>writeStdin(bytes)</code></td><td>Write to the child (needs <code>.stdin = true</code>).</td></tr>
+<tr><td><code>stop()</code></td><td>Ask it to end (SIGTERM).</td></tr>
+</table>
+<p>Limits: no stop on Windows yet; output is read in chunks of up to 4 KiB with no line splitting (a front end splits lines &mdash; see the <a href="ide.html">Output panel</a>); no pseudo-terminal, so programs that expect a terminal behave as if piped (the terminal widget will add a PTY).</p>
+</main><script src="nav.js"></script></body></html>

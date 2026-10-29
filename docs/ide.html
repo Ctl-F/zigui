@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>IDE pieces - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>IDE pieces</h1>
+<p>The workbench is growing into an IDE. Code that is specific to being one lives in <code>src/ide/</code> (exported as <code>zigui.ide</code>); it builds on the framework (widgets, the editor, <a href="background.html">process plumbing</a>), and the framework never imports it. The plan and the order of work are in <code>NOTES/ide-plan.md</code>.</p>
+<h2>Output panel</h2>
+<p><code>zigui.ide.OutputPanel</code> runs a command and shows what it prints: stdout and stderr interleaved as they arrive, in a read-only editor that follows the end, with a status line (<i>Running</i>, <i>Finished</i> / <i>Failed</i> with the exit code and time, <i>Stopped</i>), a Stop button, and Clear. Lines that are compiler diagnostics are tinted by severity (error, warning, note) and <b>double-clicking one</b> calls your hook so you can open the file at that spot.</p>
+<pre><code>const out = try zigui.ide.OutputPanel.create(&amp;ui, parent, .{
+    .style = .{ .grow = 1 },
+    .on_open = zigui.ide.output_panel.OpenHook.bind(&amp;app, App.openAt),   // fn (*App, path, line, col) void
+});
+defer out.destroy();
+
+try out.run(io, &amp;.{ "zig", "build" }, project_dir, sdl.wake);   // replaces a run in progress
+
+// every loop iteration (the worker threads wake the loop when output arrives)
+out.poll();</code></pre>
+<p>The workbench docks one at the bottom; <b>F5</b> (or Build &rarr; Build) runs <code>zig build</code> and <b>Ctrl+Shift+T</b> runs <code>zig build test</code> in the current directory.</p>
+<h2>Compiler output parsing</h2>
+<p><code>zigui.ide.buildout</code>: <code>parseLine(line)</code> reads <code>path:line:col: error|warning|note: message</code> (Zig's format; Windows drive paths work) into a <code>Diagnostic</code> and returns null for anything else; <code>stripAnsi</code> removes color and cursor escape sequences. No UI.</p>
+<h2>What is planned</h2>
+<p>Projects and a file tree, find in project, a completion popup with offline Zig standard-library indexing, language-server support on top of that, a terminal, and event-to-handler wiring with refactors: see <code>NOTES/ide-plan.md</code>.</p>
+</main><script src="nav.js"></script></body></html>

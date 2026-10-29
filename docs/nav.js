@@ -35,6 +35,10 @@
       ["builder.html", "The builder"],
       ["forms.html", "Forms and wizards"],
       ["testing.html", "Testing and debugging"],
+      ["background.html", "Background work and processes"],
+    ]],
+    ["IDE", [
+      ["ide.html", "IDE pieces"],
     ]],
     ["Project", [
       ["maintaining.html", "Maintaining these docs"],

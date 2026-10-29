@@ -418,6 +418,13 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   indentation folding keeps a sorted list of hidden line ranges and everything
   that assumed one line per row (paint, scroll extent, hit testing, caret
   rect, Up/Down) goes through `rowOfLine`/`lineAtRow`.
+- Background work (plan step 2): `core/worker.zig` is a spin-locked queue with a
+  wake callback; `platform/process.zig` runs a child with reader threads per
+  stream and a reaper thread, delivering chunk/exit events through the queue;
+  `src/ide/` (exported as `zigui.ide`) holds IDE-level code: the Zig diagnostic
+  parser and the Output panel (a read-only `CodeEditor` that follows the end,
+  line tints as decorations, double-click to open a diagnostic). The workbench
+  docks it and binds F5 / Ctrl+Shift+T.
 - Workbench (`zig build workbench`): a code editor on the ZON text beside the
   builder, synced both ways; parse errors go to the status line. Examples build
   ReleaseSafe by default (`-Dexample_optimize`) because the software rasterizer
