@@ -232,6 +232,8 @@ pub const Builder = struct {
     /// The inline editor for a node's id (double-click in the outline).
     rename: ?*TextField = null,
     rename_uid: u32 = 0,
+    /// The inline editor sets the node's `text` prop (preview) instead of its id (outline).
+    rename_text: bool = false,
     /// Moving an absolutely positioned node: it follows the pointer by insets.
     abs_drag: ?AbsDrag = null,
     /// Counter for edit gestures (a resize drag): its edits merge into one step.
@@ -692,15 +694,38 @@ pub const Builder = struct {
 
     /// Edit a node's id in place over its outline row.
     pub fn beginRename(self: *Builder, uid: u32) void {
-        self.cancelRename();
         const item = self.outline_items.get(uid) orelse return;
         const row = self.outline.rowRect(item) orelse return;
-        const root_r = self.ui.tree.absoluteRect(self.root) orelse return;
         const n = self.doc().find(uid) orelse return;
+        self.openInlineEditor(uid, false, row, n.id, "id", "Node id");
+    }
+
+    /// Edit a button's or label's text in place over the preview.
+    pub fn beginTextEdit(self: *Builder, uid: u32) void {
+        const n = self.doc().find(uid) orelse return;
+        const inst = self.inst orelse return;
+        const h = inst.handleOf(uid) orelse return;
+        const info = registry.infoOf(self.ui, h) orelse return;
+        if (!hasTextProp(info)) return;
+        const rect = self.ui.tree.absoluteRect(h) orelse return;
+        const current = if (n.props.field("text")) |t| (if (t == .string) t.string else "") else "";
+        self.openInlineEditor(uid, true, .{ .x = rect.x - 4, .y = rect.y, .w = @max(rect.w + 8, 100), .h = @max(rect.h, 24) }, current, "text", "Widget text");
+    }
+
+    fn hasTextProp(info: *const registry.Info) bool {
+        for (info.props.fields) |f| {
+            if (std.mem.eql(u8, f.name, "text")) return true;
+        }
+        return false;
+    }
+
+    fn openInlineEditor(self: *Builder, uid: u32, text_prop: bool, row: Rect, initial: []const u8, placeholder: []const u8, label: []const u8) void {
+        self.cancelRename();
+        const root_r = self.ui.tree.absoluteRect(self.root) orelse return;
         const tf = self.ui.add(TextField, self.root, .{
-            .text = n.id,
-            .placeholder = "id",
-            .label = "Node id",
+            .text = initial,
+            .placeholder = placeholder,
+            .label = label,
             .style = .{
                 .position = .absolute,
                 .width = Length.px(@max(row.w, 140)),
@@ -709,6 +734,7 @@ pub const Builder = struct {
             },
             .on_submit = event.Callback.bind(self, onRenameSubmit),
         }) catch return;
+        self.rename_text = text_prop;
         self.ui.tree.addListener(tf.node, .{ .kind = .key_down, .callback = event.Callback.bind(self, onRenameKey) }) catch {};
         self.ui.tree.addListener(tf.node, .{ .kind = .focus_out, .callback = event.Callback.bind(self, onRenameBlur) }) catch {};
         self.rename = tf;
@@ -731,6 +757,10 @@ pub const Builder = struct {
     /// Apply the typed id to the node and close the editor.
     fn commitRename(self: *Builder) void {
         const tf = self.endRename() orelse return;
+        if (self.rename_text) {
+            self.commitTextEdit(tf);
+            return;
+        }
         const before = self.editor.version;
         const failed = if (self.editor.setId(self.rename_uid, tf.text())) |_| false else |e| blk: {
             self.updateStatus(e);
@@ -740,6 +770,16 @@ pub const Builder = struct {
         if (failed) return;
         self.markInspectorEdit(before);
         self.rebuildInspector() catch |e| self.updateStatus(e);
+    }
+
+    /// Write the typed text into the node's `props.text`; the preview is rebuilt.
+    fn commitTextEdit(self: *Builder, tf: *TextField) void {
+        defer _ = self.ui.tree.destroySubtree(tf.node);
+        const n = self.doc().find(self.rename_uid) orelse return;
+        const props = zon.withField(self.doc().alloc(), n.props, "text", .{ .string = self.doc().alloc().dupe(u8, tf.text()) catch return }) catch |e| return self.updateStatus(e);
+        self.editor.setRecord(n.uid, .props, props) catch |e| return self.updateStatus(e);
+        self.editor.breakCoalescing();
+        self.sync();
     }
 
     fn onRenameSubmit(self: *Builder, _: *event.Event) void {
@@ -1334,7 +1374,9 @@ pub const Builder = struct {
             for (0..command_count) |i| {
                 const c: Command = @enumFromInt(i);
                 enabled[i] = switch (c) {
-                    .undo, .redo, .save, .delete, .duplicate => enabled[i],
+                    .undo, .redo, .save, .delete, .duplicate, .copy, .cut, .paste => enabled[i],
+                    // Moving and wrapping need the nodes to share a parent.
+                    .wrap, .up, .down => self.commonParent() != null,
                     else => false,
                 };
             }
@@ -1581,6 +1623,7 @@ pub const Builder = struct {
     }
 
     pub fn wrapSelected(self: *Builder) void {
+        if (self.extra.items.len > 0) return self.wrapMany();
         const n = self.selectedNode();
         const w = self.editor.wrapNode(n.uid, doc_mod.box_type) catch |e| return self.updateStatus(e);
         w.style = zon.parse(self.doc().alloc(), defaults.box_style, null) catch w.style;
@@ -1608,7 +1651,59 @@ pub const Builder = struct {
     }
 
     /// Move the selected node among its siblings by `delta` places.
+    /// Move every selected node one place up or down among its siblings.
+    fn moveMany(self: *Builder, delta: i32) void {
+        const parent = self.commonParent() orelse return self.updateStatusText("The selected nodes need the same parent to move together");
+        var buf: [max_selected]u32 = undefined;
+        const roots = self.orderedRoots(&buf);
+        self.editor.beginBatch();
+        const order_len = roots.len;
+        var step: usize = 0;
+        while (step < order_len) : (step += 1) {
+            // Up: first to last; down: last to first, so blocks keep their shape.
+            const uid = if (delta < 0) roots[step] else roots[order_len - 1 - step];
+            const n = self.doc().find(uid).?;
+            const idx: i64 = @intCast(n.indexInParent().?);
+            const target = idx + delta;
+            if (target < 0 or target >= parent.children.items.len) continue;
+            if (std.mem.indexOfScalar(u32, roots, parent.children.items[@intCast(target)].uid) != null) continue; // blocked by a selected neighbor
+            self.editor.moveNode(uid, parent.uid, @intCast(target)) catch |e| {
+                self.editor.abortBatch();
+                return self.updateStatus(e);
+            };
+        }
+        self.editor.endBatch() catch |e| return self.updateStatus(e);
+        self.editor.breakCoalescing();
+        self.sync();
+    }
+
+    /// Put the selected siblings into one new box, where the first one was.
+    fn wrapMany(self: *Builder) void {
+        const parent = self.commonParent() orelse return self.updateStatusText("The selected nodes need the same parent to be wrapped together");
+        var buf: [max_selected]u32 = undefined;
+        const roots = self.orderedRoots(&buf);
+        const first = self.doc().find(roots[0]).?.indexInParent().?;
+        self.editor.beginBatch();
+        const w = self.editor.addNode(parent.uid, first, doc_mod.box_type) catch |e| {
+            self.editor.abortBatch();
+            return self.updateStatus(e);
+        };
+        for (roots, 0..) |u, i| {
+            self.editor.moveNode(u, w.uid, i) catch |e| {
+                self.editor.abortBatch();
+                return self.updateStatus(e);
+            };
+        }
+        self.editor.endBatch() catch |e| return self.updateStatus(e);
+        w.style = zon.parse(self.doc().alloc(), defaults.box_style, null) catch w.style;
+        self.editor.breakCoalescing();
+        self.selected = w.uid;
+        self.extra.clearRetainingCapacity();
+        self.sync();
+    }
+
     pub fn moveSelected(self: *Builder, delta: i32) void {
+        if (self.extra.items.len > 0) return self.moveMany(delta);
         const n = self.selectedNode();
         const parent = n.parent orelse return;
         const idx: i64 = @intCast(n.indexInParent().?);
@@ -1636,10 +1731,52 @@ pub const Builder = struct {
 
     // ---- clipboard ----
 
+    /// The selection's top-most nodes in document order.
+    fn orderedRoots(self: *Builder, out: *[max_selected]u32) []const u32 {
+        var buf: [max_selected]u32 = undefined;
+        const roots = self.selectionRoots(&buf);
+        var k: usize = 0;
+        self.collectInOrder(self.doc().root, roots, out, &k);
+        return out[0..k];
+    }
+
+    fn collectInOrder(self: *Builder, n: *doc_mod.Node, set: []const u32, out: *[max_selected]u32, k: *usize) void {
+        if (std.mem.indexOfScalar(u32, set, n.uid) != null and k.* < out.len) {
+            out[k.*] = n.uid;
+            k.* += 1;
+            return;
+        }
+        for (n.children.items) |c| self.collectInOrder(c, set, out, k);
+    }
+
+    /// The common parent of the selection's top-most nodes, or null if they differ.
+    fn commonParent(self: *Builder) ?*doc_mod.Node {
+        var buf: [max_selected]u32 = undefined;
+        const roots = self.orderedRoots(&buf);
+        if (roots.len == 0) return null;
+        const p = self.doc().find(roots[0]).?.parent orelse return null;
+        for (roots[1..]) |u| {
+            if (self.doc().find(u).?.parent != p) return null;
+        }
+        return p;
+    }
+
     pub fn copySelected(self: *Builder) void {
-        const n = self.selectedNode();
-        const v = self.doc().nodeToValue(n) catch |e| return self.updateStatus(e);
-        const text = zon.render(self.gpa, v) catch |e| return self.updateStatus(e);
+        var text: []u8 = undefined;
+        if (self.extra.items.len > 0) {
+            var buf: [max_selected]u32 = undefined;
+            const roots = self.orderedRoots(&buf);
+            if (roots.len == 0) return;
+            var arena = std.heap.ArenaAllocator.init(self.gpa);
+            defer arena.deinit();
+            const vals = arena.allocator().alloc(zon.Value, roots.len) catch |e| return self.updateStatus(e);
+            for (roots, vals) |u, *v| v.* = self.doc().nodeToValue(self.doc().find(u).?) catch |e| return self.updateStatus(e);
+            text = zon.render(self.gpa, .{ .list = vals }) catch |e| return self.updateStatus(e);
+        } else {
+            const n = self.selectedNode();
+            const v = self.doc().nodeToValue(n) catch |e| return self.updateStatus(e);
+            text = zon.render(self.gpa, v) catch |e| return self.updateStatus(e);
+        }
         if (self.clip_text) |old| self.gpa.free(old);
         self.clip_text = text;
         if (self.ui.clipboard) |cb| cb.set(cb.ctx, text);
@@ -1667,9 +1804,32 @@ pub const Builder = struct {
             parent = sel.parent orelse sel;
             index = if (sel.indexInParent()) |i| i + 1 else parent.children.items.len;
         }
+        // A list of nodes (a multi-selection was copied) pastes them all.
+        if (v == .list and v.list.len > 0) {
+            var pasted: [max_selected]u32 = undefined;
+            var k: usize = 0;
+            self.editor.beginBatch();
+            for (v.list) |item| {
+                if (k == pasted.len) break;
+                const pn = self.editor.pasteValue(parent.uid, index + k, item) catch {
+                    self.editor.abortBatch();
+                    return self.updateStatusText("The clipboard does not hold UI nodes");
+                };
+                pasted[k] = pn.uid;
+                k += 1;
+            }
+            self.editor.endBatch() catch |e| return self.updateStatus(e);
+            self.editor.breakCoalescing();
+            self.selected = pasted[k - 1];
+            self.extra.clearRetainingCapacity();
+            for (pasted[0 .. k - 1]) |u| self.extra.append(self.gpa, u) catch {};
+            self.sync();
+            return;
+        }
         const pasted = self.editor.pasteValue(parent.uid, index, v) catch return self.updateStatusText("The clipboard does not hold a UI node");
         self.editor.breakCoalescing();
         self.selected = pasted.uid;
+        self.extra.clearRetainingCapacity();
         self.sync();
     }
 
@@ -1839,6 +1999,13 @@ pub const Builder = struct {
                 }
                 if (ev.button != 1) return;
                 self.ui.setFocus(self.preview_host);
+                if (ev.clicks >= 2) {
+                    // Double-click a button or label: edit its text in place.
+                    const target = self.framePick(ev.x, ev.y) orelse self.doc().root;
+                    self.select(target.uid);
+                    self.beginTextEdit(target.uid);
+                    if (self.rename != null) return;
+                }
                 if (self.dividerAt(ev.x, ev.y)) |d| {
                     self.select(d.uid);
                     const vertical = d.sv.props.vertical;
@@ -3083,8 +3250,8 @@ test "ctrl-click in the outline selects several nodes; delete and duplicate act 
     try testing.expectEqual(@as(usize, 2), b.selectionCount());
     try testing.expectEqual(t.uid, b.selected);
     try testing.expect(std.mem.indexOfScalar(u32, b.extra.items, a.uid) != null);
-    // Single-node commands step aside; delete and duplicate stay.
-    try testing.expect(!b.buttons[@intFromEnum(Command.wrap)].?.props.enabled);
+    // Single-node commands (unwrap, indent, rename...) step aside.
+    try testing.expect(!b.buttons[@intFromEnum(Command.unwrap)].?.props.enabled);
     try testing.expect(b.buttons[@intFromEnum(Command.delete)].?.props.enabled);
 
     b.duplicateSelected();
@@ -3138,4 +3305,88 @@ test "ctrl-click in the preview toggles membership; layout choices apply to ever
     r.ui.input.mods = .{};
     try testing.expectEqual(@as(usize, 1), b.selectionCount());
     try testing.expectEqual(a.uid, b.selected);
+}
+
+test "double-clicking a button or label in the preview edits its text in place" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    try r.frame();
+    const t = byId(b, "t");
+    try doubleClick(r, r.center(r.liveOf(t.uid)));
+    try testing.expect(b.rename != null and b.rename_text);
+    try testing.expectEqualStrings("text", b.rename.?.text());
+    r.ui.textInput("Hello there");
+    try r.frame();
+    r.ui.key(.enter, .{}, true, false);
+    try r.frame();
+    try testing.expect(b.rename == null);
+    try testing.expectEqualStrings("Hello there", t.props.field("text").?.string);
+    const live: *Label = @ptrCast(@alignCast(r.ui.tree.get(r.liveOf(t.uid)).?.widget.?));
+    try testing.expectEqualStrings("Hello there", live.props.text.bytes);
+    b.undo();
+    try testing.expectEqualStrings("text", t.props.field("text").?.string);
+
+    // A plain box has no text: double-click does nothing.
+    try doubleClick(r, r.center(r.liveOf(byId(b, "a").uid)));
+    try testing.expect(b.rename == null);
+}
+
+test "copy, cut, paste, move, and wrap work on a multi-selection" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    try r.frame();
+    const a = byId(b, "a");
+    const bb = byId(b, "b");
+    const t = byId(b, "t");
+    // Copy a and t and paste them into b (a container): they go inside it.
+    b.select(a.uid);
+    b.toggleInSelection(t.uid);
+    b.copySelected();
+    b.select(bb.uid);
+    b.pasteClipboard();
+    try r.frame();
+    try testing.expectEqual(@as(usize, 2), bb.children.items.len);
+    try testing.expectEqual(@as(usize, 2), b.selectionCount()); // the pasted nodes are selected
+    b.undo();
+    try r.frame();
+    try testing.expectEqual(@as(usize, 0), bb.children.items.len);
+
+    // Cut removes them (one undo step brings both back).
+    b.select(a.uid);
+    b.toggleInSelection(t.uid);
+    b.cutSelected();
+    try r.frame();
+    try testing.expectEqual(@as(usize, 1), b.doc().root.children.items.len);
+    b.undo();
+    try r.frame();
+    try testing.expectEqual(@as(usize, 3), b.doc().root.children.items.len);
+
+    // Move up: b and t each go up one place (a, b, t -> b, t, a).
+    b.select(bb.uid);
+    b.toggleInSelection(t.uid);
+    b.moveSelected(-1);
+    try r.frame();
+    try testing.expectEqual(bb, b.doc().root.children.items[0]);
+    try testing.expectEqual(t, b.doc().root.children.items[1]);
+    try testing.expectEqual(a, b.doc().root.children.items[2]);
+    b.undo();
+    try r.frame();
+    try testing.expectEqual(a, b.doc().root.children.items[0]);
+
+    // Wrap a and b in one new box.
+    b.select(a.uid);
+    b.toggleInSelection(bb.uid);
+    b.wrapSelected();
+    try r.frame();
+    try testing.expectEqual(@as(usize, 2), b.doc().root.children.items.len);
+    const w = b.selectedNode();
+    try testing.expectEqualStrings("box", w.type_name);
+    try testing.expectEqual(@as(usize, 2), w.children.items.len);
+    try testing.expectEqual(a, w.children.items[0]);
+    try testing.expectEqual(bb, w.children.items[1]);
+    b.undo();
+    try r.frame();
+    try testing.expectEqual(@as(usize, 3), b.doc().root.children.items.len);
 }
