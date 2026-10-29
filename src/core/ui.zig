@@ -68,6 +68,7 @@ const Dock = @import("../widgets/dock.zig").Dock;
 const MenuBar = @import("../widgets/menu_bar.zig").MenuBar;
 const TextArea = @import("../widgets/text_area.zig").TextArea;
 const Spacer = @import("../widgets/spacer.zig").Spacer;
+const FindBar = @import("../widgets/find_bar.zig").FindBar;
 const CodeEditor = code_editor.CodeEditor;
 
 /// A unique address per widget type, stored on nodes so the registry can tell
@@ -107,6 +108,7 @@ pub const Ui = struct {
     menu_bars: Pool(MenuBar, 16),
     text_areas: Pool(TextArea, 16),
     spacers: Pool(Spacer, 64),
+    find_bars: Pool(FindBar, 16),
     /// The open menu, if any (see `openMenu`).
     menu: ?*menu_mod.Menu = null,
     /// Closed menus waiting to be freed at the next `update`.
@@ -176,6 +178,7 @@ pub const Ui = struct {
             .menu_bars = Pool(MenuBar, 16).init(gpa),
             .text_areas = Pool(TextArea, 16).init(gpa),
             .spacers = Pool(Spacer, 64).init(gpa),
+            .find_bars = Pool(FindBar, 16).init(gpa),
             .paint_cache = paint.Cache.init(gpa),
             .commands = commands_mod.Commands.init(gpa),
             .shortcuts = shortcuts_mod.Shortcuts.init(gpa),
@@ -188,7 +191,7 @@ pub const Ui = struct {
         self.theme = theme;
         self.tree.markDirty(self.tree.root, DirtyFlags.layout_and_paint);
         // Widgets reshape text and repaint from the new theme in `update`.
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects, &self.tab_panels, &self.docks, &self.menu_bars, &self.text_areas, &self.spacers }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects, &self.tab_panels, &self.docks, &self.menu_bars, &self.text_areas, &self.spacers, &self.find_bars }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| self.tree.markDirty(e.ptr.node, DirtyFlags.layout_and_paint);
         }
@@ -211,7 +214,7 @@ pub const Ui = struct {
         if (self.menu) |m| m.close();
         for (self.menu_closed.items) |m| m.destroyClosed();
         self.menu_closed.deinit(self.gpa);
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects, &self.tab_panels, &self.docks, &self.menu_bars, &self.text_areas, &self.spacers }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects, &self.tab_panels, &self.docks, &self.menu_bars, &self.text_areas, &self.spacers, &self.find_bars }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| e.ptr.deinit();
             pool.deinit();
@@ -227,7 +230,7 @@ pub const Ui = struct {
 
     // ---- creating widgets --------------------------------------------------------
 
-    fn poolFor(self: *Ui, comptime W: type) *Pool(W, if (W == CodeEditor or W == Canvas or W == ScrollView or W == SplitView or W == TreeView or W == TabPanel or W == Dock or W == MenuBar or W == TextArea) 16 else 64) {
+    fn poolFor(self: *Ui, comptime W: type) *Pool(W, if (W == CodeEditor or W == Canvas or W == ScrollView or W == SplitView or W == TreeView or W == TabPanel or W == Dock or W == MenuBar or W == TextArea or W == FindBar) 16 else 64) {
         if (W == Button) return &self.buttons;
         if (W == Label) return &self.labels;
         if (W == TextField) return &self.fields;
@@ -242,6 +245,7 @@ pub const Ui = struct {
         if (W == MenuBar) return &self.menu_bars;
         if (W == TextArea) return &self.text_areas;
         if (W == Spacer) return &self.spacers;
+        if (W == FindBar) return &self.find_bars;
         @compileError("not a widget type: " ++ @typeName(W));
     }
 
@@ -852,7 +856,7 @@ pub const Ui = struct {
 
     /// Run `method` on every live widget.
     fn forEachWidget(self: *Ui, comptime method: []const u8) void {
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects, &self.tab_panels, &self.docks, &self.menu_bars, &self.text_areas, &self.spacers }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects, &self.tab_panels, &self.docks, &self.menu_bars, &self.text_areas, &self.spacers, &self.find_bars }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| @field(@TypeOf(e.ptr.*), method)(e.ptr);
         }
@@ -896,6 +900,7 @@ pub const Ui = struct {
         self.sweep(&self.menu_bars);
         self.sweep(&self.text_areas);
         self.sweep(&self.spacers);
+        self.sweep(&self.find_bars);
 
         if (self.shortcuts.count() > 0) self.shortcuts.prune(&self.tree, &self.commands);
 
@@ -3743,4 +3748,164 @@ test "tabbing into a text field selects its text so typing replaces it; clicking
     try t.h.frame();
     try type_(t, "!");
     try std.testing.expectEqualStrings("hello!", tf.text());
+}
+
+test "editor decorations follow edits, draw under the text, and selectRange selects" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    try ed.loadText("one two three", false);
+    try t.h.frame();
+    try ed.setDecorations(0, &.{
+        .{ .start = 4, .end = 7, .kind = .highlight }, // two
+        .{ .start = 8, .end = 13, .kind = .error_squiggle }, // three
+    });
+    try t.h.frame();
+    // A highlight rectangle and some squiggle line segments were drawn.
+    var fills: usize = 0;
+    var lines: usize = 0;
+    for (t.h.list.items()) |c| {
+        if (solidFill(c)) |f| {
+            if (std.meta.eql(f.color, ed.palette().find_match)) fills += 1;
+        }
+        switch (c) {
+            .line => lines += 1,
+            else => {},
+        }
+    }
+    try std.testing.expect(fills >= 1 and lines >= 3);
+
+    // Typing before them shifts both; deleting inside one shrinks it.
+    ed.selectRange(0, 0);
+    try t.h.frame();
+    ui.textInput("XX");
+    try t.h.frame();
+    try std.testing.expectEqual(@as(usize, 6), ed.decos[0].items[0].start);
+    try std.testing.expectEqual(@as(usize, 10), ed.decos[0].items[1].start);
+    ed.clearDecorations(0);
+    try std.testing.expectEqual(@as(usize, 0), ed.decos[0].items.len);
+
+    ed.selectRange(6, 9);
+    try std.testing.expect(ed.core().hasSelectedText());
+    const s = try ed.core().selectedText(testing_alloc);
+    defer testing_alloc.free(s);
+    try std.testing.expectEqualStrings("two", s);
+}
+
+test "Ctrl+F in the editor calls on_find" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    FieldCounts.changes = 0;
+    ed.props.on_find = .{ .call = FieldCounts.onChange };
+    ui.key(.f, .{ .ctrl = true }, true, false);
+    try std.testing.expectEqual(@as(u32, 1), FieldCounts.changes);
+}
+
+const fold_text =
+    "fn a() {\n" ++
+    "    one;\n" ++
+    "    if (x) {\n" ++
+    "        two;\n" ++
+    "    }\n" ++
+    "\n" ++
+    "    three;\n" ++
+    "}\n" ++
+    "fn b() {\n" ++
+    "    four;\n" ++
+    "}";
+
+fn foldBox(t: *TextHarness) !*CodeEditor {
+    const ui = &t.h.ui;
+    ui.tree.get(ui.tree.root).?.style = .{ .align_items = .start };
+    const ed = try ui.add(CodeEditor, ui.tree.root, .{ .style = .{ .width = Length.px(300), .height = Length.px(160), .shrink = 0 }, .folding = true });
+    try ed.loadText(fold_text, false);
+    try t.h.frame();
+    ui.setFocus(ed.node);
+    try t.h.frame();
+    return ed;
+}
+
+test "fold regions come from indentation; folding hides lines and maps rows" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ed = try foldBox(t);
+    try std.testing.expectEqual(@as(?usize, 6), ed.foldEndOf(0)); // blank line 5 stays inside, 'three' is the last nested line
+    try std.testing.expectEqual(@as(?usize, 3), ed.foldEndOf(2));
+    try std.testing.expectEqual(@as(?usize, null), ed.foldEndOf(1));
+    try std.testing.expectEqual(@as(?usize, null), ed.foldEndOf(5)); // blank
+    try std.testing.expectEqual(@as(?usize, 9), ed.foldEndOf(8));
+
+    try std.testing.expectEqual(@as(usize, 11), ed.visibleRows());
+    ed.fold(0);
+    try std.testing.expect(ed.isFolded(0));
+    try std.testing.expectEqual(@as(usize, 11 - 6), ed.visibleRows());
+    // Rows: 0 -> line 0, 1 -> line 7 ('}' closing a), 2 -> line 8 ...
+    try std.testing.expectEqual(@as(usize, 0), ed.lineAtRow(0));
+    try std.testing.expectEqual(@as(usize, 7), ed.lineAtRow(1));
+    try std.testing.expectEqual(@as(usize, 8), ed.lineAtRow(2));
+    try std.testing.expectEqual(@as(usize, 1), ed.rowOfLine(7));
+    try std.testing.expectEqual(@as(usize, 0), ed.rowOfLine(3)); // hidden: its fold's row
+    try std.testing.expectEqual(@as(usize, 2), ed.rowOfLine(8));
+
+    ed.toggleFold(0);
+    try std.testing.expect(!ed.isFolded(0));
+    // Folding a line inside a region folds the region that contains it.
+    ed.fold(3);
+    try std.testing.expect(ed.isFolded(2));
+    // A new outer fold swallows the inner one.
+    ed.fold(0);
+    try std.testing.expectEqual(@as(usize, 1), ed.folds.items.len);
+    ed.foldAll();
+    try std.testing.expectEqual(@as(usize, 2), ed.folds.items.len);
+    ed.unfoldAll();
+    try std.testing.expectEqual(@as(usize, 0), ed.folds.items.len);
+}
+
+test "folded lines are skipped by the arrow keys, painted as one row, and reopen when edited" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try foldBox(t);
+    ed.fold(0);
+    try t.h.frame();
+    // Down from the fold's first line lands on the next visible line ('}' of a).
+    ed.core().setCaret(0, false);
+    ui.key(.down, .{}, true, false);
+    try std.testing.expectEqual(@as(usize, 7), ed.core().doc.lineOfOffset(ed.core().primaryHead()));
+    ui.key(.up, .{}, true, false);
+    try std.testing.expectEqual(@as(usize, 0), ed.core().doc.lineOfOffset(ed.core().primaryHead()));
+
+    // A click on the gutter arrow of a folded line opens it; another folds it again.
+    const arrow = ed.foldArrowAt(0).?;
+    const ax = arrow.x;
+    const ay = arrow.y;
+    ui.pointerMove(ax, ay);
+    ui.pointerButton(ax, ay, 1, true);
+    ui.pointerButton(ax, ay, 1, false);
+    try std.testing.expect(!ed.isFolded(0));
+    ui.pointerButton(ax, ay, 1, true);
+    ui.pointerButton(ax, ay, 1, false);
+    try std.testing.expect(ed.isFolded(0));
+
+    // Editing above shifts the fold; typing into the folded start line keeps it.
+    ed.core().setCaret(ed.core().doc.lineEnd(0), false);
+    ui.textInput(" //x");
+    try t.h.frame();
+    try std.testing.expect(ed.isFolded(0));
+    // Select the whole document and replace: every fold opens.
+    ed.core().selectAll();
+    ui.textInput("q");
+    try t.h.frame();
+    try std.testing.expectEqual(@as(usize, 0), ed.folds.items.len);
+
+    // A fold below an inserted line moves down by one.
+    try ed.loadText(fold_text, false);
+    ed.fold(8);
+    ed.core().setCaret(0, false);
+    ui.key(.enter, .{}, true, false);
+    try t.h.frame();
+    try std.testing.expect(ed.isFolded(9));
 }

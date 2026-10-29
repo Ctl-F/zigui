@@ -70,6 +70,12 @@ pub const EditorColors = struct {
     selection_unfocused: Color = Color.rgba(0x6b, 0x6f, 0x76, 0x60),
     caret: Color = Color.rgb(0xe8, 0xea, 0xed),
     scrollbar: Color = Color.rgba(0xff, 0xff, 0xff, 0x28),
+    /// Decorations: find matches, the current match, and diagnostic squiggles.
+    find_match: Color = Color.rgba(0xe6, 0xb4, 0x1e, 0x50),
+    find_current: Color = Color.rgba(0xf0, 0x8a, 0x1e, 0xa0),
+    squiggle_error: Color = Color.rgb(0xf0, 0x50, 0x50),
+    squiggle_warning: Color = Color.rgb(0xe6, 0xbe, 0x3c),
+    squiggle_info: Color = Color.rgb(0x5a, 0xa0, 0xf0),
 
     pub fn tokenColor(self: *const EditorColors, kind: syntax.TokenKind) Color {
         return self.syntax[@intFromEnum(kind)];

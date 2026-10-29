@@ -48,7 +48,7 @@ const Entry = struct {
 
 /// Replace [start, end) with `text`. Edits passed to `replace` must be sorted
 /// and must not overlap.
-const Edit = struct { start: usize, end: usize, text: []const u8 };
+pub const Edit = struct { start: usize, end: usize, text: []const u8 };
 
 const SelectionMode = enum {
     /// Collapse each selection to a caret after its replacement text.
@@ -457,12 +457,34 @@ pub const Editor = struct {
             if (!s.isEmpty()) {
                 try edits.append(self.gpa, .{ .start = s.start(), .end = s.end(), .text = "" });
             } else if (s.head > 0) {
-                const from = if (by_word) try self.wordLeft(s.head) else self.doc.prevBoundary(s.head);
+                const from = if (by_word) try self.wordLeft(s.head) else (try self.softTabStart(s.head)) orelse self.doc.prevBoundary(s.head);
                 try edits.append(self.gpa, .{ .start = from, .end = s.head, .text = "" });
             }
         }
         mergeRanges(&edits);
         return self.replace(.delete_back, now, edits.items, .carets_after);
+    }
+
+    /// Apply several replacements as one undo step (sorted, not overlapping).
+    /// The selection keeps pointing at the same text. Used by replace-all.
+    pub fn replaceRanges(self: *Editor, now: u64, edits: []const Edit) Error!bool {
+        return self.replace(.other, now, edits, .map);
+    }
+
+    /// Where Backspace goes when only spaces lie between the line start and
+    /// `head`: back to the previous tab stop (a whole indent step at once).
+    /// Null when something else precedes the caret on the line.
+    fn softTabStart(self: *Editor, head: usize) Error!?usize {
+        const ls = self.doc.lineStart(self.doc.lineOfOffset(head));
+        if (head <= ls) return null;
+        const lead = try self.doc.range(ls, head);
+        for (lead) |c| {
+            if (c != ' ') return null;
+        }
+        const w = @max(self.tab_width, 1);
+        var n = lead.len % w;
+        if (n == 0) n = w;
+        return head - @min(n, lead.len);
     }
 
     pub fn deleteForward(self: *Editor, by_word: bool, now: u64) Error!bool {
@@ -852,6 +874,31 @@ test "tab inserts to the next tab stop; selections spanning lines indent and out
     try testing.expect(!try e.outdent(3)); // nothing left to remove: no edit, no history entry
     try testing.expect(try e.undo()); // undoes the outdent
     try expectText(&e, "    a   b\n    cd\n    ef");
+}
+
+test "backspace in leading spaces erases back to the previous tab stop; elsewhere one character" {
+    var e = try editorWith("        x\n      y\nab  ");
+    defer e.deinit();
+    // Caret after 8 spaces: one backspace removes four.
+    e.setCaret(8, false);
+    _ = try e.deleteBackward(false, 0);
+    try expectText(&e, "    x\n      y\nab  ");
+    // 6 spaces: back to column 4 (two erased), then four.
+    e.setCaret(e.doc.lineStart(1) + 6, false);
+    _ = try e.deleteBackward(false, 1);
+    try expectText(&e, "    x\n    y\nab  ");
+    _ = try e.deleteBackward(false, 2);
+    try expectText(&e, "    x\ny\nab  ");
+    // Spaces after text are ordinary characters.
+    e.setCaret(e.doc.lineStart(2) + 4, false);
+    _ = try e.deleteBackward(false, 3);
+    try expectText(&e, "    x\ny\nab ");
+    // Only a few spaces: just those. And one undo step restores a whole indent.
+    e.setCaret(e.doc.lineStart(0) + 2, false);
+    _ = try e.deleteBackward(false, 4);
+    try expectText(&e, "  x\ny\nab ");
+    try testing.expect(try e.undo());
+    try expectText(&e, "    x\ny\nab ");
 }
 
 test "paste: one text everywhere, or one line per cursor when the counts match" {

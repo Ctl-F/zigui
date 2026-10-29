@@ -20,6 +20,7 @@
       ["widgets/text-field.html", "TextField"],
       ["widgets/text-area.html", "TextArea"],
       ["widgets/code-editor.html", "CodeEditor"],
+      ["widgets/find-bar.html", "FindBar"],
       ["widgets/canvas.html", "Canvas"],
       ["widgets/scroll-view.html", "ScrollView"],
       ["widgets/split-view.html", "SplitView"],

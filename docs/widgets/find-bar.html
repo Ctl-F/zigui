@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>FindBar - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>FindBar</h1>
+<p>Find and replace for a <a href="code-editor.html">CodeEditor</a>. It is a small hidden panel you place (usually just above the editor); <code>attach</code> it and Ctrl+F in the editor opens it, Ctrl+H opens it with the replace row.</p>
+<pre><code>const find = try ui.add(zigui.FindBar, column, .{});
+find.attach(editor);</code></pre>
+<table>
+<tr><th>Do this</th><th>Result</th></tr>
+<tr><td>Type in the Find field</td><td>Every match is highlighted in the editor (the current one stronger), the first one at or after the caret is selected, and the count shows ("3 of 12", "No results").</td></tr>
+<tr><td>Enter / Shift+Enter, Next / Prev</td><td>Step through the matches, wrapping around.</td></tr>
+<tr><td><b>Aa</b> and <b>W</b> toggles</td><td>Match case; whole word only (a match may not touch a letter, digit or underscore).</td></tr>
+<tr><td>Replace (or Enter in the Replace field)</td><td>Replace the current match and move on.</td></tr>
+<tr><td>Replace all</td><td>Replace every match as <b>one undo step</b>.</td></tr>
+<tr><td>Escape or the &times; button</td><td>Close the bar, remove the highlights and focus the editor again.</td></tr>
+</table>
+<p>If the text changes while the bar is open (typing, undo), the matches are recomputed. A one-line selection seeds the query when the bar opens.</p>
+<h2>API</h2>
+<ul>
+<li><code>attach(editor)</code>, <code>show(replace)</code>, <code>hide()</code>.</li>
+<li><code>findNext()</code>, <code>findPrev()</code>, <code>replaceCurrent()</code>, <code>replaceAll() usize</code>, <code>refresh(select)</code>.</li>
+<li><code>props</code>: <code>case_sensitive</code>, <code>whole_word</code>, <code>show_replace</code>. <code>out</code>: <code>match_count</code>, <code>current</code> (1-based, 0 for none), <code>open</code>.</li>
+</ul>
+<h2>The search engine</h2>
+<p><code>zigui.search</code> (<code>editor/search.zig</code>) is the matcher it uses, with no UI: <code>indexIn(haystack, needle, from, opts)</code>, <code>findAll(doc, gpa, query, opts, max)</code> (line by line, so a huge document is never copied; a query containing a newline copies the text once), <code>nextIndex</code> and <code>prevIndex</code>. Project-wide search will run it over files on worker threads.</p>
+<h2>Limits</h2>
+<p>Literal matching only (no regular expressions yet), at most 10,000 highlighted matches, and the bar is code-only (it needs an editor to attach to, so it is not a toolbox widget).</p>
+</main><script src="../nav.js"></script></body></html>

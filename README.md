@@ -410,6 +410,14 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   is row-major over an occupancy counter per column, row heights come from
   single-row cells and a taller child only grows the last row it covers. `Spacer`
   is a widget so documents and the builder can place flexible or fixed space.
+- Editor features (plan step 1): Backspace in leading spaces erases to the
+  previous tab stop (`Editor.softTabStart`); `editor/search.zig` is a UI-free
+  literal matcher; `CodeEditor` decorations (8 owner slots of sorted byte ranges,
+  remapped through the document's change records) draw find highlights and
+  squiggles; `FindBar` drives them and replace-all is one `replaceRanges` edit;
+  indentation folding keeps a sorted list of hidden line ranges and everything
+  that assumed one line per row (paint, scroll extent, hit testing, caret
+  rect, Up/Down) goes through `rowOfLine`/`lineAtRow`.
 - Workbench (`zig build workbench`): a code editor on the ZON text beside the
   builder, synced both ways; parse errors go to the status line. Examples build
   ReleaseSafe by default (`-Dexample_optimize`) because the software rasterizer

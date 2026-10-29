@@ -62,6 +62,38 @@ pub const Painter = *const fn (ctx: *PaintCtx, ed: *CodeEditor) paint_ctx.Error!
 const blink_ms: u64 = 530;
 const gutter_pad: f32 = 8;
 
+/// How many independent decoration sets an editor holds (find uses one,
+/// diagnostics another, ...). Owners are small integers chosen by the host.
+pub const deco_owners = 8;
+
+pub const DecorationKind = enum {
+    /// A tinted background (find matches).
+    highlight,
+    /// A stronger one (the current match).
+    current,
+    error_squiggle,
+    warning_squiggle,
+    info_squiggle,
+};
+
+/// A byte range of the text with a look. Ranges follow edits: text before
+/// moves nothing, text after shifts, and a range whose text is deleted shrinks.
+pub const Decoration = struct {
+    start: usize,
+    end: usize,
+    kind: DecorationKind,
+};
+
+/// A folded region: the lines `start + 1 ..= end` are hidden; `start` stays
+/// visible with a marker.
+pub const Fold = struct {
+    start: usize,
+    end: usize,
+};
+
+/// Width of the fold-arrow column in the gutter.
+const fold_w: f32 = 14;
+
 pub const CodeEditor = struct {
     props: Props = .{},
     out: Out = .{},
@@ -95,6 +127,11 @@ pub const CodeEditor = struct {
 
     /// Syntax highlighting, if a language is set.
     highlighter: ?Highlighter = null,
+    /// Decorations by owner (see `setDecorations`).
+    decos: [deco_owners]std.ArrayListUnmanaged(Decoration) = @splat(.empty),
+    deco_max_len: [deco_owners]usize = @splat(0),
+    /// Folded regions, sorted by `start`, never overlapping.
+    folds: std.ArrayListUnmanaged(Fold) = .empty,
     /// A file opened with `openFile`: the mapping the text borrows, and the
     /// background scan still indexing its lines.
     mapped: ?MappedFile = null,
@@ -104,6 +141,8 @@ pub const CodeEditor = struct {
         self.releaseFile(false);
         if (self.highlighter) |*h| h.deinit();
         self.spans.deinit(self.ui.gpa);
+        for (&self.decos) |*d| d.deinit(self.ui.gpa);
+        self.folds.deinit(self.ui.gpa);
         self.editor.deinit();
         self.releaseFile(true);
         self.display.deinit(self.ui.gpa);
@@ -223,7 +262,9 @@ pub const CodeEditor = struct {
         read_only: bool = false,
         line_numbers: bool = true,
         auto_indent: bool = true,
+        folding: bool = false,
         on_change: ?event.Callback = null,
+        on_find: ?event.Callback = null,
         colors: ?EditorColors = null,
         painter: ?Painter = null,
     };
@@ -259,6 +300,8 @@ pub const CodeEditor = struct {
             .line_numbers = o.line_numbers,
             .auto_indent = o.auto_indent,
             .on_change = o.on_change,
+            .on_find = o.on_find,
+            .folding = o.folding,
             .colors = o.colors,
             .painter = o.painter,
         };
@@ -354,13 +397,14 @@ pub const CodeEditor = struct {
         const node = self.ui.tree.get(self.node).?;
         const pad = layout_mod.resolveEdges(node.style.padding, null);
         var gutter: f32 = 0;
+        if (self.props.folding) gutter += fold_w;
         if (self.props.line_numbers) {
             var digits: usize = 3;
             var n = self.editor.doc.lineCount();
             var d: usize = 0;
             while (n > 0) : (n /= 10) d += 1;
             digits = @max(digits, d);
-            gutter = @as(f32, @floatFromInt(digits)) * m.digit_w + gutter_pad * 2;
+            gutter += @as(f32, @floatFromInt(digits)) * m.digit_w + gutter_pad * 2;
         }
         return .{
             .pad = pad,
@@ -441,7 +485,7 @@ pub const CodeEditor = struct {
         const ed = &self.editor;
         const rel_y = local_y - geo.pad.t + self.scroll_y;
         const last = ed.doc.lineCount() - 1;
-        const line: usize = if (rel_y <= 0) 0 else @min(@as(usize, @intFromFloat(rel_y / m.line_h)), last);
+        const line: usize = if (rel_y <= 0) self.lineAtRow(0) else @min(self.lineAtRow(@as(usize, @intFromFloat(rel_y / m.line_h))), last);
         self.buildLine(line, m) catch return ed.doc.lineStart(line);
         const x = local_x - geo.pad.l - geo.gutter_w + self.scroll_x;
         return self.offsetAtX(ed.doc.lineStart(line), x);
@@ -485,7 +529,7 @@ pub const CodeEditor = struct {
     }
 
     fn maxScrollY(self: *CodeEditor, m: Metrics, geo: Geo) f32 {
-        const content = @as(f32, @floatFromInt(self.editor.doc.lineCount())) * m.line_h;
+        const content = @as(f32, @floatFromInt(self.visibleRows())) * m.line_h;
         return @max(content - geo.view_h, 0);
     }
 
@@ -493,7 +537,7 @@ pub const CodeEditor = struct {
         const ed = &self.editor;
         const head = ed.primaryHead();
         const line = ed.doc.lineOfOffset(head);
-        const top = @as(f32, @floatFromInt(line)) * m.line_h;
+        const top = @as(f32, @floatFromInt(self.rowOfLine(line))) * m.line_h;
         if (top < self.scroll_y) self.scroll_y = top;
         if (top + m.line_h > self.scroll_y + geo.view_h) self.scroll_y = top + m.line_h - geo.view_h;
         if (self.buildLine(line, m)) {
@@ -535,11 +579,14 @@ pub const CodeEditor = struct {
                     };
                 }
             }
+            self.remapDecorations();
+            self.remapFolds();
             self.editor.doc.clearChanges();
             self.last_version = self.editor.doc.version;
             self.repaint = true;
         }
 
+        self.revealCaret();
         if (self.metrics()) |m| {
             const geo = self.geometry(m);
             if (self.want_visible) {
@@ -563,6 +610,382 @@ pub const CodeEditor = struct {
         if (self.repaint) {
             self.repaint = false;
             tree.markDirty(self.node, DirtyFlags.paint_only);
+        }
+    }
+
+    // ---- folding ---------------------------------------------------------------------------
+
+    /// Leading whitespace width of `line` in columns, or null for a blank line.
+    fn lineIndent(self: *CodeEditor, line: usize) ?usize {
+        const doc = &self.editor.doc;
+        const text = doc.range(doc.lineStart(line), doc.lineEnd(line)) catch return null;
+        const tab_w = @max(self.props.tab_width, 1);
+        var col: usize = 0;
+        for (text) |ch| switch (ch) {
+            ' ' => col += 1,
+            '\t' => col += tab_w - col % tab_w,
+            else => return col,
+        };
+        return null;
+    }
+
+    /// The last line of the region that starts at `line` (the lines below it
+    /// that are indented further), or null if nothing is nested under it.
+    pub fn foldEndOf(self: *CodeEditor, line: usize) ?usize {
+        const lines = self.editor.doc.lineCount();
+        const base = self.lineIndent(line) orelse return null;
+        var next = line + 1;
+        while (next < lines and self.lineIndent(next) == null) next += 1;
+        if (next >= lines) return null;
+        if ((self.lineIndent(next) orelse 0) <= base) return null;
+        var end = next;
+        var i = next + 1;
+        while (i < lines) : (i += 1) {
+            const ind = self.lineIndent(i) orelse continue;
+            if (ind <= base) break;
+            end = i;
+        }
+        return end;
+    }
+
+    pub fn isFoldable(self: *CodeEditor, line: usize) bool {
+        return self.foldEndOf(line) != null;
+    }
+
+    fn foldStartingAt(self: *const CodeEditor, line: usize) ?Fold {
+        for (self.folds.items) |f| {
+            if (f.start == line) return f;
+            if (f.start > line) break;
+        }
+        return null;
+    }
+
+    /// The fold hiding `line`, if it is inside one (not the start line).
+    fn foldHiding(self: *const CodeEditor, line: usize) ?Fold {
+        for (self.folds.items) |f| {
+            if (line > f.start and line <= f.end) return f;
+            if (f.start > line) break;
+        }
+        return null;
+    }
+
+    pub fn isFolded(self: *const CodeEditor, line: usize) bool {
+        return self.foldStartingAt(line) != null;
+    }
+
+    /// Lines shown (every line minus the folded ones).
+    pub fn visibleRows(self: *const CodeEditor) usize {
+        var hidden: usize = 0;
+        for (self.folds.items) |f| hidden += f.end - f.start;
+        return self.editor.doc.lineCount() - hidden;
+    }
+
+    /// The display row of `line` (a hidden line shares its fold's row).
+    pub fn rowOfLine(self: *const CodeEditor, line: usize) usize {
+        var row = line;
+        for (self.folds.items) |f| {
+            if (f.end < line) {
+                row -= f.end - f.start;
+            } else if (f.start < line) {
+                // Inside the fold: shows as its start line.
+                row -= line - f.start;
+                break;
+            } else break;
+        }
+        return row;
+    }
+
+    /// The document line shown on display row `row`.
+    pub fn lineAtRow(self: *const CodeEditor, row: usize) usize {
+        var line = row;
+        for (self.folds.items) |f| {
+            if (line > f.start) line += f.end - f.start else break;
+        }
+        return line;
+    }
+
+    /// Fold the region starting at `line` (or the nearest region containing it).
+    pub fn fold(self: *CodeEditor, line: usize) void {
+        var l = line;
+        // A line inside a region folds that region: look upward for a start that has an end past `line`.
+        while (true) {
+            if (self.foldStartingAt(l) != null) return;
+            if (self.foldEndOf(l)) |end| {
+                if (end >= line or l == line) {
+                    self.addFold(.{ .start = l, .end = end });
+                    return;
+                }
+            }
+            if (l == 0) return;
+            l -= 1;
+            if (line - l > 2000) return;
+        }
+    }
+
+    fn addFold(self: *CodeEditor, f: Fold) void {
+        // A new fold swallows folds nested inside it.
+        var kept: usize = 0;
+        for (self.folds.items) |old| {
+            if (old.start >= f.start and old.end <= f.end) continue;
+            self.folds.items[kept] = old;
+            kept += 1;
+        }
+        self.folds.shrinkRetainingCapacity(kept);
+        var at: usize = 0;
+        while (at < self.folds.items.len and self.folds.items[at].start < f.start) at += 1;
+        self.folds.insert(self.ui.gpa, at, f) catch return;
+        self.repaint = true;
+        // The caret must not stay on a hidden line.
+        self.revealCaretOutside(f);
+    }
+
+    pub fn unfold(self: *CodeEditor, line: usize) void {
+        var i: usize = 0;
+        while (i < self.folds.items.len) : (i += 1) {
+            const f = self.folds.items[i];
+            if (f.start == line or (line > f.start and line <= f.end)) {
+                _ = self.folds.orderedRemove(i);
+                self.repaint = true;
+                return;
+            }
+        }
+    }
+
+    pub fn toggleFold(self: *CodeEditor, line: usize) void {
+        if (self.isFolded(line)) self.unfold(line) else self.fold(line);
+    }
+
+    /// Fold every top-level region (regions nested inside stay open inside it).
+    pub fn foldAll(self: *CodeEditor) void {
+        self.folds.clearRetainingCapacity();
+        var line: usize = 0;
+        const lines = self.editor.doc.lineCount();
+        while (line < lines) {
+            if (self.foldEndOf(line)) |end| {
+                self.folds.append(self.ui.gpa, .{ .start = line, .end = end }) catch return;
+                line = end + 1;
+            } else line += 1;
+        }
+        self.repaint = true;
+        if (self.folds.items.len > 0) self.revealCaretOutside(self.folds.items[0]);
+        for (self.folds.items) |f| self.revealCaretOutside(f);
+    }
+
+    pub fn unfoldAll(self: *CodeEditor) void {
+        if (self.folds.items.len == 0) return;
+        self.folds.clearRetainingCapacity();
+        self.repaint = true;
+    }
+
+    /// If the primary caret is on a line hidden by `f`, move it to the fold's start line end.
+    fn revealCaretOutside(self: *CodeEditor, f: Fold) void {
+        const ed = &self.editor;
+        const line = ed.doc.lineOfOffset(ed.primaryHead());
+        if (line > f.start and line <= f.end) {
+            ed.setCaret(ed.doc.lineEnd(f.start), false);
+            self.want_visible = true;
+        }
+    }
+
+    /// Typing or searching into a hidden line opens the fold around it.
+    fn revealCaret(self: *CodeEditor) void {
+        if (self.folds.items.len == 0) return;
+        const ed = &self.editor;
+        for (ed.sel.items.items) |s| {
+            const line = ed.doc.lineOfOffset(s.head);
+            if (self.foldHiding(line)) |f| self.unfold(f.start);
+        }
+    }
+
+    /// Keep folds on their lines through edits: a fold below an edit shifts
+    /// with it; one the edit touches opens (its lines changed shape).
+    fn remapFolds(self: *CodeEditor) void {
+        if (self.folds.items.len == 0) return;
+        for (self.editor.doc.changes.items) |c| {
+            const delta: isize = @as(isize, @intCast(c.inserted_lines)) - @as(isize, @intCast(c.removed_lines));
+            const touched_end = c.start_line + c.removed_lines;
+            var kept: usize = 0;
+            for (self.folds.items) |f| {
+                var g = f;
+                if (c.start_line > f.end) {
+                    // Below the fold: unaffected.
+                } else if (touched_end < f.start) {
+                    g.start = @intCast(@as(isize, @intCast(g.start)) + delta);
+                    g.end = @intCast(@as(isize, @intCast(g.end)) + delta);
+                } else if (c.start_line == f.start and c.removed_lines == 0 and c.inserted_lines == 0) {
+                    // An edit inside the start line's own text: the fold stays.
+                } else continue;
+                self.folds.items[kept] = g;
+                kept += 1;
+            }
+            self.folds.shrinkRetainingCapacity(kept);
+        }
+        self.repaint = true;
+    }
+
+    /// Move the caret `delta` display rows (folded lines count as one row).
+    fn moveRows(self: *CodeEditor, delta: isize, extend: bool) void {
+        const ed = &self.editor;
+        if (self.folds.items.len == 0) {
+            ed.moveVertical(delta, extend) catch {};
+            return;
+        }
+        const line = ed.doc.lineOfOffset(ed.primaryHead());
+        const row: isize = @intCast(self.rowOfLine(line));
+        const last: isize = @intCast(self.visibleRows() - 1);
+        const target_row: usize = @intCast(std.math.clamp(row + delta, 0, last));
+        const target = self.lineAtRow(target_row);
+        ed.moveVertical(@as(isize, @intCast(target)) - @as(isize, @intCast(line)), extend) catch {};
+    }
+
+    /// The line whose fold arrow is at this point of the gutter, if any.
+    fn foldColumnLine(self: *CodeEditor, local_x: f32, local_y: f32) ?usize {
+        const m = self.metrics() orelse return null;
+        const geo = self.geometry(m);
+        const x0 = geo.pad.l + geo.gutter_w - fold_w;
+        if (local_x < x0 or local_x >= geo.pad.l + geo.gutter_w) return null;
+        const rel_y = local_y - geo.pad.t + self.scroll_y;
+        if (rel_y < 0) return null;
+        const line = self.lineAtRow(@intFromFloat(rel_y / m.line_h));
+        if (line >= self.editor.doc.lineCount()) return null;
+        return if (self.isFolded(line) or self.isFoldable(line)) line else null;
+    }
+
+    /// The center of display row `row`'s fold arrow, relative to the node's
+    /// top-left (for hosts that script or test clicks on it).
+    pub fn foldArrowAt(self: *CodeEditor, row: usize) ?struct { x: f32, y: f32 } {
+        const m = self.metrics() orelse return null;
+        const geo = self.geometry(m);
+        if (!self.props.folding) return null;
+        return .{
+            .x = geo.pad.l + geo.gutter_w - fold_w / 2,
+            .y = geo.pad.t + (@as(f32, @floatFromInt(row)) + 0.5) * m.line_h - self.scroll_y,
+        };
+    }
+
+    fn drawFoldArrow(self: *CodeEditor, list: *DrawList, m: Metrics, gutter: Rect, row_y: f32, line: usize) draw_list.Error!void {
+        const folded = self.isFolded(line);
+        if (!folded and !self.isFoldable(line)) return;
+        const colors = self.palette();
+        const paint = Paint.solid(colors.gutter_text_active);
+        const cx = gutter.x + gutter.w - fold_w / 2;
+        const cy = row_y + m.line_h / 2;
+        if (folded) {
+            try list.line(.{ .x = cx - 2, .y = cy - 4 }, .{ .x = cx + 2, .y = cy }, 1.4, paint);
+            try list.line(.{ .x = cx + 2, .y = cy }, .{ .x = cx - 2, .y = cy + 4 }, 1.4, paint);
+        } else {
+            try list.line(.{ .x = cx - 4, .y = cy - 2 }, .{ .x = cx, .y = cy + 2 }, 1.4, paint);
+            try list.line(.{ .x = cx, .y = cy + 2 }, .{ .x = cx + 4, .y = cy - 2 }, 1.4, paint);
+        }
+    }
+
+    // ---- decorations -----------------------------------------------------------------------
+
+    /// Replace owner `owner`'s decorations with `items` (sorted by `start`).
+    pub fn setDecorations(self: *CodeEditor, owner: u8, items: []const Decoration) !void {
+        std.debug.assert(owner < deco_owners);
+        const list = &self.decos[owner];
+        list.clearRetainingCapacity();
+        try list.appendSlice(self.ui.gpa, items);
+        var longest: usize = 0;
+        for (items) |d| longest = @max(longest, d.end -| d.start);
+        self.deco_max_len[owner] = longest;
+        self.repaint = true;
+    }
+
+    pub fn clearDecorations(self: *CodeEditor, owner: u8) void {
+        std.debug.assert(owner < deco_owners);
+        if (self.decos[owner].items.len == 0) return;
+        self.decos[owner].clearRetainingCapacity();
+        self.deco_max_len[owner] = 0;
+        self.repaint = true;
+    }
+
+    /// Select [start, end) and scroll it into view.
+    pub fn selectRange(self: *CodeEditor, start: usize, end: usize) void {
+        self.editor.setCaret(start, false);
+        self.editor.setCaret(end, true);
+        self.want_visible = true;
+        self.repaint = true;
+    }
+
+    fn remapPos(pos: usize, c: @import("../editor/document.zig").Change) usize {
+        if (pos >= c.offset + c.removed_len) return pos - c.removed_len + c.inserted_len;
+        if (pos > c.offset) return c.offset;
+        return pos;
+    }
+
+    /// Keep decorations on their text through the edits just made.
+    fn remapDecorations(self: *CodeEditor) void {
+        for (&self.decos, 0..) |*list, owner| {
+            if (list.items.len == 0) continue;
+            for (self.editor.doc.changes.items) |c| {
+                for (list.items) |*d| {
+                    d.start = remapPos(d.start, c);
+                    d.end = remapPos(d.end, c);
+                }
+            }
+            var kept: usize = 0;
+            var longest: usize = 0;
+            for (list.items) |d| {
+                if (d.end <= d.start) continue;
+                list.items[kept] = d;
+                kept += 1;
+                longest = @max(longest, d.end - d.start);
+            }
+            list.shrinkRetainingCapacity(kept);
+            self.deco_max_len[owner] = longest;
+        }
+    }
+
+    /// Draw the decorations that touch the line [ls, le]: backgrounds before
+    /// the text, squiggles after it.
+    fn drawDecorations(self: *CodeEditor, list: *DrawList, m: Metrics, origin_x: f32, row_y: f32, ls: usize, le: usize, backgrounds: bool) draw_list.Error!void {
+        const colors = self.palette();
+        for (self.decos, 0..) |ds, owner| {
+            if (ds.items.len == 0) continue;
+            // First range that could reach this line: starts are sorted.
+            var lo: usize = 0;
+            var hi: usize = ds.items.len;
+            const floor = ls -| self.deco_max_len[owner];
+            while (lo < hi) {
+                const mid = (lo + hi) / 2;
+                if (ds.items[mid].start < floor) lo = mid + 1 else hi = mid;
+            }
+            var i = lo;
+            while (i < ds.items.len and ds.items[i].start <= le) : (i += 1) {
+                const d = ds.items[i];
+                if (d.end < ls or d.end == d.start) continue;
+                const is_bg = d.kind == .highlight or d.kind == .current;
+                if (is_bg != backgrounds) continue;
+                const a = @max(d.start, ls);
+                const b = @min(d.end, le);
+                if (b <= a) continue;
+                const x0 = origin_x + self.xOfOffset(ls, a);
+                const x1 = origin_x + self.xOfOffset(ls, b);
+                switch (d.kind) {
+                    .highlight => try list.fillRect(.{ .x = x0, .y = row_y, .w = x1 - x0, .h = m.line_h }, Paint.solid(colors.find_match)),
+                    .current => try list.fillRect(.{ .x = x0, .y = row_y, .w = x1 - x0, .h = m.line_h }, Paint.solid(colors.find_current)),
+                    .error_squiggle, .warning_squiggle, .info_squiggle => {
+                        const color = switch (d.kind) {
+                            .error_squiggle => colors.squiggle_error,
+                            .warning_squiggle => colors.squiggle_warning,
+                            else => colors.squiggle_info,
+                        };
+                        const base = row_y + m.line_h - 2;
+                        var x = x0;
+                        var up = false;
+                        while (x < x1) {
+                            const nx = @min(x + 3, x1);
+                            const y0: f32 = if (up) base - 1.5 else base;
+                            const y1: f32 = if (up) base else base - 1.5;
+                            try list.line(.{ .x = x, .y = y0 }, .{ .x = nx, .y = y1 }, 1, Paint.solid(color));
+                            x = nx;
+                            up = !up;
+                        }
+                    },
+                }
+            }
         }
     }
 
@@ -595,9 +1018,10 @@ pub const CodeEditor = struct {
         const ed = &self.editor;
         const focused = self.out.focused and self.props.enabled;
         const last_line = ed.doc.lineCount() - 1;
-        const first = @min(@as(usize, @intFromFloat(@max(self.scroll_y, 0) / m.line_h)), last_line);
+        const rows = self.visibleRows();
+        const first_row = @min(@as(usize, @intFromFloat(@max(self.scroll_y, 0) / m.line_h)), rows - 1);
         const count = @as(usize, @intFromFloat(@ceil(geo.view_h / m.line_h))) + 2;
-        const stop_line = @min(first + count, last_line + 1);
+        const stop_row = @min(first_row + count, rows);
 
         const text_area: Rect = .{ .x = abs.x + geo.pad.l + geo.gutter_w, .y = abs.y + geo.pad.t, .w = geo.view_w, .h = geo.view_h };
         const origin_x = text_area.x - self.scroll_x;
@@ -608,10 +1032,12 @@ pub const CodeEditor = struct {
         {
             try list.pushClip(text_area);
             defer _ = list.popClip() catch {};
-            var line = first;
-            while (line < stop_line) : (line += 1) {
+            var row = first_row;
+            while (row < stop_row) : (row += 1) {
+                const line = self.lineAtRow(row);
+                if (line > last_line) break;
                 try self.buildLine(line, m);
-                const row_y = text_area.y + @as(f32, @floatFromInt(line)) * m.line_h - self.scroll_y;
+                const row_y = text_area.y + @as(f32, @floatFromInt(row)) * m.line_h - self.scroll_y;
                 const ls = ed.doc.lineStart(line);
                 const le = ed.doc.lineEnd(line);
 
@@ -631,11 +1057,20 @@ pub const CodeEditor = struct {
                     }
                 }
 
+                try self.drawDecorations(list, m, origin_x, row_y, ls, le, true);
+
                 // Text: shape the expanded line, then draw it in colored runs.
                 self.glyphs.clearRetainingCapacity();
                 _ = try self.ui.text.shape(m.font, m.size, self.display.items, &self.glyphs, self.ui.gpa);
                 const baseline = row_y + (m.line_h - (m.ascent + m.descent)) / 2 + m.ascent;
                 try self.emitLine(list, m, origin_x, baseline, row_y, line);
+                try self.drawDecorations(list, m, origin_x, row_y, ls, le, false);
+                if (self.foldStartingAt(line) != null) {
+                    // A marker after the line: the hidden lines are folded here.
+                    const mx = @round(origin_x + self.xOfOffset(ls, le)) + 8;
+                    const my = row_y + m.line_h / 2;
+                    for (0..3) |k| try list.fillRect(.{ .x = mx + @as(f32, @floatFromInt(k)) * 5, .y = my, .w = 2, .h = 2 }, Paint.solid(colors.gutter_text_active));
+                }
 
                 const composing = self.preedit.items.len > 0 and line == head_line and focused;
                 if (show_caret and !composing) {
@@ -661,27 +1096,31 @@ pub const CodeEditor = struct {
             }
         }
 
-        if (self.props.line_numbers and geo.gutter_w > 0) {
+        if ((self.props.line_numbers or self.props.folding) and geo.gutter_w > 0) {
             const gutter: Rect = .{ .x = abs.x + geo.pad.l, .y = abs.y + geo.pad.t, .w = geo.gutter_w, .h = geo.view_h };
             try list.pushClip(gutter);
             defer _ = list.popClip() catch {};
             try list.fillRect(gutter, Paint.solid(colors.gutter_background));
-            var line = first;
-            while (line < stop_line) : (line += 1) {
-                const row_y = gutter.y + @as(f32, @floatFromInt(line)) * m.line_h - self.scroll_y;
+            var row = first_row;
+            while (row < stop_row) : (row += 1) {
+                const line = self.lineAtRow(row);
+                if (line > last_line) break;
+                const row_y = gutter.y + @as(f32, @floatFromInt(row)) * m.line_h - self.scroll_y;
+                if (self.props.folding) try self.drawFoldArrow(list, m, gutter, row_y, line);
+                if (!self.props.line_numbers) continue;
                 const s = std.fmt.bufPrint(&self.number_buf, "{d}", .{line + 1}) catch continue;
                 self.glyphs.clearRetainingCapacity();
                 const r = try self.ui.text.shape(m.font, m.size, s, &self.glyphs, self.ui.gpa);
                 if (self.glyphs.items.len == 0) continue;
                 const baseline = row_y + (m.line_h - (m.ascent + m.descent)) / 2 + m.ascent;
-                const x = gutter.x + gutter.w - gutter_pad - r.width;
+                const x = gutter.x + gutter.w - (if (self.props.folding) fold_w else 0) - gutter_pad - r.width;
                 const color = if (line == head_line and focused) colors.gutter_text_active else colors.gutter_text;
                 try list.glyphRunAt(.{ .x = x, .y = row_y, .w = r.width, .h = m.line_h }, self.glyphs.items, .{ .x = x, .y = baseline }, color, m.font, m.size, !self.ui.text.isMonospace(m.font));
             }
         }
 
         // Scrollbar thumb.
-        const content = @as(f32, @floatFromInt(last_line + 1)) * m.line_h;
+        const content = @as(f32, @floatFromInt(rows)) * m.line_h;
         if (content > geo.view_h and geo.view_h > 0) {
             const thumb_h = @max(geo.view_h * geo.view_h / content, 24);
             const track = geo.view_h - thumb_h;
@@ -775,6 +1214,13 @@ pub const CodeEditor = struct {
             .pointer_enter => out.hovered = true,
             .pointer_leave => out.hovered = false,
             .pointer_down => if (props.enabled and ev.button == 1) {
+                if (self.props.folding) {
+                    if (self.foldColumnLine(ev.local_x, ev.local_y)) |fl| {
+                        self.toggleFold(fl);
+                        ev.markHandled();
+                        return;
+                    }
+                }
                 const off = self.offsetAtPoint(ev.local_x, ev.local_y);
                 if (ev.clicks >= 3) {
                     ed.selectLineAt(off);
@@ -844,19 +1290,19 @@ pub const CodeEditor = struct {
                     moved = true;
                 },
                 .up => {
-                    if (ctrl and alt) ed.addCursorVertical(-1) catch {} else ed.moveVertical(-1, shift) catch {};
+                    if (ctrl and alt) ed.addCursorVertical(-1) catch {} else self.moveRows(-1, shift);
                     moved = true;
                 },
                 .down => {
-                    if (ctrl and alt) ed.addCursorVertical(1) catch {} else ed.moveVertical(1, shift) catch {};
+                    if (ctrl and alt) ed.addCursorVertical(1) catch {} else self.moveRows(1, shift);
                     moved = true;
                 },
                 .page_up => {
-                    ed.moveVertical(-page, shift) catch {};
+                    self.moveRows(-page, shift);
                     moved = true;
                 },
                 .page_down => {
-                    ed.moveVertical(page, shift) catch {};
+                    self.moveRows(page, shift);
                     moved = true;
                 },
                 .home => {
@@ -896,6 +1342,17 @@ pub const CodeEditor = struct {
                             edited = ed.paste(bytes, now) catch false;
                         }
                     }
+                } else break :blk false,
+                .left_bracket => if (cmd and shift and props.folding) {
+                    self.fold(ed.doc.lineOfOffset(ed.primaryHead()));
+                    moved = true;
+                } else break :blk false,
+                .right_bracket => if (cmd and shift and props.folding) {
+                    self.unfold(ed.doc.lineOfOffset(ed.primaryHead()));
+                    moved = true;
+                } else break :blk false,
+                .f, .h => if (cmd and props.on_find != null) {
+                    props.on_find.?.invoke(ev);
                 } else break :blk false,
                 .z => if (cmd and writable) {
                     edited = (if (shift) ed.redo() else ed.undo()) catch false;
@@ -946,7 +1403,7 @@ pub const CodeEditor = struct {
         self.buildLine(line, m) catch return null;
         var x = abs.x + geo.pad.l + geo.gutter_w + self.xOfOffset(self.editor.doc.lineStart(line), head) - self.scroll_x;
         if (self.preedit.items.len > 0) x += self.shapedWidth(m, self.preedit.items[0..self.preedit_cursor]);
-        const y = abs.y + geo.pad.t + @as(f32, @floatFromInt(line)) * m.line_h - self.scroll_y;
+        const y = abs.y + geo.pad.t + @as(f32, @floatFromInt(self.rowOfLine(line))) * m.line_h - self.scroll_y;
         return .{ .x = x, .y = y, .w = 1, .h = m.line_h };
     }
 
@@ -959,8 +1416,13 @@ pub const CodeEditor = struct {
         read_only: bool = false,
         line_numbers: bool = true,
         auto_indent: bool = true,
+        /// Fold arrows in the gutter and fold commands (regions come from indentation).
+        folding: bool = false,
         /// Called after each user edit (typing, deleting, paste, undo/redo).
         on_change: ?event.Callback = null,
+        /// Ctrl+F / Ctrl+H pressed in the editor: the host shows its find bar
+        /// (the callback's `ev.key` is `.f` for find and `.h` for replace).
+        on_find: ?event.Callback = null,
         /// Overrides the theme's editor colors for this editor.
         colors: ?EditorColors = null,
         /// Overrides the theme's painter for this editor (use `setPainter`).
