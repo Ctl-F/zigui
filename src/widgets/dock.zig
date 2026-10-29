@@ -442,6 +442,15 @@ pub const Dock = struct {
         try self.rebuild();
     }
 
+    /// Bring `panel` forward if it is a tab of a group.
+    pub fn activatePanel(self: *Dock, panel: *Panel) void {
+        _ = self;
+        const g = panel.group orelse return;
+        const i = std.mem.indexOfScalar(*Panel, g.panels.items, panel) orelse return;
+        g.active = i;
+        if (g.tabs) |t| t.setActive(i);
+    }
+
     /// Hide `panel` (its contents stay alive; `showPanel` brings it back).
     pub fn closePanel(self: *Dock, panel: *Panel) void {
         self.takeOut(panel);
@@ -453,7 +462,7 @@ pub const Dock = struct {
         if (panel.state != .hidden) return;
         var near: ?*Panel = null;
         if (panel.last_group) |g| {
-            if (g.panels.items.len > 0 and self.isLive(g)) near = g.panels.items[0];
+            if (self.isLive(g) and g.panels.items.len > 0) near = g.panels.items[0];
         }
         try self.dockTab(panel, near);
     }
@@ -532,6 +541,10 @@ pub const Dock = struct {
 
     /// An empty group goes away; its parent split is replaced by the sibling.
     fn collapse(self: *Dock, g: *Node) void {
+        // Panels that remember this group as their last home must forget it.
+        for (self.panels.items) |p| {
+            if (p.last_group == g) p.last_group = null;
+        }
         if (g.float) |f| {
             if (std.mem.indexOfScalar(*Float, self.floats.items, f)) |i| _ = self.floats.orderedRemove(i);
             self.destroyFloatWidgets(f);

@@ -203,7 +203,13 @@ pub const Builder = struct {
     preview_host: Handle = Handle.invalid,
     preview_frame: Handle = Handle.invalid,
     inspector_tabs: Handle = Handle.invalid,
-    inspector_scroll: *ScrollView = undefined,
+    /// The inspector's sections (props, style, layout, events) are panels of
+    /// their own dock, so they can be tabbed, stacked or floated.
+    inspector_dock: *Dock = undefined,
+    section_panels: [4]*dock_mod.Panel = undefined,
+    section_scrolls: [4]*ScrollView = undefined,
+    /// Where the section being built puts its widgets.
+    cur_content: Handle = Handle.invalid,
     status: *Label = undefined,
     buttons: [command_count]?*Button = @splat(null),
     /// Preview frame size in pixels; null grows to fill the preview area.
@@ -488,10 +494,21 @@ pub const Builder = struct {
         const inspector = self.inspector_panel.content;
         self.skin(inspector, .{ .direction = .column, .gap = Length.px(6), .padding = Edges.all(8), .grow = 1 }, panel_bg);
         self.inspector_tabs = try self.node(inspector, .{ .direction = .column, .gap = Length.px(6), .shrink = 0 });
-        self.inspector_scroll = try ui.add(ScrollView, inspector, .{
-            .style = .{ .grow = 1 },
-            .content_style = .{ .direction = .column, .gap = Length.px(6), .padding = .{ .right = Length.px(10) } },
-        });
+        self.inspector_dock = try Dock.create(ui, inspector, .{ .style = .{ .grow = 1 } });
+        const section_names = [4][]const u8{ "Props", "Style", "Layout", "Events" };
+        for (section_names, 0..) |name, i| {
+            const sp = try self.inspector_dock.addPanel(name);
+            ui.tree.get(sp.content).?.style.padding = Edges.all(2);
+            self.section_panels[i] = sp;
+            self.section_scrolls[i] = try ui.add(ScrollView, sp.content, .{
+                .style = .{ .grow = 1 },
+                .content_style = .{ .direction = .column, .gap = Length.px(6), .padding = .{ .right = Length.px(10) } },
+            });
+        }
+        // Tabs of one group to begin with; drag one to stack or float it.
+        try self.inspector_dock.dockTab(self.section_panels[0], null);
+        for (self.section_panels[1..]) |sp| try self.inspector_dock.dockTab(sp, self.section_panels[0]);
+        self.inspector_dock.activatePanel(self.section_panels[0]);
         self.status = try ui.add(Label, self.root, .{});
 
         _ = try ui.add(Label, self.palette, .{ .text = "Add (click or drag)", .size = 15 });
@@ -658,13 +675,29 @@ pub const Builder = struct {
             items[n] = .{ .label = p.title };
             n += 1;
         }
+        if (n < items.len) {
+            items[n] = .{ .separator = true };
+            n += 1;
+        }
+        for (self.inspector_dock.panels.items) |p| {
+            if (n == items.len) break;
+            items[n] = .{ .label = p.title };
+            n += 1;
+        }
         try mb.addMenu("View", items[0..n], menu_mod.PickHook.bind(self, onViewPick));
     }
 
     fn onViewPick(self: *Builder, index: usize) void {
-        if (index >= self.dock.panels.items.len) return;
-        const p = self.dock.panels.items[index];
-        if (p.state == .hidden) self.dock.showPanel(p) catch {} else self.dock.closePanel(p);
+        var d = self.dock;
+        var i = index;
+        if (i >= d.panels.items.len) {
+            // Past the main panels and the separator: the inspector's sections.
+            i -= d.panels.items.len + 1;
+            d = self.inspector_dock;
+            if (i >= d.panels.items.len) return;
+        }
+        const p = d.panels.items[i];
+        if (p.state == .hidden) d.showPanel(p) catch {} else d.closePanel(p);
     }
 
     /// The right-click menu for the selected node: the common commands, then
@@ -1013,7 +1046,7 @@ pub const Builder = struct {
         self.event_fields.clearRetainingCapacity();
         self.layout_fields = @splat(null);
         self.clearChildren(self.inspector_tabs);
-        self.clearChildren(self.inspector_scroll.contentNode());
+        for (self.section_scrolls) |sc| self.clearChildren(sc.contentNode());
     }
 
     const Live = struct {
@@ -1031,8 +1064,9 @@ pub const Builder = struct {
         return .{ .h = h, .info = registry.infoOf(self.ui, h), .w = tn.widget };
     }
 
+    /// The node the inspector section being built adds to.
     fn content(self: *Builder) Handle {
-        return self.inspector_scroll.contentNode();
+        return self.cur_content;
     }
 
     fn fieldRow(self: *Builder, label: []const u8) !Handle {
@@ -1064,18 +1098,16 @@ pub const Builder = struct {
             .on_change = event.Callback.bind(self, onIdChange),
         });
 
-        const tabs = try self.node(self.inspector_tabs, .{ .direction = .row, .gap = Length.px(4) });
-        inline for (.{ Tab.props, Tab.style, Tab.layout, Tab.events }) |t| {
-            const b = try ui.add(Button, tabs, .{
-                .text = @tagName(t),
-                .variant = if (self.tab == t) .primary else .flat,
-            });
-            b.props.on_click = event.Callback.bind(self, onTab);
-            ui.tree.get(b.node).?.user_data = @ptrFromInt(@as(usize, @intFromEnum(t)) + 1);
-        }
-
         const lv = self.live(n);
-        switch (self.tab) {
+        inline for (.{ Tab.props, Tab.style, Tab.layout, Tab.events }) |t| {
+            self.cur_content = self.section_scrolls[@intFromEnum(t)].contentNode();
+            try self.buildSection(t, n, lv);
+        }
+    }
+
+    fn buildSection(self: *Builder, tab: Tab, n: *doc_mod.Node, lv: ?Live) !void {
+        const ui = self.ui;
+        switch (tab) {
             .props => {
                 const l = lv orelse return;
                 const info = l.info orelse {
@@ -1536,10 +1568,10 @@ pub const Builder = struct {
         return 1 + self.extra.items.len;
     }
 
+    /// Bring an inspector section forward (when it is a tab of a group).
     pub fn setTab(self: *Builder, tab: Tab) void {
-        if (self.tab == tab) return;
         self.tab = tab;
-        self.rebuildInspector() catch |e| self.updateStatus(e);
+        self.inspector_dock.activatePanel(self.section_panels[@intFromEnum(tab)]);
     }
 
     pub fn undo(self: *Builder) void {
@@ -1960,12 +1992,6 @@ pub const Builder = struct {
             k += 1;
         }
         self.selectMany(primary, others[0..k]);
-    }
-
-    fn onTab(self: *Builder, ev: *event.Event) void {
-        const tag = self.tagOf(ev.current);
-        if (tag == 0) return;
-        self.setTab(@enumFromInt(tag - 1));
     }
 
     fn markInspectorEdit(self: *Builder, before: u32) void {
@@ -2534,7 +2560,7 @@ fn outlineCount(b: *Builder) u32 {
 
 /// Pick the option named `name` in the first Layout-tab drop-down that offers it.
 fn chooseOption(b: *Builder, name: []const u8) !void {
-    var c = b.ui.tree.get(b.content()).?.first_child;
+    var c = b.ui.tree.get(b.section_scrolls[@intFromEnum(Tab.layout)].contentNode()).?.first_child;
     while (b.ui.tree.get(c)) |n| : (c = n.next) {
         var cc = n.first_child;
         while (b.ui.tree.get(cc)) |m| : (cc = m.next) {
@@ -2556,17 +2582,6 @@ fn formBinding(f: *DynForm, path: []const u8) @TypeOf(f.bindings.items[0]) {
     @panic("no binding");
 }
 
-fn tabButton(b: *Builder, name: []const u8) *Button {
-    var c = b.ui.tree.get(b.inspector_tabs).?.last_child;
-    // The tab row is the last child of the tabs column.
-    var row = b.ui.tree.get(c).?.first_child;
-    while (b.ui.tree.get(row)) |n| : (row = n.next) {
-        const btn: *Button = @ptrCast(@alignCast(n.widget.?));
-        if (std.mem.eql(u8, btn.props.text.bytes, name)) return btn;
-    }
-    c = Handle.invalid;
-    @panic("no tab");
-}
 
 test "a builder starts with an empty box selected and a ready status" {
     const r = try Rig.init(null, .{});
@@ -2965,10 +2980,10 @@ test "the inspector and outline scroll when they overflow" {
     b.setTab(.style);
     try r.frame();
     try r.frame();
-    try testing.expect(b.inspector_scroll.out.overflowing); // the style form is long
-    b.inspector_scroll.scrollTo(0, 100);
+    try testing.expect(b.section_scrolls[@intFromEnum(Tab.style)].out.overflowing); // the style form is long
+    b.section_scrolls[@intFromEnum(Tab.style)].scrollTo(0, 100);
     try r.frame();
-    try testing.expectEqual(@as(f32, 100), b.inspector_scroll.out.scroll_y);
+    try testing.expectEqual(@as(f32, 100), b.section_scrolls[@intFromEnum(Tab.style)].out.scroll_y);
 }
 
 test "ids and event bindings go into the document" {
@@ -3520,4 +3535,41 @@ test "every registered widget is in the toolbox, and the new ones build from the
     const tree: *TreeView = @ptrCast(@alignCast(r.ui.tree.get(r.liveOf(tv.uid)).?.widget.?));
     try testing.expectEqual(@as(usize, 1), tree.childCount(tree_view.no_item));
     try testing.expectEqual(@as(usize, 2), tree.childCount(tree.childAt(tree_view.no_item, 0)));
+}
+
+test "the inspector's sections are dock tabs that can be stacked, and all stay up to date" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    b.select(byId(b, "t").uid);
+    try r.frame();
+    try r.frame();
+    // One group of four tabs to begin with.
+    const props = b.section_panels[@intFromEnum(Tab.props)];
+    const layout = b.section_panels[@intFromEnum(Tab.layout)];
+    try testing.expect(props.group == layout.group);
+    try testing.expectEqual(@as(usize, 4), props.group.?.panels.items.len);
+    // setTab brings a section forward.
+    b.setTab(.layout);
+    try r.frame();
+    try testing.expectEqual(@as(usize, 2), props.group.?.tabs.?.activeTab());
+    // Stack Layout under Props: both visible, both built.
+    try b.inspector_dock.dockSplit(layout, props, .bottom, 220);
+    try r.frame();
+    try r.frame();
+    try testing.expect(props.group != layout.group);
+    try testing.expect(b.props_form != null);
+    try testing.expect(b.layout_fields[@intFromEnum(Builder.LayoutField.gap)] == null); // a label has no gap field... but the size ones exist
+    try testing.expect(b.layout_fields[@intFromEnum(Builder.LayoutField.width_px)] != null);
+    // Selecting another node refreshes both.
+    b.select(byId(b, "a").uid);
+    try r.frame();
+    try testing.expect(b.layout_fields[@intFromEnum(Builder.LayoutField.gap)] != null);
+    typeInto(&r.ui, b.layout_fields[@intFromEnum(Builder.LayoutField.gap)].?, "30");
+    try testing.expectEqual(@as(i64, 30), byId(b, "a").style.field("gap").?.int);
+    // Closing a section and bringing it back.
+    b.inspector_dock.closePanel(layout);
+    try testing.expect(layout.state == .hidden);
+    try b.inspector_dock.showPanel(layout);
+    try testing.expect(layout.state == .docked);
 }

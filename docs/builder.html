@@ -9,7 +9,7 @@
 <li><b>Add</b> palette (left, top; a two-column <a href="layout.html#grid">grid</a>): click to add the widget inside the selected box (or after the selected widget); drag onto the preview or outline to place it exactly.</li>
 <li><b>Outline</b> (left, bottom): the document as a <a href="widgets/tree-view.html">TreeView</a>. Click to select, click an arrow to collapse or expand (your choices survive edits), use the arrow keys to move, drag a row to reorder or reparent.</li>
 <li><b>Preview</b> (center): the UI, not running. Click to select (empty frame space selects the root); hover and selection are drawn as overlays. Drag to move; drag the right, bottom, or corner handles to set pixel width and height. Frame presets (Fill, 360x640, 800x600, 1280x720) show device sizes.</li>
-<li><b>Inspector</b> (right): tabs for <b>props</b> and <b>style</b> (generated from the widget schemas), <b>layout</b> (direction, gap, padding, align, justify, wrap, width/height modes, grow, shrink, margin, position and insets, <b>grid columns</b> on containers, and <b>grid span</b> on children of a grid), and <b>events</b> (bind events to actions).</li>
+<li><b>Inspector</b> (right): the node's title and id, then four sections that are real <a href="widgets/tab-panel.html">tabs</a> of a dock of their own &mdash; <b>Props</b> and <b>Style</b> (generated from the widget schemas), <b>Layout</b> (direction, gap, padding, align, justify, wrap, width/height modes, grow, shrink, margin, position and insets, <b>grid columns</b> on containers, and <b>grid span</b> on children of a grid), and <b>Events</b> (bind events to actions). Drag a section's tab to the edge of the inspector to stack it with another (Props above Layout, say), or float it; right-click a tab to float or close it. All sections stay up to date, and the View menu lists them under a separator to bring a closed one back.</li>
 <li><b>Toolbar</b>: Undo, Redo, Duplicate, Wrap in box, Unwrap, Indent, Outdent, Up, Down, Delete, Cut, Copy, Paste (as ZON text through the system clipboard), Save.</li>
 </ul>
 
@@ -57,5 +57,5 @@ try builder.loadDocument(new_doc);   // swap the document</code></pre>
 <p><code>examples/workbench.zig</code> shows a complete embedding with a text pane.</p>
 
 <h2>Limits</h2>
-<p>No zoom, no live text editing on the preview, no drag from the preview onto the inspector; enum values are cycle buttons.</p>
+<p>No zoom, no live text editing on the preview, no drag from the preview onto the inspector.</p>
 </main><script src="nav.js"></script></body></html>
