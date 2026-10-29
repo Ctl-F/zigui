@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>TabPanel - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>TabPanel</h1>
+<p>A row of tabs over a stack of pages; only the active page shows. Each tab owns a page node that you fill like any container.</p>
+<pre><code>const tabs = try ui.add(zigui.TabPanel, parent, .{ .style = .{ .width = .fill, .height = .fill } });
+const files = try tabs.addTab("Files");              // the page node for that tab
+_ = try ui.add(zigui.Label, files, .{ .text = "..." });
+const search = try tabs.addTab("Search");
+tabs.setActive(1);</code></pre>
+<p>Click a tab, or focus one and use Left/Right (they wrap), to switch. Drag a tab along the bar to reorder it. With <code>closable</code> each tab has an &times;.</p>
+<h2>Options</h2>
+<table>
+<tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>style</code></td><td><code>.{}</code></td><td>Layout of the whole panel (give it a size).</td></tr>
+<tr><td><code>titles</code></td><td><code>&amp;.{}</code></td><td>Tab titles (copied); each gets a page.</td></tr>
+<tr><td><code>active</code></td><td>0</td><td>The shown tab.</td></tr>
+<tr><td><code>closable</code></td><td>false</td><td>A close button on each tab.</td></tr>
+<tr><td><code>close_removes</code></td><td>true</td><td>Closing removes the tab and its page. Turn off to only get <code>on_close</code> (the dock does, to hide panels instead).</td></tr>
+<tr><td><code>on_change</code></td><td>null</td><td>The user switched tabs (<code>setActive</code> does not call it).</td></tr>
+<tr><td><code>on_close</code></td><td>null</td><td>A close button was pressed; <code>out.closed_index</code> says which.</td></tr>
+<tr><td><code>drag_hook</code></td><td>null</td><td>A <code>DragHook</code> told when a tab drag begins, moves, and ends (with the pointer position), so a host can tear tabs out. Reordering along the bar happens anyway.</td></tr>
+</table>
+<h2>Methods</h2>
+<table>
+<tr><th>Method</th><th>Purpose</th></tr>
+<tr><td><code>addTab(title) !Handle</code></td><td>Add a tab at the end; returns its page node.</td></tr>
+<tr><td><code>removeTab(i)</code>, <code>moveTab(from, to)</code>, <code>setTitle(i, title)</code></td><td>Edit the tabs. Titles live in <code>props.titles</code>, one per line.</td></tr>
+<tr><td><code>adoptTab(title, index, node) !void</code>, <code>releaseTab(i) ?Handle</code></td><td>Move a node between panels: <code>releaseTab</code> takes the page's content out (removing the tab), <code>adoptTab</code> puts a node into a new page. This is how the dock moves panels.</td></tr>
+<tr><td><code>pageNode(i)</code>, <code>tabCount()</code>, <code>title(i)</code>, <code>activeTab()</code>, <code>setActive(i)</code></td><td>Queries.</td></tr>
+<tr><td><code>tabRect(i)</code>, <code>barRect()</code>, <code>tabAt(x, y)</code></td><td>Geometry in window coordinates.</td></tr>
+</table>
+<h2>Document</h2>
+<p>A <code>tab_view</code>'s children are its pages, in order; <code>titles</code> names them. The builder adds one with two box pages, and selecting a node on a hidden page brings its tab forward.</p>
+<pre><code>.{ .type = "tab_view", .props = .{ .titles = "General\nAdvanced" }, .style = .{ .width = .fill, .height = .fill },
+   .children = .{ .{ .type = "box" }, .{ .type = "box" } } }</code></pre>
+<h2>Limits</h2>
+<p>Tabs do not scroll or wrap when there are more than fit the width; tabs are on top only.</p>
+</main><script src="../nav.js"></script></body></html>

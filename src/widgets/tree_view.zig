@@ -732,6 +732,7 @@ pub const TreeView = struct {
     /// before it reclaims destroyed widgets, so the old rows' labels are swept
     /// in the same frame and the new ones are prepared and shaped in it.
     pub fn rebuildIfDirty(self: *TreeView) void {
+        if (!self.ui.tree.isValid(self.node)) return; // destroyed; not swept yet
         if (self.rows_dirty) {
             self.rows_dirty = false;
             self.rebuildRows() catch {};

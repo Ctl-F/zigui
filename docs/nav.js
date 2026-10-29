@@ -23,6 +23,8 @@
       ["widgets/split-view.html", "SplitView"],
       ["widgets/tree-view.html", "TreeView"],
       ["widgets/select.html", "Select"],
+      ["widgets/tab-panel.html", "TabPanel"],
+      ["widgets/dock.html", "Dock (panels, floating)"],
       ["widgets/menus.html", "Menus and MenuBar"],
     ]],
     ["Tools", [

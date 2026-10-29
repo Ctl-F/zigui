@@ -388,6 +388,16 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   plus `extra`; Layout-tab edits loop over the selection, delete and duplicate
   are batches over its top-most nodes, and single-node commands are disabled
   while several nodes are selected.
+- TabPanel and Dock (`widgets/tab_panel.zig`, `dock.zig`): titles are one
+  newline-separated `Text` (documents and the builder edit them), pages are
+  nodes created on demand, tabs are rebuilt by `Ui.update` before widget
+  sweeps like `TreeView` rows, and a `DragHook` reports tab drags. The dock
+  keeps a model of groups, splits and floats and regenerates `TabPanel` /
+  `SplitView` widgets from it, detaching and re-adopting each panel's content
+  so state survives. Floats are in-window for now (an OS window per float needs
+  multi-root rendering and per-window input in the platform layer).
+  Destruction is deferred during dispatch, so code that tears nodes down from
+  an event handler must walk children once instead of waiting for them to go.
 - Workbench (`zig build workbench`): a code editor on the ZON text beside the
   builder, synced both ways; parse errors go to the status line. Examples build
   ReleaseSafe by default (`-Dexample_optimize`) because the software rasterizer

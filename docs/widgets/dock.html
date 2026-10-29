@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Dock - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>Dock</h1>
+<p>Panels you can arrange. Panels sit in tabbed groups (<a href="tab-panel.html">TabPanel</a>), groups sit in resizable splits (<a href="split-view.html">SplitView</a>), and any panel &mdash; or a whole floating window &mdash; can be dragged somewhere else. Run <code>zig build docking</code> to try it.</p>
+<pre><code>const dock = try zigui.Dock.create(&amp;ui, parent, .{ .style = .{ .width = .fill, .height = .fill } });
+defer dock.destroy();
+
+const files = try dock.addPanel("Files");     // hidden until docked; files.content is yours to fill
+const editor = try dock.addPanel("Editor");
+_ = try ui.add(zigui.TreeView, files.content, .{ .style = .{ .grow = 1 } });
+
+try dock.dockTab(editor, null);                // into the first group
+try dock.dockSplit(files, editor, .left, 220); // a 220px column to the left of Editor</code></pre>
+<h2>Dragging</h2>
+<table>
+<tr><th>Do this</th><th>Result</th></tr>
+<tr><td>Drag a tab along its own bar</td><td>Reorders the tabs.</td></tr>
+<tr><td>Drop it on another group's tab bar or middle</td><td>It becomes a tab there (at the pointer's position on the bar).</td></tr>
+<tr><td>Drop it near a group's left, right, top or bottom edge</td><td>The group splits and the panel gets the new half (a blue preview shows where).</td></tr>
+<tr><td>Hold Shift while dropping, or drop outside the dock</td><td>The panel floats in a window of its own where it was dropped.</td></tr>
+<tr><td>Drag a floating window's title strip onto a group</td><td>All its tabs dock there (tab or split, as above).</td></tr>
+<tr><td>Drag the grip at a floating window's corner</td><td>Resize it.</td></tr>
+<tr><td>Right-click a tab</td><td>Float (or Dock) / Close.</td></tr>
+<tr><td>Click a tab's &times;</td><td>Closes the panel: it is hidden, not destroyed, and keeps its state. <code>showPanel</code> brings it back where it was.</td></tr>
+</table>
+<p>A group that loses its last panel disappears and its split collapses.</p>
+<h2>API</h2>
+<table>
+<tr><th>Call</th><th>Purpose</th></tr>
+<tr><td><code>Dock.create(ui, parent, .{ .style })</code>, <code>destroy()</code></td><td>The dock is a heap object; <code>dock.host</code> is its node.</td></tr>
+<tr><td><code>addPanel(title) !*Panel</code></td><td>A new hidden panel. <code>panel.content</code> is its content node, <code>panel.state</code> is <code>.hidden</code>, <code>.docked</code> or <code>.floating</code>, <code>panel.user</code> is yours.</td></tr>
+<tr><td><code>dockTab(panel, near)</code></td><td>Tab into <code>near</code>'s group, or the first group (creating the root group if the dock is empty).</td></tr>
+<tr><td><code>dockSplit(panel, near, side, size)</code></td><td>A new group beside <code>near</code>'s: <code>side</code> is <code>.left .right .top .bottom</code>, <code>size</code> its pixels along the split.</td></tr>
+<tr><td><code>floatPanel(panel, rect)</code></td><td>Float it at <code>rect</code> (relative to the dock).</td></tr>
+<tr><td><code>closePanel(panel)</code>, <code>showPanel(panel)</code>, <code>destroyPanel(panel)</code></td><td>Hide, restore, or remove for good (destroying its content).</td></tr>
+<tr><td><code>panelNamed(title)</code>, <code>rebuild()</code></td><td>Lookup; rebuild the widgets from the model (done after every change).</td></tr>
+</table>
+<h2>How it works</h2>
+<p>The layout is a model (groups, splits, floating windows) that the dock turns into <code>TabPanel</code>s and <code>SplitView</code>s. After each change it detaches every panel's content, rebuilds the widgets and re-parents the content into its new page, so a panel keeps its widgets, text and scroll state when it moves. Split sizes are remembered across rebuilds.</p>
+<h2>Limits</h2>
+<ul>
+<li>Floating windows live <i>inside</i> the dock's window; they cannot leave the application window yet (that needs multi-window support in the platform layer).</li>
+<li>The layout is not saved and restored yet.</li>
+<li>Tabs only on top; no auto-hide sidebars.</li>
+</ul>
+</main><script src="../nav.js"></script></body></html>

@@ -155,6 +155,8 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(builder_exe);
     const workbench_exe = addExample(b, ex, target, example_optimize, "workbench", "examples/workbench.zig", false);
     b.installArtifact(workbench_exe);
+    const docking_exe = addExample(b, ex, target, example_optimize, "docking", "examples/docking.zig", false);
+    b.installArtifact(docking_exe);
     const paint_exe = addExample(b, ex, target, example_optimize, "paint", "examples/paint.zig", false);
     b.installArtifact(paint_exe);
 
@@ -169,6 +171,10 @@ pub fn build(b: *std.Build) void {
     const run_workbench = b.addRunArtifact(workbench_exe);
     const workbench_step = b.step("workbench", "Build and run the workbench: ZON text beside the visual builder");
     workbench_step.dependOn(&run_workbench.step);
+
+    const run_docking = b.addRunArtifact(docking_exe);
+    const docking_step = b.step("docking", "Build and run the docking demo (tabs, splits, floating panels)");
+    docking_step.dependOn(&run_docking.step);
 
     const run_paint = b.addRunArtifact(paint_exe);
     const paint_step = b.step("paint", "Build and run the paint example (canvas with an offscreen surface)");

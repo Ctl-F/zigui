@@ -61,6 +61,7 @@ const Select = @import("../widgets/select.zig").Select;
 const SplitView = @import("../widgets/split_view.zig").SplitView;
 const menu_mod = @import("../widgets/menu.zig");
 const MenuBar = @import("../widgets/menu_bar.zig").MenuBar;
+const TabPanel = @import("../widgets/tab_panel.zig").TabPanel;
 const tree_view = @import("../widgets/tree_view.zig");
 const TreeView = tree_view.TreeView;
 const registry = @import("../widgets/registry.zig");
@@ -1415,6 +1416,7 @@ pub const Builder = struct {
         self.editor.breakCoalescing();
         self.selected = uid;
         self.extra.clearRetainingCapacity();
+        self.revealInTabs(uid);
         self.syncOutlineSelection();
         self.rebuildInspector() catch |e| self.updateStatus(e);
         self.updateButtons();
@@ -1450,7 +1452,23 @@ pub const Builder = struct {
         self.afterSelectionChange();
     }
 
+    /// Show the tabs that contain `uid` (selecting a node on a hidden tab page
+    /// brings that page forward).
+    fn revealInTabs(self: *Builder, uid: u32) void {
+        const inst = self.inst orelse return;
+        var child = self.doc().find(uid) orelse return;
+        while (child.parent) |p| : (child = p) {
+            if (!std.mem.eql(u8, p.type_name, "tab_view")) continue;
+            const h = inst.handleOf(p.uid) orelse continue;
+            const tn = self.ui.tree.get(h) orelse continue;
+            if (tn.widget_type != ui_mod.typeTag(TabPanel)) continue;
+            const tabs: *TabPanel = @ptrCast(@alignCast(tn.widget orelse continue));
+            if (child.indexInParent()) |i| tabs.setActive(i);
+        }
+    }
+
     fn afterSelectionChange(self: *Builder) void {
+        self.revealInTabs(self.selected);
         self.syncOutlineSelection();
         self.rebuildInspector() catch |e| self.updateStatus(e);
         self.updateButtons();
@@ -1518,7 +1536,7 @@ pub const Builder = struct {
 
     fn addWidgetInner(self: *Builder, type_name: []const u8, parent: u32, index: usize) !void {
         // A widget with starting children is one undo step.
-        const multi = std.mem.eql(u8, type_name, "split_view");
+        const multi = std.mem.eql(u8, type_name, "split_view") or std.mem.eql(u8, type_name, "tab_view");
         if (multi) self.editor.beginBatch();
         errdefer if (multi) self.editor.abortBatch();
         const n = try self.editor.addNode(parent, index, type_name);
@@ -1527,8 +1545,16 @@ pub const Builder = struct {
         if (std.mem.eql(u8, type_name, "label")) n.props = try zon.parse(a, defaults.label_props, null);
         if (std.mem.eql(u8, type_name, "button")) n.props = try zon.parse(a, defaults.button_props, null);
         if (std.mem.eql(u8, type_name, doc_mod.box_type)) n.style = try zon.parse(a, defaults.box_style, null);
-        for ([_][]const u8{ "scroll_view", "code_editor", "canvas" }) |area| {
+        for ([_][]const u8{ "scroll_view", "code_editor", "canvas", "tab_view" }) |area| {
             if (std.mem.eql(u8, type_name, area)) n.style = try zon.parse(a, defaults.area_style, null);
+        }
+        if (std.mem.eql(u8, type_name, "tab_view")) {
+            n.props = try zon.parse(a, ".{ .titles = \"Tab 1\\nTab 2\" }", null);
+            // Each tab starts with a box page that fills it.
+            for (0..2) |_| {
+                const page = try self.editor.addNode(n.uid, n.children.items.len, doc_mod.box_type);
+                page.style = try zon.parse(a, defaults.pane_style, null);
+            }
         }
         if (std.mem.eql(u8, type_name, "split_view")) {
             n.style = try zon.parse(a, defaults.area_style, null);
@@ -3389,4 +3415,26 @@ test "copy, cut, paste, move, and wrap work on a multi-selection" {
     b.undo();
     try r.frame();
     try testing.expectEqual(@as(usize, 3), b.doc().root.children.items.len);
+}
+
+test "a tab view from the palette starts with two filled pages, and selecting inside one shows its tab" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    b.select(b.doc().root.uid);
+    clickButton(paletteButton(b, "tab_view"));
+    const tv = b.selectedNode();
+    try testing.expectEqual(@as(usize, 2), tv.children.items.len);
+    try testing.expectEqualStrings("Tab 1\nTab 2", tv.props.field("titles").?.string);
+    try testing.expectEqualStrings("fill", tv.style.field("height").?.tag);
+    try r.frame();
+    try r.frame();
+    const tabs: *TabPanel = @ptrCast(@alignCast(r.ui.tree.get(r.liveOf(tv.uid)).?.widget.?));
+    try testing.expectEqual(@as(usize, 2), tabs.tabCount());
+    try testing.expectEqual(@as(usize, 0), tabs.activeTab());
+    // Select the second page: its tab comes forward.
+    b.select(tv.children.items[1].uid);
+    try testing.expectEqual(@as(usize, 1), tabs.activeTab());
+    try r.frame();
+    try testing.expect(!r.ui.tree.get(r.liveOf(tv.children.items[1].uid)).?.flags.hidden);
 }
