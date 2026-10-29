@@ -45,6 +45,8 @@ const Item = struct {
     parent: u32 = no_item,
     children: std.ArrayListUnmanaged(u32) = .empty,
     expanded: bool = false,
+    /// Part of the selection (the primary item is always picked).
+    picked: bool = false,
     user: u64 = 0,
     /// The row node while the item is visible.
     row: Handle = Handle.invalid,
@@ -79,6 +81,8 @@ pub const TreeView = struct {
     /// Visible items, top to bottom (kept in step with the rows).
     order: std.ArrayListUnmanaged(u32) = .empty,
     selected_id: u32 = no_item,
+    /// Where a shift-click or shift-arrow range starts.
+    anchor_id: u32 = no_item,
     hover_id: u32 = no_item,
     rows_dirty: bool = false,
     pending_scroll: u32 = no_item,
@@ -96,6 +100,9 @@ pub const TreeView = struct {
         /// A double-click also expands or collapses an item that has children.
         /// Turn it off when double-click means something else (rename, open).
         activate_toggles: bool = true,
+        /// Ctrl-click toggles items and Shift-click or Shift-arrows select a
+        /// range. `out.selected` is then the item last clicked (the primary).
+        multi_select: bool = false,
 
         pub const dirty_map = .{
             .indent = shadow.Category.layout,
@@ -128,6 +135,7 @@ pub const TreeView = struct {
         on_activate: ?event.Callback = null,
         on_toggle: ?event.Callback = null,
         activate_toggles: bool = true,
+        multi_select: bool = false,
     };
 
     pub const listened_kinds = [_]event.EventKind{ .pointer_down, .pointer_move, .pointer_leave, .key_down, .focus_in, .focus_out };
@@ -162,6 +170,7 @@ pub const TreeView = struct {
         self.props.on_activate = o.on_activate;
         self.props.on_toggle = o.on_toggle;
         self.props.activate_toggles = o.activate_toggles;
+        self.props.multi_select = o.multi_select;
         try self.ui.tree.setLabel(self.node, o.label);
         self.scroll = try self.ui.add(ScrollView, self.node, .{
             .style = .{ .grow = 1 },
@@ -360,15 +369,125 @@ pub const TreeView = struct {
         self.pending_scroll = id;
     }
 
+    /// Select only `id` (or nothing with `no_item`).
     fn setSelected(self: *TreeView, id: u32, notify: bool) void {
-        if (self.selected_id == id) return;
+        var changed = self.selected_id != id;
+        for (self.items.items) |maybe| {
+            const it = maybe orelse continue;
+            if (it.picked and it.id != id) {
+                it.picked = false;
+                changed = true;
+                self.restyle(it.id);
+            }
+        }
+        if (id != no_item) {
+            if (self.get(id)) |it| {
+                if (!it.picked) {
+                    it.picked = true;
+                    changed = true;
+                }
+            }
+        }
         const old = self.selected_id;
         self.selected_id = id;
         self.out.selected = id;
+        self.anchor_id = id;
+        if (!changed) return;
         self.out.changed = true;
         self.restyle(old);
         self.restyle(id);
         if (notify) self.fire(self.props.on_select);
+    }
+
+    /// Ctrl-click: add or remove `id` from the selection.
+    fn togglePick(self: *TreeView, id: u32) void {
+        const it = self.get(id) orelse return;
+        it.picked = !it.picked;
+        if (it.picked) {
+            self.selected_id = id;
+        } else if (self.selected_id == id) {
+            self.selected_id = no_item;
+            for (self.items.items) |maybe| {
+                const o = maybe orelse continue;
+                if (o.picked) self.selected_id = o.id;
+            }
+        }
+        self.out.selected = self.selected_id;
+        self.out.changed = true;
+        self.anchor_id = id;
+        self.restyle(id);
+        self.fire(self.props.on_select);
+    }
+
+    /// Shift-click: select everything visible between the anchor and `id`.
+    fn pickRange(self: *TreeView, id: u32) void {
+        self.computeOrder();
+        var a: ?usize = null;
+        var b: ?usize = null;
+        for (self.order.items, 0..) |o, i| {
+            if (o == self.anchor_id) a = i;
+            if (o == id) b = i;
+        }
+        const from = a orelse b orelse return;
+        const to = b orelse return;
+        const lo = @min(from, to);
+        const hi = @max(from, to);
+        for (self.items.items) |maybe| {
+            const it = maybe orelse continue;
+            var want = false;
+            for (self.order.items[lo .. hi + 1]) |o| want = want or o == it.id;
+            if (it.picked != want) {
+                it.picked = want;
+                self.restyle(it.id);
+            }
+        }
+        self.selected_id = id;
+        self.out.selected = id;
+        self.out.changed = true;
+        self.fire(self.props.on_select);
+    }
+
+    /// Replace the selection with `ids`, `primary` being the main one. Does not
+    /// call `on_select` (the host is the one changing it).
+    pub fn setSelection(self: *TreeView, ids: []const u32, primary: u32) void {
+        for (self.items.items) |maybe| {
+            const it = maybe orelse continue;
+            var want = it.id == primary;
+            for (ids) |i| want = want or i == it.id;
+            if (it.picked != want) {
+                it.picked = want;
+                self.restyle(it.id);
+            }
+        }
+        if (primary != no_item) self.ensureVisible(primary);
+        self.selected_id = primary;
+        self.out.selected = primary;
+        self.anchor_id = primary;
+    }
+
+    pub fn isSelected(self: *const TreeView, id: u32) bool {
+        return if (self.get(id)) |it| it.picked else false;
+    }
+
+    pub fn selectedCount(self: *const TreeView) usize {
+        var n: usize = 0;
+        for (self.items.items) |maybe| {
+            if (maybe) |it| n += @intFromBool(it.picked);
+        }
+        return n;
+    }
+
+    /// The selected items in creation order, up to `buf.len` of them.
+    pub fn selectedItems(self: *const TreeView, buf: []u32) []u32 {
+        var n: usize = 0;
+        for (self.items.items) |maybe| {
+            const it = maybe orelse continue;
+            if (it.picked and n < buf.len) {
+                buf[n] = it.id;
+                n += 1;
+            }
+        }
+        return buf[0..n];
     }
 
     fn fire(self: *TreeView, cb: ?event.Callback) void {
@@ -478,7 +597,7 @@ pub const TreeView = struct {
         const it = self.get(id) orelse return;
         const n = self.ui.tree.get(it.row) orelse return;
         const theme = &self.ui.theme;
-        const bg: Color = if (id == self.selected_id)
+        const bg: Color = if (it.picked)
             (if (self.out.focused) theme.field.selection else Color.rgba(255, 255, 255, 40))
         else if (id == self.hover_id)
             Color.rgba(255, 255, 255, 18)
@@ -539,6 +658,8 @@ pub const TreeView = struct {
             self.setExpanded(id, !expanded);
             return;
         }
+        if (self.props.multi_select and (ev.mods.ctrl or ev.mods.gui)) return self.togglePick(id);
+        if (self.props.multi_select and ev.mods.shift) return self.pickRange(id);
         self.setSelected(id, true);
         if (ev.clicks >= 2) {
             // Callbacks above may have changed the tree: only use `id` if it is still there.
@@ -600,7 +721,7 @@ pub const TreeView = struct {
         }
         ev.markHandled();
         if (go) |id| {
-            self.setSelected(id, true);
+            if (self.props.multi_select and ev.mods.shift) self.pickRange(id) else self.setSelected(id, true);
             self.pending_scroll = id;
         }
     }
@@ -852,4 +973,62 @@ test "a long tree scrolls the selection into view" {
     const view = r.ui.tree.absoluteRect(t.scroll.node).?;
     const row = t.rowRect(last).?;
     try testing.expect(row.bottom() <= view.bottom() + 0.5);
+}
+
+test "multi-select: ctrl toggles, shift selects a range, plain click collapses to one" {
+    const r = try Rig.init();
+    defer r.deinit();
+    const t = try r.ui.add(TreeView, r.ui.tree.root, .{ .style = .{ .width = Length.px(200), .height = Length.px(200), .shrink = 0 }, .multi_select = true });
+    const s = try sample(t);
+    t.expandAll();
+    try r.settle();
+    // order: alpha, one, two, beta
+    const p_a = rowPoint(t, s.a, 60);
+    const p_two = rowPoint(t, s.a2, 60);
+    const p_b = rowPoint(t, s.b, 60);
+    r.click(p_a.x, p_a.y, 1);
+    try testing.expectEqual(@as(usize, 1), t.selectedCount());
+    r.ui.input.mods = .{ .ctrl = true };
+    r.click(p_b.x, p_b.y, 1);
+    try testing.expectEqual(@as(usize, 2), t.selectedCount());
+    try testing.expect(t.isSelected(s.a) and t.isSelected(s.b));
+    try testing.expectEqual(s.b, t.selected());
+    r.click(p_a.x, p_a.y, 1); // ctrl-click again removes it
+    try testing.expect(!t.isSelected(s.a) and t.selectedCount() == 1);
+    r.ui.input.mods = .{ .shift = true };
+    r.click(p_two.x, p_two.y, 1); // the anchor is alpha (last ctrl-clicked): alpha..two
+    try testing.expectEqual(@as(usize, 3), t.selectedCount());
+    try testing.expect(t.isSelected(s.a) and t.isSelected(s.a1) and t.isSelected(s.a2) and !t.isSelected(s.b));
+    var buf: [8]u32 = undefined;
+    try testing.expectEqual(@as(usize, 3), t.selectedItems(&buf).len);
+    r.ui.input.mods = .{};
+    r.click(p_a.x, p_a.y, 1);
+    try testing.expectEqual(@as(usize, 1), t.selectedCount());
+    try testing.expectEqual(s.a, t.selected());
+
+    // Shift+Down extends from the anchor.
+    r.ui.setFocus(t.node);
+    try r.frame();
+    r.ui.key(.down, .{ .shift = true }, true, false);
+    r.ui.key(.down, .{ .shift = true }, true, false);
+    try testing.expectEqual(@as(usize, 3), t.selectedCount());
+    // setSelection replaces it without calling back.
+    t.setSelection(&.{ s.a1, s.b }, s.b);
+    try testing.expect(t.isSelected(s.a1) and t.isSelected(s.b) and !t.isSelected(s.a));
+    try testing.expectEqual(@as(usize, 2), t.selectedCount());
+}
+
+test "without multi_select, ctrl-click just selects" {
+    const r = try Rig.init();
+    defer r.deinit();
+    const t = try r.tv();
+    const s = try sample(t);
+    try r.settle();
+    const p_a = rowPoint(t, s.a, 60);
+    const p_b = rowPoint(t, s.b, 60);
+    r.click(p_a.x, p_a.y, 1);
+    r.ui.input.mods = .{ .ctrl = true };
+    r.click(p_b.x, p_b.y, 1);
+    try testing.expectEqual(@as(usize, 1), t.selectedCount());
+    try testing.expectEqual(s.b, t.selected());
 }

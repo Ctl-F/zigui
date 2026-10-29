@@ -40,6 +40,7 @@ fn onSelect(self: *App, _: *zigui.event.Event) void {
 <tr><td><code>label</code></td><td><code>"Tree"</code></td><td>Accessible name.</td></tr>
 <tr><td><code>indent</code></td><td>16</td><td>Pixels of indentation per level.</td></tr>
 <tr><td><code>row_height</code></td><td>22</td><td>Row height in pixels.</td></tr>
+<tr><td><code>multi_select</code></td><td>false</td><td>Ctrl-click toggles an item in the selection, Shift-click (or Shift+Up/Down) selects the visible range from the anchor, a plain click selects just one. <code>out.selected</code> is then the primary item (the one last clicked).</td></tr>
 <tr><td><code>on_select</code></td><td>null</td><td>The selection changed (also for programmatic <code>select</code>); read <code>out.selected</code>.</td></tr>
 <tr><td><code>on_activate</code></td><td>null</td><td>An item was activated; <code>out.activated_item</code> says which.</td></tr>
 <tr><td><code>on_toggle</code></td><td>null</td><td>An item was expanded or collapsed.</td></tr>
@@ -64,6 +65,7 @@ fn onSelect(self: *App, _: *zigui.event.Event) void {
 <tr><td><code>setUserData(id, u64)</code>, <code>userData(id)</code></td><td>Your own value per item.</td></tr>
 <tr><td><code>parentOf(id)</code>, <code>childCount(parent)</code>, <code>childAt(parent, index)</code>, <code>depthOf(id)</code>, <code>exists(id)</code></td><td>Structure queries.</td></tr>
 <tr><td><code>setExpanded(id, bool)</code>, <code>isExpanded(id)</code>, <code>expandAll()</code>, <code>collapseAll()</code></td><td>Expansion.</td></tr>
+<tr><td><code>isSelected(id)</code>, <code>selectedCount()</code>, <code>selectedItems(buf)</code>, <code>setSelection(ids, primary)</code></td><td>The whole selection (with <code>multi_select</code>); <code>setSelection</code> replaces it without calling <code>on_select</code>.</td></tr>
 <tr><td><code>select(id)</code>, <code>selected()</code></td><td>Select an item (or <code>no_item</code>); expands its ancestors and scrolls to it.</td></tr>
 <tr><td><code>ensureVisible(id)</code></td><td>Expand ancestors and scroll without selecting.</td></tr>
 <tr><td><code>visibleItems()</code>, <code>rowRect(id)</code>, <code>itemAt(x, y)</code>, <code>rowNode(id)</code></td><td>Geometry in window coordinates, for hosts that add drag and drop (the builder's outline does).</td></tr>
@@ -73,7 +75,7 @@ fn onSelect(self: *App, _: *zigui.event.Event) void {
 <h2>Limits</h2>
 <ul>
 <li>Rows are real nodes, rebuilt after structural changes: thousands of items are fine, hundreds of thousands are not (no virtualization yet).</li>
-<li>Rows show one line of text; no icons, checkboxes, multi-selection, inline rename, or built-in drag and drop yet. Use <code>rowRect</code>/<code>itemAt</code> to build drag and drop.</li>
+<li>Rows show one line of text; no icons, checkboxes, inline rename, or built-in drag and drop yet. Use <code>rowRect</code>/<code>itemAt</code> to build drag and drop.</li>
 <li>There is no model interface: the tree holds its own copy of items. Keep your data in sync by calling the methods above.</li>
 </ul>
 </main><script src="../nav.js"></script></body></html>

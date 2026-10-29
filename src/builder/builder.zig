@@ -128,7 +128,9 @@ const command_titles = [command_count][]const u8{
 
 /// Most rectangles the preview overlay can occupy: hover and selection outlines
 /// (four edges each), three handles, and a drop marker.
-const overlay_max = 4 + 4 + 3 + 1;
+/// Most nodes that can be selected together.
+const max_selected = 32;
+const overlay_max = 4 + 4 + 3 + 1 + 4 * max_selected;
 
 const Source = enum { preview, outline, palette };
 
@@ -189,6 +191,8 @@ pub const Builder = struct {
     /// Document uid to outline item.
     outline_items: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     syncing_outline: bool = false,
+    /// The other selected nodes, besides `selected` (the primary one).
+    extra: std.ArrayListUnmanaged(u32) = .empty,
     preview_host: Handle = Handle.invalid,
     preview_frame: Handle = Handle.invalid,
     inspector_tabs: Handle = Handle.invalid,
@@ -268,6 +272,7 @@ pub const Builder = struct {
             self.event_fields.deinit(self.gpa);
             self.outline_expanded.deinit(self.gpa);
             self.outline_items.deinit(self.gpa);
+            self.extra.deinit(self.gpa);
         }
         try self.rebuildAll();
         return self;
@@ -285,6 +290,7 @@ pub const Builder = struct {
         self.event_fields.deinit(self.gpa);
         self.outline_expanded.deinit(self.gpa);
         self.outline_items.deinit(self.gpa);
+        self.extra.deinit(self.gpa);
         if (self.clip_text) |t| self.gpa.free(t);
         self.editor.deinit();
         self.gpa.destroy(self);
@@ -414,6 +420,7 @@ pub const Builder = struct {
             .on_select = event.Callback.bind(self, onOutlineSelect),
             .on_activate = event.Callback.bind(self, onOutlineActivate),
             .activate_toggles = false,
+            .multi_select = true,
         });
         for ([_]event.EventKind{ .pointer_down, .pointer_move, .pointer_up }) |kind| {
             try ui.tree.addListener(self.outline.node, .{ .kind = kind, .callback = event.Callback.bind(self, onOutlinePointer) });
@@ -773,6 +780,14 @@ pub const Builder = struct {
     fn rebuildAll(self: *Builder) !void {
         self.built_version = self.editor.version;
         if (self.doc().find(self.selected) == null) self.selected = self.doc().root.uid;
+        var k: usize = 0;
+        for (self.extra.items) |u| {
+            if (self.doc().find(u) != null and u != self.selected) {
+                self.extra.items[k] = u;
+                k += 1;
+            }
+        }
+        self.extra.shrinkRetainingCapacity(k);
         self.clearInspector();
         if (self.inst) |*i| i.destroy();
         self.inst = null;
@@ -833,7 +848,12 @@ pub const Builder = struct {
                 if (self.ui.tree.absoluteRect(h)) |r| outlineStrips(r, false, out, &n);
             }
         }
-        if (self.selectionRect()) |r| outlineStrips(r, self.selected != self.doc().root.uid, out, &n);
+        if (self.selectionRect()) |r| outlineStrips(r, self.selected != self.doc().root.uid and self.extra.items.len == 0, out, &n);
+        for (self.extra.items) |uid| {
+            if (inst.handleOf(uid)) |h| {
+                if (self.ui.tree.absoluteRect(h)) |r| outlineStrips(r, false, out, &n);
+            }
+        }
         if (self.drop) |d| {
             out[n] = .{ .x = d.indicator.x - 4, .y = d.indicator.y - 4, .w = d.indicator.w + 8, .h = d.indicator.h + 8 };
             n += 1;
@@ -882,11 +902,19 @@ pub const Builder = struct {
 
     /// Show the document's selection in the outline.
     fn syncOutlineSelection(self: *Builder) void {
-        const item = self.outline_items.get(self.selected) orelse return;
+        const primary = self.outline_items.get(self.selected) orelse return;
         const was = self.syncing_outline;
         self.syncing_outline = true;
         defer self.syncing_outline = was;
-        self.outline.select(item);
+        var items: [max_selected]u32 = undefined;
+        var k: usize = 0;
+        for (self.extra.items) |uid| {
+            if (self.outline_items.get(uid)) |it| {
+                items[k] = it;
+                k += 1;
+            }
+        }
+        self.outline.setSelection(items[0..k], primary);
     }
 
     fn clearInspector(self: *Builder) void {
@@ -935,7 +963,10 @@ pub const Builder = struct {
         const n = self.selectedNode();
 
         var title_buf: [64]u8 = undefined;
-        const title = std.fmt.bufPrint(&title_buf, "{s} (#{d})", .{ n.type_name, n.uid }) catch n.type_name;
+        const title = if (self.extra.items.len > 0)
+            std.fmt.bufPrint(&title_buf, "{s} (#{d}) + {d} more", .{ n.type_name, n.uid, self.extra.items.len }) catch n.type_name
+        else
+            std.fmt.bufPrint(&title_buf, "{s} (#{d})", .{ n.type_name, n.uid }) catch n.type_name;
         _ = try ui.add(Label, self.inspector_tabs, .{ .text = title, .size = 15 });
 
         const id_row = try self.node(self.inspector_tabs, .{ .direction = .row, .gap = Length.px(8), .align_items = .center });
@@ -1126,26 +1157,29 @@ pub const Builder = struct {
     }
 
     fn applyLayoutChoice(self: *Builder, group: LayoutChoice, choice: usize) void {
-        const n = self.selectedNode();
-        const l = self.live(n) orelse return;
-        const st = &self.ui.tree.get(l.h).?.style;
-        switch (group) {
-            .layout_mode => if (choice == 2) {
-                if (st.grid_columns == 0) st.grid_columns = 2;
-            } else {
-                st.grid_columns = 0;
-                st.direction = @enumFromInt(choice);
-            },
-            .direction => st.direction = @enumFromInt(choice),
-            .align_items => st.align_items = @enumFromInt(choice),
-            .justify => st.justify = @enumFromInt(choice),
-            .width_mode => st.width = modeLength(choice, st.width),
-            .height_mode => st.height = modeLength(choice, st.height),
-            .align_self => st.align_self = if (choice == 0) null else @enumFromInt(choice - 1),
-            .position => st.position = @enumFromInt(choice),
-            .wrap => st.wrap = choice == 1,
+        var buf: [max_selected]u32 = undefined;
+        for (self.selection(&buf)) |uid| {
+            const n = self.doc().find(uid) orelse continue;
+            const l = self.live(n) orelse continue;
+            const st = &self.ui.tree.get(l.h).?.style;
+            switch (group) {
+                .layout_mode => if (choice == 2) {
+                    if (st.grid_columns == 0) st.grid_columns = 2;
+                } else {
+                    st.grid_columns = 0;
+                    st.direction = @enumFromInt(choice);
+                },
+                .direction => st.direction = @enumFromInt(choice),
+                .align_items => st.align_items = @enumFromInt(choice),
+                .justify => st.justify = @enumFromInt(choice),
+                .width_mode => st.width = modeLength(choice, st.width),
+                .height_mode => st.height = modeLength(choice, st.height),
+                .align_self => st.align_self = if (choice == 0) null else @enumFromInt(choice - 1),
+                .position => st.position = @enumFromInt(choice),
+                .wrap => st.wrap = choice == 1,
+            }
+            self.commitLiveStyle(l.h);
         }
-        self.commitLiveStyle(l.h);
         // The panel may change shape (absolute insets, grid span): rebuild it.
         self.rebuildInspector() catch |e| self.updateStatus(e);
     }
@@ -1162,63 +1196,78 @@ pub const Builder = struct {
         };
     }
 
-    fn onLayoutField(self: *Builder, _: *event.Event) void {
+    /// A Layout-tab text field changed: apply that field to every selected node.
+    fn onLayoutField(self: *Builder, ev: *event.Event) void {
         if (self.building) return;
-        const n = self.selectedNode();
-        const l = self.live(n) orelse return;
-        const st = &self.ui.tree.get(l.h).?.style;
+        var only: ?usize = null;
         for (self.layout_fields, 0..) |maybe, i| {
-            const f = maybe orelse continue;
-            const which: LayoutField = @enumFromInt(i);
-            if (@intFromEnum(which) >= @intFromEnum(LayoutField.inset_left)) {
-                const text = std.mem.trim(u8, f.text(), " ");
-                const len: Length = if (text.len == 0) .auto else Length.px(std.fmt.parseFloat(f32, text) catch continue);
-                switch (which) {
-                    .inset_left => st.inset.left = len,
-                    .inset_top => st.inset.top = len,
-                    .inset_right => st.inset.right = len,
-                    .inset_bottom => st.inset.bottom = len,
-                    else => {},
-                }
-                continue;
-            }
-            const v = std.fmt.parseFloat(f32, std.mem.trim(u8, f.text(), " ")) catch continue;
-            if (!std.math.isFinite(v)) continue;
-            switch (@as(LayoutField, @enumFromInt(i))) {
-                .gap => if (lengthPx(st.gap) != v) {
-                    st.gap = Length.px(v);
-                },
-                .padding => if (lengthPx(st.padding.left) != v) {
-                    st.padding = Edges.all(v);
-                },
-                .margin => if (lengthPx(st.margin.left) != v) {
-                    st.margin = Edges.all(v);
-                },
-                .width_px => if (lengthPx(st.width) != v and st.width != .fill and st.width != .fit and st.width != .auto) {
-                    st.width = Length.px(v);
-                },
-                .height_px => if (lengthPx(st.height) != v and st.height != .fill and st.height != .fit and st.height != .auto) {
-                    st.height = Length.px(v);
-                },
-                .grow => st.grow = v,
-                .shrink => st.shrink = v,
-                .grid_columns => if (v >= 0 and v <= 64 and @as(f32, @floatFromInt(st.grid_columns)) != v) {
-                    st.grid_columns = @intFromFloat(v);
-                },
-                .grid_span => if (v >= 1 and v <= 64 and @as(f32, @floatFromInt(st.grid_span)) != v) {
-                    st.grid_span = @intFromFloat(v);
-                },
-                else => {},
+            if (maybe) |f| {
+                if (f.node.eql(ev.current)) only = i;
             }
         }
-        self.commitLiveStyle(l.h);
+        var buf: [max_selected]u32 = undefined;
+        for (self.selection(&buf)) |uid| {
+            const n = self.doc().find(uid) orelse continue;
+            const l = self.live(n) orelse continue;
+            const st = &self.ui.tree.get(l.h).?.style;
+            for (self.layout_fields, 0..) |maybe, i| {
+                const f = maybe orelse continue;
+                if (only != null and only.? != i) continue;
+                applyLayoutField(st, @enumFromInt(i), f);
+            }
+            self.commitLiveStyle(l.h);
+        }
+    }
+
+    fn applyLayoutField(st: *Style, which: LayoutField, f: *TextField) void {
+        if (@intFromEnum(which) >= @intFromEnum(LayoutField.inset_left)) {
+            const text = std.mem.trim(u8, f.text(), " ");
+            const len: Length = if (text.len == 0) .auto else Length.px(std.fmt.parseFloat(f32, text) catch return);
+            switch (which) {
+                .inset_left => st.inset.left = len,
+                .inset_top => st.inset.top = len,
+                .inset_right => st.inset.right = len,
+                .inset_bottom => st.inset.bottom = len,
+                else => {},
+            }
+            return;
+        }
+        const v = std.fmt.parseFloat(f32, std.mem.trim(u8, f.text(), " ")) catch return;
+        if (!std.math.isFinite(v)) return;
+        switch (which) {
+            .gap => if (lengthPx(st.gap) != v) {
+                st.gap = Length.px(v);
+            },
+            .padding => if (lengthPx(st.padding.left) != v) {
+                st.padding = Edges.all(v);
+            },
+            .margin => if (lengthPx(st.margin.left) != v) {
+                st.margin = Edges.all(v);
+            },
+            .width_px => if (lengthPx(st.width) != v and st.width != .fill and st.width != .fit and st.width != .auto) {
+                st.width = Length.px(v);
+            },
+            .height_px => if (lengthPx(st.height) != v and st.height != .fill and st.height != .fit and st.height != .auto) {
+                st.height = Length.px(v);
+            },
+            .grow => st.grow = v,
+            .shrink => st.shrink = v,
+            .grid_columns => if (v >= 0 and v <= 64 and @as(f32, @floatFromInt(st.grid_columns)) != v) {
+                st.grid_columns = @intFromFloat(v);
+            },
+            .grid_span => if (v >= 1 and v <= 64 and @as(f32, @floatFromInt(st.grid_span)) != v) {
+                st.grid_span = @intFromFloat(v);
+            },
+            else => {},
+        }
     }
 
     /// The live node's style changed: relayout, and bring the document's style
     /// record in line (one coalesced undo step per field).
     fn commitLiveStyle(self: *Builder, h: Handle) void {
         self.ui.tree.markDirty(h, .{ .layout = true, .paint = true });
-        const n = self.selectedNode();
+        // The live node knows its document node (its uid is the node's user data).
+        const n = self.doc().find(@intCast(self.tagOf(h))) orelse self.selectedNode();
         var scratch = std.heap.ArenaAllocator.init(self.gpa);
         defer scratch.deinit();
         var default_style: Style = .{};
@@ -1262,7 +1311,8 @@ pub const Builder = struct {
             const prev = n.parent.?.children.items[i - 1];
             break :blk interact.isContainer(prev.type_name);
         };
-        const enabled = [command_count]bool{
+        const multi = self.extra.items.len > 0;
+        var enabled = [command_count]bool{
             self.editor.canUndo(),
             self.editor.canRedo(),
             true,
@@ -1279,6 +1329,16 @@ pub const Builder = struct {
             n.parent != null and n.parent.?.parent != null,
             true,
         };
+        if (multi) {
+            // Only deleting and duplicating act on a whole selection.
+            for (0..command_count) |i| {
+                const c: Command = @enumFromInt(i);
+                enabled[i] = switch (c) {
+                    .undo, .redo, .save, .delete, .duplicate => enabled[i],
+                    else => false,
+                };
+            }
+        }
         for (self.buttons, 0..) |maybe, i| {
             if (maybe) |b| b.setEnabled(enabled[i]);
         }
@@ -1309,13 +1369,66 @@ pub const Builder = struct {
     // ---- operations (also what the buttons and shortcuts call) ----
 
     pub fn select(self: *Builder, uid: u32) void {
-        if (self.doc().find(uid) == null or uid == self.selected) return;
+        if (self.doc().find(uid) == null or (uid == self.selected and self.extra.items.len == 0)) return;
         self.editor.breakCoalescing();
         self.selected = uid;
+        self.extra.clearRetainingCapacity();
         self.syncOutlineSelection();
         self.rebuildInspector() catch |e| self.updateStatus(e);
         self.updateButtons();
         self.repaintOverlays();
+    }
+
+    /// Select several nodes; `primary` is the one the inspector shows.
+    pub fn selectMany(self: *Builder, primary: u32, others: []const u32) void {
+        if (self.doc().find(primary) == null) return;
+        self.editor.breakCoalescing();
+        self.selected = primary;
+        self.extra.clearRetainingCapacity();
+        for (others) |u| {
+            if (u == primary or self.doc().find(u) == null or self.extra.items.len + 1 >= max_selected) continue;
+            self.extra.append(self.gpa, u) catch {};
+        }
+        self.afterSelectionChange();
+    }
+
+    /// Ctrl-click: add `uid` to the selection (and make it primary), or remove it.
+    pub fn toggleInSelection(self: *Builder, uid: u32) void {
+        if (self.doc().find(uid) == null) return;
+        self.editor.breakCoalescing();
+        if (uid == self.selected) {
+            self.selected = self.extra.pop() orelse return;
+        } else if (std.mem.indexOfScalar(u32, self.extra.items, uid)) |i| {
+            _ = self.extra.orderedRemove(i);
+        } else {
+            if (self.extra.items.len + 1 >= max_selected) return;
+            self.extra.append(self.gpa, self.selected) catch return;
+            self.selected = uid;
+        }
+        self.afterSelectionChange();
+    }
+
+    fn afterSelectionChange(self: *Builder) void {
+        self.syncOutlineSelection();
+        self.rebuildInspector() catch |e| self.updateStatus(e);
+        self.updateButtons();
+        self.repaintOverlays();
+    }
+
+    /// The selected nodes, primary first.
+    fn selection(self: *Builder, buf: *[max_selected]u32) []const u32 {
+        buf[0] = self.selected;
+        var n: usize = 1;
+        for (self.extra.items) |u| {
+            if (n == buf.len) break;
+            buf[n] = u;
+            n += 1;
+        }
+        return buf[0..n];
+    }
+
+    pub fn selectionCount(self: *const Builder) usize {
+        return 1 + self.extra.items.len;
     }
 
     pub fn setTab(self: *Builder, tab: Tab) void {
@@ -1389,7 +1502,69 @@ pub const Builder = struct {
         self.sync();
     }
 
+    /// The selected nodes that are not the root and have no selected ancestor
+    /// (an operation on them covers their descendants).
+    fn selectionRoots(self: *Builder, out: *[max_selected]u32) []const u32 {
+        var all_buf: [max_selected]u32 = undefined;
+        const all = self.selection(&all_buf);
+        var k: usize = 0;
+        for (all) |uid| {
+            const n = self.doc().find(uid) orelse continue;
+            if (n.parent == null) continue;
+            var covered = false;
+            var p = n.parent;
+            while (p) |pn| : (p = pn.parent) {
+                if (std.mem.indexOfScalar(u32, all, pn.uid) != null) covered = true;
+            }
+            if (covered) continue;
+            out[k] = uid;
+            k += 1;
+        }
+        return out[0..k];
+    }
+
+    fn deleteMany(self: *Builder) void {
+        var buf: [max_selected]u32 = undefined;
+        const uids = self.selectionRoots(&buf);
+        if (uids.len == 0) return;
+        const parent = self.doc().find(uids[0]).?.parent.?;
+        self.editor.beginBatch();
+        for (uids) |uid| {
+            self.editor.removeNode(uid) catch |e| {
+                self.editor.abortBatch();
+                return self.updateStatus(e);
+            };
+        }
+        self.editor.endBatch() catch |e| return self.updateStatus(e);
+        self.editor.breakCoalescing();
+        self.selected = parent.uid;
+        self.extra.clearRetainingCapacity();
+        self.sync();
+    }
+
+    fn duplicateMany(self: *Builder) void {
+        var buf: [max_selected]u32 = undefined;
+        const uids = self.selectionRoots(&buf);
+        if (uids.len == 0) return;
+        var copies: [max_selected]u32 = undefined;
+        self.editor.beginBatch();
+        for (uids, 0..) |uid, i| {
+            const c = self.editor.duplicateNode(uid) catch |e| {
+                self.editor.abortBatch();
+                return self.updateStatus(e);
+            };
+            copies[i] = c.uid;
+        }
+        self.editor.endBatch() catch |e| return self.updateStatus(e);
+        self.editor.breakCoalescing();
+        self.selected = copies[uids.len - 1];
+        self.extra.clearRetainingCapacity();
+        for (copies[0 .. uids.len - 1]) |u| self.extra.append(self.gpa, u) catch {};
+        self.sync();
+    }
+
     pub fn deleteSelected(self: *Builder) void {
+        if (self.extra.items.len > 0) return self.deleteMany();
         const n = self.selectedNode();
         const parent = n.parent orelse return;
         self.editor.removeNode(n.uid) catch |e| return self.updateStatus(e);
@@ -1398,6 +1573,7 @@ pub const Builder = struct {
     }
 
     pub fn duplicateSelected(self: *Builder) void {
+        if (self.extra.items.len > 0) return self.duplicateMany();
         const n = self.selectedNode();
         const copy = self.editor.duplicateNode(n.uid) catch |e| return self.updateStatus(e);
         self.selected = copy.uid;
@@ -1531,9 +1707,18 @@ pub const Builder = struct {
 
     fn onOutlineSelect(self: *Builder, _: *event.Event) void {
         if (self.syncing_outline) return;
-        const item = self.outline.selected();
-        if (item == tree_view.no_item) return;
-        self.select(@intCast(self.outline.userData(item)));
+        const primary_item = self.outline.selected();
+        if (primary_item == tree_view.no_item) return;
+        const primary: u32 = @intCast(self.outline.userData(primary_item));
+        var items: [max_selected]u32 = undefined;
+        var others: [max_selected]u32 = undefined;
+        var k: usize = 0;
+        for (self.outline.selectedItems(&items)) |it| {
+            if (it == primary_item) continue;
+            others[k] = @intCast(self.outline.userData(it));
+            k += 1;
+        }
+        self.selectMany(primary, others[0..k]);
     }
 
     fn onTab(self: *Builder, ev: *event.Event) void {
@@ -1678,6 +1863,7 @@ pub const Builder = struct {
                 }
                 // Empty frame space belongs to the root.
                 const hit = self.framePick(ev.x, ev.y) orelse self.doc().root;
+                if (ev.mods.ctrl or ev.mods.gui or ev.mods.shift) return self.toggleInSelection(hit.uid);
                 self.select(hit.uid);
                 self.press = .{ .source = .preview, .uid = hit.uid, .sx = ev.x, .sy = ev.y };
             },
@@ -1936,10 +2122,16 @@ pub const Builder = struct {
                 if (self.ui.tree.absoluteRect(h)) |r| try strokeRect(pc, r, 1, hover_color);
             }
         }
+        // The other selected nodes.
+        for (self.extra.items) |uid| {
+            if (inst.handleOf(uid)) |h| {
+                if (self.ui.tree.absoluteRect(h)) |r| try strokeRect(pc, r, 2, select_color);
+            }
+        }
         // Selection.
         if (self.selectionRect()) |r| {
             try strokeRect(pc, r, 2, select_color);
-            if (self.selected != self.doc().root.uid and !self.dragging) {
+            if (self.selected != self.doc().root.uid and !self.dragging and self.extra.items.len == 0) {
                 inline for (.{ interact.ResizeHandle.right, interact.ResizeHandle.bottom, interact.ResizeHandle.corner }) |hd| {
                     const hr = interact.handleRect(r, hd);
                     try pc.list.fillRect(hr, .{ .color = Color.white });
@@ -2871,4 +3063,79 @@ test "the Layout tab offers grid for containers" {
     try testing.expectEqual(@as(i64, 2), b.doc().root.style.field("grid_columns").?.int);
     try chooseOption(b, "column");
     try testing.expect(b.doc().root.style.field("grid_columns") == null or b.doc().root.style.field("grid_columns").?.int == 0);
+}
+
+test "ctrl-click in the outline selects several nodes; delete and duplicate act on all, as one undo step" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    try r.frame();
+    const a = byId(b, "a");
+    const bb = byId(b, "b");
+    const t = byId(b, "t");
+    const pa = r.center(outlineRow(b, a.uid));
+    try r.click(pa[0], pa[1]);
+    try testing.expectEqual(a.uid, b.selected);
+    r.ui.input.mods = .{ .ctrl = true };
+    const pt = r.center(outlineRow(b, t.uid));
+    try r.click(pt[0], pt[1]);
+    r.ui.input.mods = .{};
+    try testing.expectEqual(@as(usize, 2), b.selectionCount());
+    try testing.expectEqual(t.uid, b.selected);
+    try testing.expect(std.mem.indexOfScalar(u32, b.extra.items, a.uid) != null);
+    // Single-node commands step aside; delete and duplicate stay.
+    try testing.expect(!b.buttons[@intFromEnum(Command.wrap)].?.props.enabled);
+    try testing.expect(b.buttons[@intFromEnum(Command.delete)].?.props.enabled);
+
+    b.duplicateSelected();
+    try r.frame();
+    try testing.expectEqual(@as(usize, 5), b.doc().root.children.items.len);
+    try testing.expectEqual(@as(usize, 2), b.selectionCount()); // the copies are selected
+    b.undo();
+    try r.frame();
+    try testing.expectEqual(@as(usize, 3), b.doc().root.children.items.len);
+
+    // Select a and t again and delete both.
+    b.select(a.uid);
+    b.toggleInSelection(t.uid);
+    b.deleteSelected();
+    try r.frame();
+    try testing.expectEqual(@as(usize, 1), b.doc().root.children.items.len);
+    try testing.expectEqual(bb.uid, b.doc().root.children.items[0].uid);
+    try testing.expectEqual(@as(usize, 1), b.selectionCount());
+    b.undo();
+    try r.frame();
+    try testing.expectEqual(@as(usize, 3), b.doc().root.children.items.len);
+}
+
+test "ctrl-click in the preview toggles membership; layout choices apply to every selected node" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    try r.frame();
+    const a = byId(b, "a");
+    const bb = byId(b, "b");
+    b.select(a.uid);
+    const pb = r.center(r.liveOf(bb.uid));
+    r.ui.input.mods = .{ .ctrl = true };
+    try r.click(pb[0], pb[1]);
+    r.ui.input.mods = .{};
+    try testing.expectEqual(@as(usize, 2), b.selectionCount());
+    try testing.expectEqual(bb.uid, b.selected);
+
+    b.setTab(.layout);
+    try r.frame();
+    try chooseOption(b, "fill"); // the width drop-down comes first
+    try testing.expectEqualStrings("fill", a.style.field("width").?.tag);
+    try testing.expectEqualStrings("fill", bb.style.field("width").?.tag);
+    // A text field edits all of them too: grow.
+    typeInto(&r.ui, b.layout_fields[@intFromEnum(Builder.LayoutField.grow)].?, "2");
+    try testing.expectEqual(@as(f64, 2), a.style.field("grow").?.float);
+    try testing.expectEqual(@as(f64, 2), bb.style.field("grow").?.float);
+    // Ctrl-clicking a selected node removes it.
+    r.ui.input.mods = .{ .ctrl = true };
+    try r.click(pb[0], pb[1]);
+    r.ui.input.mods = .{};
+    try testing.expectEqual(@as(usize, 1), b.selectionCount());
+    try testing.expectEqual(a.uid, b.selected);
 }

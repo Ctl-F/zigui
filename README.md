@@ -383,6 +383,11 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   its commands (whose enabled state tracks the selection), double-click or F2
   renames an id in place, and dragging a split view's divider in the preview
   records `first_size`.
+- Multi-select: `TreeView.multi_select` (Ctrl toggles, Shift ranges, a primary
+  item plus a `picked` flag per item). The builder keeps `selected` (primary)
+  plus `extra`; Layout-tab edits loop over the selection, delete and duplicate
+  are batches over its top-most nodes, and single-node commands are disabled
+  while several nodes are selected.
 - Workbench (`zig build workbench`): a code editor on the ZON text beside the
   builder, synced both ways; parse errors go to the status line. Examples build
   ReleaseSafe by default (`-Dexample_optimize`) because the software rasterizer
