@@ -58,12 +58,18 @@ fn maxOf(len: Length, ctx: length.ResolveCtx) f32 {
     return if (len == .auto) std.math.inf(f32) else length.resolve(len, ctx).value;
 }
 
+const GridCell = struct { row: u32, col: u16, span: u16, rspan: u16 };
+
 pub const Layout = struct {
     allocator: std.mem.Allocator,
     items: std.ArrayListUnmanaged(flex.Item) = .empty,
     sizes: std.ArrayListUnmanaged(f32) = .empty,
     frozen: std.ArrayListUnmanaged(bool) = .empty,
     kids: std.ArrayListUnmanaged(Handle) = .empty,
+    /// Grid scratch: each child's cell, and the height and top of every row.
+    grid_cells: std.ArrayListUnmanaged(GridCell) = .empty,
+    grid_rows: std.ArrayListUnmanaged(f32) = .empty,
+    grid_ys: std.ArrayListUnmanaged(f32) = .empty,
     /// Count of percent lengths that fell back to auto since the last reset.
     circular_percent: u32 = 0,
 
@@ -76,6 +82,9 @@ pub const Layout = struct {
         self.sizes.deinit(self.allocator);
         self.frozen.deinit(self.allocator);
         self.kids.deinit(self.allocator);
+        self.grid_cells.deinit(self.allocator);
+        self.grid_rows.deinit(self.allocator);
+        self.grid_ys.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -167,39 +176,104 @@ pub const Layout = struct {
     /// A grid's preferred size: columns as wide as the widest cell (per column
     /// spanned), rows as tall as their tallest cell.
     fn measureGrid(self: *Layout, tree: *Tree, h: Handle, node: *Node, pad: Pad, gap: f32) void {
-        _ = self;
-        const cols: u16 = node.style.grid_columns;
+        const cols: u16 = @min(node.style.grid_columns, max_grid_cols);
         var col_w: f32 = 0;
-        var total_h: f32 = 0;
-        var rows: u32 = 0;
         var any = false;
         var it = tree.children(h);
-        while (true) {
-            var row_h: f32 = 0;
-            var used: u16 = 0;
-            var peek = it;
-            while (nextFlow(tree, &peek)) |c| {
-                const cn = tree.get(c).?;
-                const span = cellSpan(cn, cols);
-                if (used > 0 and used + span > cols) break;
-                used += span;
-                it = peek;
-                const o = preferredOuter(cn);
-                col_w = @max(col_w, (o.w - gap * @as(f32, @floatFromInt(span - 1))) / @as(f32, @floatFromInt(span)));
-                row_h = @max(row_h, o.h);
-                any = true;
-            }
-            if (used == 0) break;
-            total_h += row_h;
-            rows += 1;
+        while (nextFlow(tree, &it)) |c| {
+            const cn = tree.get(c).?;
+            const span = cellSpan(cn, cols);
+            const o = preferredOuter(cn);
+            col_w = @max(col_w, (o.w - gap * @as(f32, @floatFromInt(span - 1))) / @as(f32, @floatFromInt(span)));
+            any = true;
         }
         if (!any) {
             node.measured = .{ .w = node.intrinsic.w + pad.l + pad.r, .h = node.intrinsic.h + pad.t + pad.b };
             return;
         }
+        const rows = self.computeGrid(tree, h, cols, gap, null) catch 0;
+        var total_h: f32 = 0;
+        for (self.grid_rows.items[0..rows]) |rh| total_h += rh;
         const w = col_w * @as(f32, @floatFromInt(cols)) + gap * @as(f32, @floatFromInt(cols - 1));
-        const ht = total_h + gap * @as(f32, @floatFromInt(rows - 1));
+        const ht = total_h + gap * @as(f32, @floatFromInt(@max(rows, 1) - 1));
         node.measured = .{ .w = w + pad.l + pad.r, .h = ht + pad.t + pad.b };
+    }
+
+    const max_grid_cols: u16 = 64;
+
+    /// Give every flow child of `h` a cell (row-major, skipping cells covered by
+    /// earlier tall children) and work out each row's height; returns the row
+    /// count. Results are in `grid_cells` (parallel to `kids`) and `grid_rows`.
+    fn computeGrid(self: *Layout, tree: *Tree, h: Handle, cols: u16, gap: f32, margin_base: ?f32) error{OutOfMemory}!usize {
+        var n: usize = 0;
+        var it = tree.children(h);
+        while (nextFlow(tree, &it)) |_| n += 1;
+        if (n == 0) return 0;
+        try self.ensure(n); // grow-only: the flow code shares these buffers
+        try self.grid_cells.resize(self.allocator, n);
+
+        // Placement: occ[c] is how many more rows (this one included) column c is covered.
+        var occ: [max_grid_cols]u16 = @splat(0);
+        var row: u32 = 0;
+        var col: u16 = 0;
+        var rows: usize = 0;
+        it = tree.children(h);
+        var i: usize = 0;
+        while (nextFlow(tree, &it)) |c| : (i += 1) {
+            const cn = tree.get(c).?;
+            self.kids.items[i] = c;
+            const span = cellSpan(cn, cols);
+            const rspan = @max(cn.style.grid_row_span, 1);
+            while (true) {
+                while (col + span <= cols and anyCovered(&occ, col, span)) col += 1;
+                if (col + span <= cols) break;
+                // No room in this row: the next one.
+                row += 1;
+                col = 0;
+                for (occ[0..cols]) |*o| o.* -|= 1;
+            }
+            for (occ[col .. col + span]) |*o| o.* = rspan;
+            self.grid_cells.items[i] = .{ .row = row, .col = col, .span = span, .rspan = rspan };
+            rows = @max(rows, row + rspan);
+            col += span;
+        }
+
+        // Row heights: single-row cells set them; a taller cell only grows the
+        // last row it covers if the rows it covers are too short.
+        try self.grid_rows.resize(self.allocator, rows);
+        try self.grid_ys.resize(self.allocator, rows);
+        @memset(self.grid_rows.items, 0);
+        for (self.grid_cells.items[0..n], 0..) |cell, k| {
+            if (cell.rspan != 1) continue;
+            const nat = self.cellNatural(tree.get(self.kids.items[k]).?, margin_base);
+            self.grid_rows.items[cell.row] = @max(self.grid_rows.items[cell.row], nat);
+        }
+        for (self.grid_cells.items[0..n], 0..) |cell, k| {
+            if (cell.rspan == 1) continue;
+            const nat = self.cellNatural(tree.get(self.kids.items[k]).?, margin_base);
+            var have: f32 = gap * @as(f32, @floatFromInt(cell.rspan - 1));
+            for (self.grid_rows.items[cell.row .. cell.row + cell.rspan]) |rh| have += rh;
+            if (nat > have) self.grid_rows.items[cell.row + cell.rspan - 1] += nat - have;
+        }
+        var y: f32 = 0;
+        for (self.grid_rows.items, self.grid_ys.items) |rh, *ry| {
+            ry.* = y;
+            y += rh + gap;
+        }
+        return rows;
+    }
+
+    fn anyCovered(occ: *const [max_grid_cols]u16, col: u16, span: u16) bool {
+        for (occ[col .. col + span]) |o| if (o > 0) return true;
+        return false;
+    }
+
+    /// A grid child's preferred height with its margins.
+    fn cellNatural(self: *Layout, cn: *const Node, margin_base: ?f32) f32 {
+        _ = self;
+        const m = resolveEdges(cn.style.margin, margin_base);
+        const nat = if (cn.style.height == .fill) cn.measured.h else length.resolveClamped(cn.style.height, cn.style.min_height, cn.style.max_height, .{ .parent = null, .content = cn.measured.h }).value;
+        return nat + m.t + m.b;
     }
 
     /// A child's preferred outer size (border box plus margins) with no
@@ -235,7 +309,7 @@ pub const Layout = struct {
         node.dirty.style = false;
         node.dirty.child_layout = false;
         if (n > 0) {
-            if (st.grid_columns > 0) self.placeGrid(tree, h, node, pad, cw) else try self.placeFlow(tree, h, node, n, pad, cw);
+            if (st.grid_columns > 0) try self.placeGrid(tree, h, node, pad, cw) else try self.placeFlow(tree, h, node, n, pad, cw);
         }
         self.placeAbsolute(tree, h, node, pad);
 
@@ -262,71 +336,48 @@ pub const Layout = struct {
         return @min(@max(cn.style.grid_span, 1), cols);
     }
 
-    /// Grid placement: equal-width columns, rows as tall as their tallest cell.
-    fn placeGrid(self: *Layout, tree: *Tree, h: Handle, node: *Node, pad: Pad, cw: f32) void {
-        _ = self;
+    /// Grid placement: equal-width columns, rows as tall as their tallest cell;
+    /// children may span several columns and rows.
+    fn placeGrid(self: *Layout, tree: *Tree, h: Handle, node: *Node, pad: Pad, cw: f32) error{OutOfMemory}!void {
         const st = node.style;
-        const cols: u16 = st.grid_columns;
+        const cols: u16 = @min(st.grid_columns, max_grid_cols);
         const gap = edge(st.gap, cw);
         const colf: f32 = @floatFromInt(cols);
         const col_w = @max((cw - gap * (colf - 1)) / colf, 0);
-        var y: f32 = pad.t;
-        var it = tree.children(h);
-        while (true) {
-            // Find the row: children until the next one would overflow the columns.
-            var used: u16 = 0;
-            var count: u32 = 0;
-            var row_h: f32 = 0;
-            var scan = it;
-            while (true) {
-                var peek = scan;
-                const c = nextFlow(tree, &peek) orelse break;
-                const cn = tree.get(c).?;
-                const span = cellSpan(cn, cols);
-                if (used > 0 and used + span > cols) break;
-                used += span;
-                count += 1;
-                scan = peek;
-                const m = resolveEdges(cn.style.margin, col_w);
-                const nat = if (cn.style.height == .fill) cn.measured.h else length.resolveClamped(cn.style.height, cn.style.min_height, cn.style.max_height, .{ .parent = null, .content = cn.measured.h }).value;
-                row_h = @max(row_h, nat + m.t + m.b);
-            }
-            if (count == 0) break;
+        const rows = try self.computeGrid(tree, h, cols, gap, col_w);
+        if (rows == 0) return;
+        // Placing a child can mark it for a later descent; this loop only writes rects.
+        for (self.grid_cells.items, self.kids.items[0..self.grid_cells.items.len]) |cell, c| {
+            const cn = tree.get(c).?;
+            const cs = cn.style;
+            const spanf: f32 = @floatFromInt(cell.span);
+            const cell_w = spanf * col_w + (spanf - 1) * gap;
+            const cell_x = pad.l + @as(f32, @floatFromInt(cell.col)) * (col_w + gap);
+            const last = cell.row + cell.rspan - 1;
+            const cell_y = pad.t + self.grid_ys.items[cell.row];
+            const cell_h = self.grid_ys.items[last] + self.grid_rows.items[last] - self.grid_ys.items[cell.row];
+            const m = resolveEdges(cs.margin, col_w);
+            const inner_w = @max(cell_w - m.l - m.r, 0);
+            const inner_h = @max(cell_h - m.t - m.b, 0);
+            const al = cs.align_self orelse st.align_items;
 
-            var col: u16 = 0;
-            for (0..count) |_| {
-                const c = nextFlow(tree, &it).?;
-                const cn = tree.get(c).?;
-                const cs = cn.style;
-                const span = cellSpan(cn, cols);
-                const spanf: f32 = @floatFromInt(span);
-                const cell_w = spanf * col_w + (spanf - 1) * gap;
-                const cell_x = pad.l + @as(f32, @floatFromInt(col)) * (col_w + gap);
-                col += span;
-                const m = resolveEdges(cs.margin, col_w);
-                const inner_w = @max(cell_w - m.l - m.r, 0);
-                const inner_h = @max(row_h - m.t - m.b, 0);
-                const al = cs.align_self orelse st.align_items;
-
-                const wctx: length.ResolveCtx = .{ .parent = inner_w, .content = cn.measured.w };
-                const w = if (cs.width == .fill or (cs.width == .auto and al == .stretch))
-                    length.clampSize(inner_w, minOf(cs.min_width, wctx), maxOf(cs.max_width, wctx))
-                else
-                    length.resolveClamped(cs.width, cs.min_width, cs.max_width, wctx).value;
-                const hctx: length.ResolveCtx = .{ .parent = null, .content = cn.measured.h };
-                const ht = if (cs.height == .fill or (cs.height == .auto and al == .stretch))
-                    length.clampSize(inner_h, minOf(cs.min_height, hctx), maxOf(cs.max_height, hctx))
-                else
-                    length.resolveClamped(cs.height, cs.min_height, cs.max_height, hctx).value;
-                const free = @max(inner_w - w, 0);
-                const dx: f32 = switch (al) {
-                    .start, .stretch => 0,
-                    .center => free / 2,
-                    .end => free,
-                };
-                setRect(tree, h, c, cn, .{ .x = cell_x + m.l + dx, .y = y + m.t, .w = w, .h = ht });
-            }
-            y += row_h + gap;
+            const wctx: length.ResolveCtx = .{ .parent = inner_w, .content = cn.measured.w };
+            const w = if (cs.width == .fill or (cs.width == .auto and al == .stretch))
+                length.clampSize(inner_w, minOf(cs.min_width, wctx), maxOf(cs.max_width, wctx))
+            else
+                length.resolveClamped(cs.width, cs.min_width, cs.max_width, wctx).value;
+            const hctx: length.ResolveCtx = .{ .parent = null, .content = cn.measured.h };
+            const ht = if (cs.height == .fill or (cs.height == .auto and al == .stretch))
+                length.clampSize(inner_h, minOf(cs.min_height, hctx), maxOf(cs.max_height, hctx))
+            else
+                length.resolveClamped(cs.height, cs.min_height, cs.max_height, hctx).value;
+            const free = @max(inner_w - w, 0);
+            const dx: f32 = switch (al) {
+                .start, .stretch => 0,
+                .center => free / 2,
+                .end => free,
+            };
+            setRect(tree, h, c, cn, .{ .x = cell_x + m.l + dx, .y = cell_y + m.t, .w = w, .h = ht });
         }
     }
 
@@ -953,4 +1004,43 @@ test "a fit-width grid sizes columns to the widest cell" {
     _ = try t.box(g, 20, 10);
     try t.run(400, 300);
     try expectRect(t.rect(g), 0, 0, 50 + 4 + 50, 20 + 4 + 10);
+}
+
+test "grid: a child can span rows; later children flow around it" {
+    var t = try Harness.init(.{});
+    defer t.deinit();
+    const g = try t.add(t.tree.root, .{ .style = .{ .grid_columns = 2, .width = Length.px(204), .height = Length.px(200), .gap = Length.px(4) } });
+    const a = try t.add(g, .{ .style = .{ .grid_row_span = 2 } });
+    const b = try t.add(g, .{ .style = .{ .height = Length.px(20) } });
+    const c = try t.add(g, .{ .style = .{ .height = Length.px(20) } });
+    try t.run(400, 300);
+    // Columns are 100 wide. a covers both rows of column 0; b and c stack in column 1.
+    try expectRect(t.rect(a), 0, 0, 100, 44);
+    try expectRect(t.rect(b), 104, 0, 100, 20);
+    try expectRect(t.rect(c), 104, 24, 100, 20);
+}
+
+test "grid: a tall spanning child grows the rows it covers; a wide one skips to the next free row" {
+    var t = try Harness.init(.{});
+    defer t.deinit();
+    const g = try t.add(t.tree.root, .{ .style = .{ .grid_columns = 3, .width = Length.px(300), .height = Length.px(400), .gap = Length.px(0) } });
+    const tall = try t.add(g, .{ .style = .{ .grid_row_span = 2, .height = Length.px(100) } });
+    const b = try t.add(g, .{ .style = .{ .height = Length.px(10) } });
+    const wide = try t.add(g, .{ .style = .{ .grid_span = 2, .height = Length.px(10) } }); // does not fit beside tall + b: next row, columns 1-2
+    try t.run(400, 300);
+    try expectRect(t.rect(tall), 0, 0, 100, 100);
+    try expectRect(t.rect(b), 100, 0, 100, 10);
+    // Row 0 is 10 high; the tall cell pushed row 1 to 90 so it still fits.
+    try expectRect(t.rect(wide), 100, 10, 200, 10);
+}
+
+test "a fit grid with row spans measures its rows" {
+    var t = try Harness.init(.{ .align_items = .start });
+    defer t.deinit();
+    const g = try t.add(t.tree.root, .{ .style = .{ .grid_columns = 2, .width = .fit, .height = .fit } });
+    _ = try t.add(g, .{ .style = .{ .grid_row_span = 2, .width = Length.px(30), .height = Length.px(50) } });
+    _ = try t.box(g, 20, 10);
+    _ = try t.box(g, 20, 10);
+    try t.run(400, 300);
+    try expectRect(t.rect(g), 0, 0, 60, 50); // equal columns: twice the widest cell
 }

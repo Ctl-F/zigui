@@ -32,6 +32,7 @@ const Dock = @import("dock.zig").Dock;
 const TreeView = @import("tree_view.zig").TreeView;
 const MenuBar = @import("menu_bar.zig").MenuBar;
 const TextArea = @import("text_area.zig").TextArea;
+const Spacer = @import("spacer.zig").Spacer;
 
 pub const Error = schema.Error || error{ UnknownWidget, NotAWidget, StaleHandle };
 
@@ -166,6 +167,7 @@ pub const widgets = [_]Info{
     describe("tree_view", TreeView),
     describe("menu_bar", MenuBar),
     describe("text_area", TextArea),
+    describe("spacer", Spacer),
 };
 
 pub fn find(name: []const u8) ?*const Info {

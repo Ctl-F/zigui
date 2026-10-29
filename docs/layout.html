@@ -21,6 +21,7 @@
 <tr><td><code>position</code>, <code>inset</code></td><td><code>.flow</code></td><td>Absolute positioning, see below.</td></tr>
 <tr><td><code>grid_columns</code></td><td>0</td><td>Non-zero makes this node a <a href="#grid">grid</a> with that many equal columns.</td></tr>
 <tr><td><code>grid_span</code></td><td>1</td><td>For a child of a grid: how many columns it spans.</td></tr>
+<tr><td><code>grid_row_span</code></td><td>1</td><td>For a child of a grid: how many rows it spans.</td></tr>
 </table>
 <p><code>Edges</code> lives in <code>zigui.style</code>: <code>const Edges = zigui.style.Edges;</code></p>
 
@@ -64,10 +65,11 @@ for (names) |n| _ = try ui.add(zigui.Button, grid, .{ .text = n });</code></pre>
 <ul>
 <li>Column width is (content width - gaps) / columns. The grid needs a definite width (a fixed width, <code>.fill</code>, or a stretching parent). A <code>.fit</code> grid sizes its columns to the widest cell.</li>
 <li>A child with <code>.width = .auto</code> fills its cell when <code>align_items</code> is <code>.stretch</code> (the default); with <code>.start/.center/.end</code> it keeps its natural width and is placed accordingly. A fixed <code>width</code> or <code>height</code> is honored. <code>align_self</code> overrides per child. Margins are respected inside the cell.</li>
+<li><code>grid_row_span = 2</code> makes a child cover two rows: later children are placed around it (cells it covers are skipped). A tall spanning child that needs more room than the rows it covers have makes the last of them taller. Together with <code>grid_span</code> a child can cover a block of cells.</li>
 <li><code>grid_span = 2</code> makes a child cover two columns; a child that does not fit the rest of the row starts a new row. Spans larger than the column count are clamped.</li>
 <li>Hidden and absolute children take no cell.</li>
 <li>The builder's Layout tab chooses <code>row</code>, <code>column</code>, or <code>grid</code> for a container; a <a href="widgets/scroll-view.html">ScrollView</a> takes <code>content_columns</code>.</li>
-<li>Not yet: per-column sizes (fixed/fractional tracks), explicit row/column placement, auto-fit column counts, row spans.</li>
+<li>Not yet: per-column sizes (fixed/fractional tracks), explicit row/column placement, auto-fit column counts.</li>
 </ul>
 
 <h2>Absolute positioning</h2>
@@ -86,6 +88,7 @@ for (names) |n| _ = try ui.add(zigui.Button, grid, .{ .text = n });</code></pre>
 ui.tree.markDirty(h, zigui.DirtyFlags.layout_and_paint);</code></pre>
 <p>Hide and show with <code>ui.setHidden(h, true)</code>; a hidden node takes no space.</p>
 
+<p>For empty space in a row or column use a <a href="widgets/spacer.html">Spacer</a>.</p>
 <h2>Built-in containers</h2>
 <p>For scrolling and resizable panes use <a href="widgets/scroll-view.html">ScrollView</a> and <a href="widgets/split-view.html">SplitView</a>.</p>
 </main><script src="nav.js"></script></body></html>

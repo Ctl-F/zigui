@@ -1167,8 +1167,8 @@ pub const Builder = struct {
 
     // ---- the Layout tab ----
 
-    const layout_field_count = 13;
-    const LayoutField = enum(u8) { gap, padding, margin, width_px, height_px, grow, shrink, grid_columns, grid_span, inset_left, inset_top, inset_right, inset_bottom };
+    const layout_field_count = 14;
+    const LayoutField = enum(u8) { gap, padding, margin, width_px, height_px, grow, shrink, grid_columns, grid_span, grid_row_span, inset_left, inset_top, inset_right, inset_bottom };
     const LayoutChoice = enum(u8) { layout_mode, direction, align_items, justify, width_mode, height_mode, align_self, position, wrap };
 
     /// A drop-down for one of the Layout tab's choices.
@@ -1242,6 +1242,7 @@ pub const Builder = struct {
             const pl = self.live(p);
             if (pl != null and self.ui.tree.get(pl.?.h).?.style.grid_columns > 0) {
                 try self.layoutField("grid span", .grid_span, @floatFromInt(st.grid_span));
+                try self.layoutField("grid row span", .grid_row_span, @floatFromInt(st.grid_row_span));
             }
         }
         if (n != self.doc().root) {
@@ -1375,6 +1376,9 @@ pub const Builder = struct {
             },
             .grid_span => if (v >= 1 and v <= 64 and @as(f32, @floatFromInt(st.grid_span)) != v) {
                 st.grid_span = @intFromFloat(v);
+            },
+            .grid_row_span => if (v >= 1 and v <= 64 and @as(f32, @floatFromInt(st.grid_row_span)) != v) {
+                st.grid_row_span = @intFromFloat(v);
             },
             else => {},
         }
@@ -3109,6 +3113,8 @@ test "the layout tab makes a container a grid and sets a child's span" {
     try testing.expect(b.layout_fields[@intFromEnum(Builder.LayoutField.grid_span)] != null);
     typeInto(&r.ui, b.layout_fields[@intFromEnum(Builder.LayoutField.grid_span)].?, "2");
     try testing.expectEqual(@as(i64, 2), first.style.field("grid_span").?.int);
+    typeInto(&r.ui, b.layout_fields[@intFromEnum(Builder.LayoutField.grid_row_span)].?, "3");
+    try testing.expectEqual(@as(i64, 3), first.style.field("grid_row_span").?.int);
 }
 
 fn doubleClick(r: *Rig, pt: [2]f32) !void {

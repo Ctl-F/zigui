@@ -15,6 +15,7 @@
       ["widgets/index.html", "Widget overview"],
       ["widgets/container.html", "Containers (box)"],
       ["widgets/label.html", "Label"],
+      ["widgets/spacer.html", "Spacer"],
       ["widgets/button.html", "Button"],
       ["widgets/text-field.html", "TextField"],
       ["widgets/text-area.html", "TextArea"],

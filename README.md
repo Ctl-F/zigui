@@ -406,6 +406,10 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
 - The builder's regions are dock panels (its own dock, or one passed in with
   `Options.dock`); the workbench adds the document text as a fifth panel, so
   every region can be tabbed, split, floated and closed (View menu).
+- Grid children can span rows as well as columns (`grid_row_span`): placement
+  is row-major over an occupancy counter per column, row heights come from
+  single-row cells and a taller child only grows the last row it covers. `Spacer`
+  is a widget so documents and the builder can place flexible or fixed space.
 - Workbench (`zig build workbench`): a code editor on the ZON text beside the
   builder, synced both ways; parse errors go to the status line. Examples build
   ReleaseSafe by default (`-Dexample_optimize`) because the software rasterizer

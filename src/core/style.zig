@@ -81,6 +81,9 @@ pub const Style = struct {
     grid_columns: u16 = 0,
     /// For a child of a grid: how many columns it spans (at least 1).
     grid_span: u16 = 1,
+    /// For a child of a grid: how many rows it spans (at least 1). Cells below
+    /// a tall child are skipped when later children are placed.
+    grid_row_span: u16 = 1,
 };
 
 /// Stopgap built-in look until painters and themes exist: a filled, optionally

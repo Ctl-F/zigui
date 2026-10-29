@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Spacer - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>Spacer</h1>
+<p>Empty space in a row or column. By default it is <b>flexible</b>: it grows into whatever room its siblings leave, so one pushes the widgets after it to the far end. With <code>size</code> it is a <b>fixed</b> gap of that many pixels along the parent's main axis (width in a row, height in a column).</p>
+<pre><code>_ = try ui.add(zigui.Button, bar, .{ .text = "File" });
+_ = try ui.add(zigui.Spacer, bar, .{});                  // flexible
+_ = try ui.add(zigui.Button, bar, .{ .text = "Help" });  // pinned to the right
+_ = try ui.add(zigui.Spacer, bar, .{ .size = 12 });      // a 12px gap</code></pre>
+<p>Several flexible spacers share the free room equally (they have <code>grow = 1</code> each); give one a different <code>style.grow</code> to weight it. In a <a href="../layout.html#grid">grid</a> a spacer is just an empty cell.</p>
+<h2>Options</h2>
+<table>
+<tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>style</code></td><td><code>.{}</code></td><td>Layout; with no size and no <code>grow</code>, it gets <code>grow = 1</code>.</td></tr>
+<tr><td><code>size</code></td><td>0</td><td>0 is flexible; otherwise the fixed length in pixels. Changing <code>props.size</code> later works, and a spacer follows its parent's direction if that changes.</td></tr>
+</table>
+<h2>Document</h2>
+<pre><code>.{ .type = "spacer" }
+.{ .type = "spacer", .props = .{ .size = 16 } }</code></pre>
+</main><script src="../nav.js"></script></body></html>
