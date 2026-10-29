@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>TextArea - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>TextArea</h1>
+<p>A multi-line text field: a bordered box holding several lines, with typing, selection, the clipboard, undo and scrolling. It is a <a href="code-editor.html">CodeEditor</a> underneath (no line numbers, no highlighting, the UI font), so it behaves like one. Use <a href="text-field.html">TextField</a> for one line and CodeEditor for code.</p>
+<pre><code>const notes = try ui.add(zigui.TextArea, parent, .{
+    .style = .{ .width = .fill, .height = .px(90) },
+    .text = "first line\nsecond line",
+    .on_change = .bind(&amp;app, App.notesChanged),
+});
+
+fn notesChanged(self: *App, _: *zigui.event.Event) void {
+    const text = self.notes.textAlloc(self.gpa) catch return;   // the content; you free it
+    defer self.gpa.free(text);
+}</code></pre>
+<h2>Options</h2>
+<table>
+<tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>style</code></td><td><code>.{}</code></td><td>Layout; the height defaults to 80 pixels.</td></tr>
+<tr><td><code>text</code></td><td><code>""</code></td><td>Initial content (copied).</td></tr>
+<tr><td><code>label</code></td><td><code>"Text area"</code></td><td>Accessible name.</td></tr>
+<tr><td><code>enabled</code>, <code>read_only</code></td><td>true, false</td><td></td></tr>
+<tr><td><code>size</code></td><td>0</td><td>Em size; 0 uses the theme's.</td></tr>
+<tr><td><code>on_change</code></td><td>null</td><td>The user edited the text.</td></tr>
+</table>
+<h2>Out and methods</h2>
+<p><code>out</code>: <code>changed</code> / <code>change_count</code>, <code>focused</code>, <code>line_count</code>. Methods: <code>textAlloc(gpa)</code>, <code>setText(text)</code> (does not call <code>on_change</code>), <code>loadText(bytes, owned)</code>; the inner <code>editor: *CodeEditor</code> is available for anything else.</p>
+<h2>In forms and documents</h2>
+<p>A form uses a TextArea for any string whose <code>ui</code> metadata says <code>.multiline = true</code> (the builder's inspector does this for the <code>titles</code>, <code>items</code>, <code>menus</code> and <code>options</code> props, so you see and edit one entry per line). In a document the content is <code>.props.text</code>, as for a text field.</p>
+<pre><code>.{ .type = "text_area", .props = .{ .text = "line one\\nline two" }, .style = .{ .height = 120 } }</code></pre>
+</main><script src="../nav.js"></script></body></html>

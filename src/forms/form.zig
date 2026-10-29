@@ -38,6 +38,7 @@ const Text = @import("../widgets/common.zig").Text;
 const Label = @import("../widgets/label.zig").Label;
 const TextField = @import("../widgets/text_field.zig").TextField;
 const Select = @import("../widgets/select.zig").Select;
+const TextArea = @import("../widgets/text_area.zig").TextArea;
 
 /// Collects validation messages. See `Form`.
 pub const Report = struct {
@@ -276,6 +277,8 @@ pub fn Form(comptime T: type) type {
             /// The drop-down of an enum field.
             select: ?*Select = null,
             field: ?*TextField = null,
+            /// The multi-line editor of a string whose metadata says `.multiline`.
+            area: ?*TextArea = null,
             err: ?*Label = null,
             parse_error: ?[]const u8 = null,
         };
@@ -562,7 +565,15 @@ pub fn Form(comptime T: type) type {
                         .on_change = event.Callback.bind(b, onChoice),
                     });
                 },
-                else => {
+                else => if (meta.multiline and (ty.kind == .string or ty.kind == .text)) {
+                    const b = try self.bind(.field, path, ty, meta);
+                    b.area = try self.ui.add(TextArea, row, .{
+                        .text = formatValue(ty, current, &vbuf),
+                        .read_only = meta.readonly,
+                        .style = .{ .grow = 1, .min_width = Length.px(120), .height = Length.px(84) },
+                        .on_change = event.Callback.bind(b, onAreaChange),
+                    });
+                } else {
                     const b = try self.bind(.field, path, ty, meta);
                     b.field = try self.ui.add(TextField, row, .{
                         .text = formatValue(ty, current, &vbuf),
@@ -634,6 +645,22 @@ pub fn Form(comptime T: type) type {
         fn onChange(b: *Binding, _: *event.Event) void {
             const self = b.form;
             const text = b.field.?.text();
+            b.parse_error = null;
+            if (parseValue(b.ty, b.meta, text)) |v| {
+                _ = self.write(b, v);
+            } else |err| {
+                b.parse_error = parseMessage(err);
+            }
+            self.afterChange();
+        }
+
+        fn onAreaChange(b: *Binding, _: *event.Event) void {
+            const self = b.form;
+            const text = b.area.?.textAlloc(self.gpa) catch {
+                self.out.failed = true;
+                return;
+            };
+            defer self.gpa.free(text);
             b.parse_error = null;
             if (parseValue(b.ty, b.meta, text)) |v| {
                 _ = self.write(b, v);
@@ -1026,4 +1053,30 @@ test "value text round-trips: format then parse" {
     const n = schema.typeOf(f32);
     try testing.expectError(error.NotANumber, parseValue(n, .{}, "nan"));
     try testing.expectError(error.OutOfRange, parseValue(n, .{ .max = 1 }, "2"));
+}
+
+const Notes = struct {
+    title: []const u8 = "t",
+    note: []const u8 = "a\nb",
+
+    pub const ui = .{ .note = .{ .multiline = true } };
+};
+
+test "a string marked multiline gets a text area that writes back multi-line text" {
+    var ui = try Ui.init(testing.allocator);
+    defer ui.deinit();
+    const f = try Form(Notes).create(&ui, ui.tree.root, .{});
+    defer f.destroy();
+    const note = findBinding(f, "note");
+    try testing.expect(note.area != null and note.field == null);
+    try testing.expect(findBinding(f, "title").field != null); // single-line strings stay fields
+    const before = try note.area.?.textAlloc(testing.allocator);
+    defer testing.allocator.free(before);
+    try testing.expectEqualStrings("a\nb", before);
+
+    ui.setFocus(note.area.?.editor.node);
+    ui.key(.end, .{ .ctrl = true }, true, false);
+    ui.key(.enter, .{}, true, false);
+    ui.textInput("c");
+    try testing.expectEqualStrings("a\nb\nc", f.value.note);
 }

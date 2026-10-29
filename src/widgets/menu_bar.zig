@@ -65,6 +65,8 @@ pub const MenuBar = struct {
         ///       Undo = edit.undo
         menus: Text = .{},
 
+        pub const ui = .{ .menus = .{ .multiline = true } };
+
         pub const dirty_map = .{
             .menus = shadow.Category.layout,
         };

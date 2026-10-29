@@ -30,7 +30,8 @@ if (form.state == .submitted) {
 <tr><th>Field type</th><th>Control</th></tr>
 <tr><td>bool</td><td>On/Off toggle</td></tr>
 <tr><td>enum</td><td><a href="widgets/select.html">Select</a> drop-down of the names (<code>binding.select</code>)</td></tr>
-<tr><td>numbers, colors, Lengths, strings</td><td>Text fields with parsing; errors show under the field and disable Submit</td></tr>
+<tr><td>strings with <code>.multiline = true</code> in their <code>ui</code> metadata</td><td><a href="widgets/text-area.html">TextArea</a> (<code>binding.area</code>)</td></tr>
+<tr><td>numbers, colors, Lengths, other strings</td><td>Text fields with parsing; errors show under the field and disable Submit</td></tr>
 <tr><td>optional</td><td>A "Set" toggle plus the control</td></tr>
 <tr><td>struct, array</td><td>Indented group</td></tr>
 </table>

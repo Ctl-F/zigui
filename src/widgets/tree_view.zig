@@ -112,6 +112,8 @@ pub const TreeView = struct {
         /// Expand every item that has children when `items` is loaded.
         expand_all: bool = true,
 
+        pub const ui = .{ .items = .{ .multiline = true } };
+
         pub const dirty_map = .{
             .items = shadow.Category.layout,
             .expand_all = shadow.Category.none,

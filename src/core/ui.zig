@@ -66,6 +66,7 @@ const Select = @import("../widgets/select.zig").Select;
 const TabPanel = @import("../widgets/tab_panel.zig").TabPanel;
 const Dock = @import("../widgets/dock.zig").Dock;
 const MenuBar = @import("../widgets/menu_bar.zig").MenuBar;
+const TextArea = @import("../widgets/text_area.zig").TextArea;
 const CodeEditor = code_editor.CodeEditor;
 
 /// A unique address per widget type, stored on nodes so the registry can tell
@@ -103,6 +104,7 @@ pub const Ui = struct {
     tab_panels: Pool(TabPanel, 16),
     docks: Pool(Dock, 16),
     menu_bars: Pool(MenuBar, 16),
+    text_areas: Pool(TextArea, 16),
     /// The open menu, if any (see `openMenu`).
     menu: ?*menu_mod.Menu = null,
     /// Closed menus waiting to be freed at the next `update`.
@@ -170,6 +172,7 @@ pub const Ui = struct {
             .tab_panels = Pool(TabPanel, 16).init(gpa),
             .docks = Pool(Dock, 16).init(gpa),
             .menu_bars = Pool(MenuBar, 16).init(gpa),
+            .text_areas = Pool(TextArea, 16).init(gpa),
             .paint_cache = paint.Cache.init(gpa),
             .commands = commands_mod.Commands.init(gpa),
             .shortcuts = shortcuts_mod.Shortcuts.init(gpa),
@@ -182,7 +185,7 @@ pub const Ui = struct {
         self.theme = theme;
         self.tree.markDirty(self.tree.root, DirtyFlags.layout_and_paint);
         // Widgets reshape text and repaint from the new theme in `update`.
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects, &self.tab_panels, &self.docks, &self.menu_bars }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects, &self.tab_panels, &self.docks, &self.menu_bars, &self.text_areas }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| self.tree.markDirty(e.ptr.node, DirtyFlags.layout_and_paint);
         }
@@ -205,7 +208,7 @@ pub const Ui = struct {
         if (self.menu) |m| m.close();
         for (self.menu_closed.items) |m| m.destroyClosed();
         self.menu_closed.deinit(self.gpa);
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects, &self.tab_panels, &self.docks, &self.menu_bars }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects, &self.tab_panels, &self.docks, &self.menu_bars, &self.text_areas }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| e.ptr.deinit();
             pool.deinit();
@@ -221,7 +224,7 @@ pub const Ui = struct {
 
     // ---- creating widgets --------------------------------------------------------
 
-    fn poolFor(self: *Ui, comptime W: type) *Pool(W, if (W == CodeEditor or W == Canvas or W == ScrollView or W == SplitView or W == TreeView or W == TabPanel or W == Dock or W == MenuBar) 16 else 64) {
+    fn poolFor(self: *Ui, comptime W: type) *Pool(W, if (W == CodeEditor or W == Canvas or W == ScrollView or W == SplitView or W == TreeView or W == TabPanel or W == Dock or W == MenuBar or W == TextArea) 16 else 64) {
         if (W == Button) return &self.buttons;
         if (W == Label) return &self.labels;
         if (W == TextField) return &self.fields;
@@ -234,6 +237,7 @@ pub const Ui = struct {
         if (W == TabPanel) return &self.tab_panels;
         if (W == Dock) return &self.docks;
         if (W == MenuBar) return &self.menu_bars;
+        if (W == TextArea) return &self.text_areas;
         @compileError("not a widget type: " ++ @typeName(W));
     }
 
@@ -844,7 +848,7 @@ pub const Ui = struct {
 
     /// Run `method` on every live widget.
     fn forEachWidget(self: *Ui, comptime method: []const u8) void {
-        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects, &self.tab_panels, &self.docks, &self.menu_bars }) |pool| {
+        inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects, &self.tab_panels, &self.docks, &self.menu_bars, &self.text_areas }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| @field(@TypeOf(e.ptr.*), method)(e.ptr);
         }
@@ -886,6 +890,7 @@ pub const Ui = struct {
         self.sweep(&self.tab_panels);
         self.sweep(&self.docks);
         self.sweep(&self.menu_bars);
+        self.sweep(&self.text_areas);
 
         if (self.shortcuts.count() > 0) self.shortcuts.prune(&self.tree, &self.commands);
 

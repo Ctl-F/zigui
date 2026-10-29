@@ -17,6 +17,7 @@
       ["widgets/label.html", "Label"],
       ["widgets/button.html", "Button"],
       ["widgets/text-field.html", "TextField"],
+      ["widgets/text-area.html", "TextArea"],
       ["widgets/code-editor.html", "CodeEditor"],
       ["widgets/canvas.html", "Canvas"],
       ["widgets/scroll-view.html", "ScrollView"],

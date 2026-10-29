@@ -210,6 +210,8 @@ pub const Dock = struct {
         /// `dock` node is a panel, first docked together as tabs.
         titles: Text = .{},
 
+        pub const ui = .{ .titles = .{ .multiline = true } };
+
         pub const dirty_map = .{
             .titles = shadow.Category.layout,
         };

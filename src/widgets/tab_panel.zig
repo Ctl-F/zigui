@@ -160,6 +160,8 @@ pub const TabPanel = struct {
         /// Told about tab drags (see `DragHook`).
         drag_hook: ?DragHook = null,
 
+        pub const ui = .{ .titles = .{ .multiline = true } };
+
         pub const dirty_map = .{
             .titles = shadow.Category.layout,
             .active = shadow.Category.layout,

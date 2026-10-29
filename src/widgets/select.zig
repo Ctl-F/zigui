@@ -54,6 +54,8 @@ pub const Select = struct {
         on_change: ?event.Callback = null,
         painter: ?Painter = null,
 
+        pub const ui = .{ .options = .{ .multiline = true } };
+
         pub const dirty_map = .{
             .options = shadow.Category.layout,
             .selected = shadow.Category.layout,
