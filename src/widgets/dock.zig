@@ -38,6 +38,9 @@ const SplitView = @import("split_view.zig").SplitView;
 const tab_panel = @import("tab_panel.zig");
 const TabPanel = tab_panel.TabPanel;
 const menu = @import("menu.zig");
+const shadow = @import("../core/shadow.zig");
+const Text = @import("common.zig").Text;
+const DirtyFlags = @import("../core/dirty.zig").DirtyFlags;
 
 pub const Side = enum { left, right, top, bottom };
 
@@ -77,6 +80,8 @@ const Node = struct {
     a: ?*Node = null,
     b: ?*Node = null,
     size: f32 = 240,
+    /// `size` is the second pane's size.
+    anchor_second: bool = false,
     split: ?*SplitView = null,
 
     fn onTabDrag(self: *Node, _: *TabPanel, index: usize, phase: tab_panel.DragPhase, x: f32, y: f32) void {
@@ -176,15 +181,16 @@ const Drop = struct {
     index: usize = std.math.maxInt(usize),
 };
 
-pub const Options = struct {
-    style: Style = .{},
-};
-
 pub const Dock = struct {
+    props: Props = .{},
+    out: Out = .{},
+    node: Handle,
     ui: *Ui,
+    checker: shadow.Checker(Props),
     gpa: std.mem.Allocator,
+    /// The dock's own node (`node`).
     host: Handle,
-    area: Handle,
+    area: Handle = Handle.invalid,
     root: ?*Node = null,
     floats: std.ArrayListUnmanaged(*Float) = .empty,
     panels: std.ArrayListUnmanaged(*Panel) = .empty,
@@ -194,34 +200,156 @@ pub const Dock = struct {
     drag_src: ?*Node = null,
     /// The panel a tab context menu is open for.
     menu_panel: ?*Panel = null,
+    /// The `props.titles` slice the panels' names were last taken from.
+    seen_titles: []const u8 = "",
+    /// Set while `contentNodeAt` or title syncing is adding panels.
+    syncing: bool = false,
 
-    pub fn create(ui: *Ui, parent: Handle, opts: Options) !*Dock {
-        const self = try ui.gpa.create(Dock);
-        errdefer ui.gpa.destroy(self);
-        var style = opts.style;
-        style.direction = .column;
-        const host = try ui.tree.create(.{ .style = style, .role = .panel });
-        errdefer _ = ui.tree.destroySubtree(host);
-        try ui.tree.appendChild(parent, host);
-        try ui.tree.setLabel(host, "Dock");
-        const area = try ui.tree.create(.{ .style = .{ .direction = .column, .grow = 1 } });
-        try ui.tree.appendChild(host, area);
-        self.* = .{ .ui = ui, .gpa = ui.gpa, .host = host, .area = area };
-        ui.tree.get(host).?.overlay_hook = tree_mod.PaintHook.bind(self, paintOverlay);
-        return self;
+    pub const Props = struct {
+        /// For documents: the panels' titles, one per line. Each child of a
+        /// `dock` node is a panel, first docked together as tabs.
+        titles: Text = .{},
+
+        pub const dirty_map = .{
+            .titles = shadow.Category.layout,
+        };
+    };
+
+    pub const Out = struct {
+        panel_count: u32 = 0,
+    };
+
+    pub const Options = struct {
+        style: Style = .{},
+        /// Panels to create up front (see `panels`); you still dock them.
+        titles: []const []const u8 = &.{},
+    };
+
+    pub const listened_kinds = [_]event.EventKind{};
+
+    pub fn nodeTemplate(style: Style) tree_mod.Node {
+        var s = style;
+        s.direction = .column;
+        return .{ .role = .panel, .style = s };
     }
 
+    pub fn init(ui: *Ui, node: Handle) Dock {
+        const props: Props = .{};
+        return .{ .node = node, .ui = ui, .gpa = ui.gpa, .host = node, .checker = shadow.Checker(Props).init(&props) };
+    }
+
+    pub fn apply(self: *Dock, o: Options) !void {
+        const tree = &self.ui.tree;
+        try tree.setLabel(self.node, "Dock");
+        self.area = try tree.create(.{ .style = .{ .direction = .column, .grow = 1 } });
+        errdefer _ = tree.destroySubtree(self.area);
+        try tree.appendChild(self.node, self.area);
+        tree.get(self.node).?.overlay_hook = tree_mod.PaintHook.bind(self, paintOverlay);
+        if (o.titles.len > 0) {
+            var joined: std.ArrayListUnmanaged(u8) = .empty;
+            defer joined.deinit(self.gpa);
+            for (o.titles, 0..) |t, i| {
+                if (i > 0) try joined.append(self.gpa, '\n');
+                try joined.appendSlice(self.gpa, t);
+            }
+            try self.ui.replaceText(&self.props.titles, joined.items);
+        }
+        self.checker.sync(&self.props);
+    }
+
+    /// Make a dock under `parent` (shorthand for `ui.add(Dock, parent, opts)`).
+    pub fn create(ui: *Ui, parent: Handle, opts: Options) !*Dock {
+        return ui.add(Dock, parent, opts);
+    }
+
+    /// Remove the dock and its panels' contents. The dock's memory is released
+    /// at the next `Ui.update`.
     pub fn destroy(self: *Dock) void {
         self.ui.closeMenu();
-        // Park the contents so they are not destroyed twice, then free the model.
-        _ = self.ui.tree.destroySubtree(self.host);
+        _ = self.ui.tree.destroySubtree(self.node);
+    }
+
+    pub fn deinit(self: *Dock) void {
+        // Hidden panels' contents have no parent: free them with the panels.
         for (self.panels.items) |p| self.freePanel(p);
         self.panels.deinit(self.gpa);
         self.dragging.deinit(self.gpa);
         for (self.floats.items) |f| self.gpa.destroy(f);
         self.floats.deinit(self.gpa);
         if (self.root) |r| self.freeNode(r);
-        self.gpa.destroy(self);
+        self.ui.freeText(&self.props.titles);
+    }
+
+    // ---- documents: children are panels ----
+
+    /// For UI documents: child `index` is panel `index` (created and docked as
+    /// a tab in the first group on demand).
+    pub fn contentNodeAt(self: *Dock, index: usize) ?Handle {
+        while (self.panels.items.len <= index) {
+            const i = self.panels.items.len;
+            var name_buf: [24]u8 = undefined;
+            const name = self.titleLine(i) orelse (std.fmt.bufPrint(&name_buf, "Panel {d}", .{i + 1}) catch "Panel");
+            const p = self.addPanel(name) catch return null;
+            self.dockTab(p, null) catch return null;
+        }
+        return self.panels.items[index].content;
+    }
+
+    fn titleLine(self: *const Dock, i: usize) ?[]const u8 {
+        var it = std.mem.splitScalar(u8, self.props.titles.bytes, '\n');
+        var n: usize = 0;
+        while (it.next()) |line| : (n += 1) {
+            if (n == i) return if (line.len > 0) line else null;
+        }
+        return null;
+    }
+
+    /// Keep panel names in step with `props.titles` (a document, the inspector).
+    /// `Ui.update` calls this before reclaiming destroyed widgets.
+    pub fn rebuildIfDirty(self: *Dock) void {
+        if (!self.ui.tree.isValid(self.node)) return;
+        const t = self.props.titles.bytes;
+        if (t.ptr == self.seen_titles.ptr and t.len == self.seen_titles.len) return;
+        self.seen_titles = t;
+        var changed = false;
+        for (self.panels.items, 0..) |p, i| {
+            const line = self.titleLine(i) orelse continue;
+            if (std.mem.eql(u8, p.title, line)) continue;
+            const copy = self.gpa.dupe(u8, line) catch continue;
+            self.gpa.free(p.title);
+            p.title = copy;
+            changed = true;
+        }
+        // Titles for panels that have no content yet.
+        var i = self.panels.items.len;
+        while (self.titleLine(i) != null) : (i += 1) {
+            _ = self.contentNodeAt(i);
+            changed = true;
+        }
+        if (changed) self.rebuild() catch {};
+        self.out.panel_count = @intCast(self.panels.items.len);
+    }
+
+    pub fn handleEvent(self: *Dock, ev: *event.Event) void {
+        _ = self;
+        _ = ev;
+    }
+
+    pub fn paintHook(self: *Dock, pc: *PaintCtx) paint_ctx.Error!void {
+        _ = self;
+        _ = pc;
+    }
+
+    pub fn prepare(self: *Dock) void {
+        _ = self;
+    }
+
+    pub fn update(self: *Dock) void {
+        self.ui.verifyProps(self.node, &self.checker, &self.props, "dock");
+    }
+
+    pub fn endFrame(self: *Dock) void {
+        _ = self;
     }
 
     fn freePanel(self: *Dock, p: *Panel) void {
@@ -289,6 +417,20 @@ pub const Dock = struct {
         const target = near.group orelse return error.NotDocked;
         if (target.float != null) return error.NotDocked;
         self.takeOut(panel);
+        try self.splitAt(target, &.{panel}, side, size);
+        try self.rebuild();
+    }
+
+    /// Dock `panel` in a new group along one whole side of the dock (beside
+    /// every other group); `size` is its size in pixels.
+    pub fn dockRoot(self: *Dock, panel: *Panel, side: Side, size: f32) !void {
+        self.takeOut(panel);
+        const target = self.root orelse {
+            const n = try self.newNode();
+            self.root = n;
+            try self.addToGroup(n, panel, std.math.maxInt(usize));
+            return self.rebuild();
+        };
         try self.splitAt(target, &.{panel}, side, size);
         try self.rebuild();
     }
@@ -433,16 +575,11 @@ pub const Dock = struct {
         sp.a = if (new_first) g else target;
         sp.b = if (new_first) target else g;
         sp.size = size;
+        sp.anchor_second = !new_first;
         sp.parent = target.parent;
         self.replaceChild(target, sp);
         target.parent = sp;
         g.parent = sp;
-        // The first pane has `size` pixels: when the new group is second, the
-        // old one keeps the rest, so give it what the new one leaves.
-        if (!new_first) {
-            const total = self.groupExtent(target, sp.vertical);
-            sp.size = @max(total - size - 6, 80);
-        }
     }
 
     /// A group's size along an axis. Before it has been laid out (panels docked
@@ -535,6 +672,7 @@ pub const Dock = struct {
                 .style = .{ .width = .fill, .height = .fill },
                 .vertical = n.vertical,
                 .first_size = n.size,
+                .anchor_second = n.anchor_second,
                 .min_first = 80,
                 .min_second = 80,
                 .divider_size = 6,

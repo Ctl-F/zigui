@@ -206,12 +206,15 @@ pub fn main(init: std.process.Init) !void {
 
     var app: App = .{ .gpa = gpa, .io = io, .path = path, .ui = &ui, .builder = undefined, .editor = undefined, .status = undefined };
 
-    // Layout: a split view, the text on the left, the builder on the right.
+    // Layout: one dock holds every region (the document text and the builder's
+    // Toolbox, Outline, Preview and Inspector), so any of them can be dragged
+    // into another group, split off, floated, or closed (View menu to bring back).
     ui.tree.get(ui.tree.root).?.style = .{ .direction = .column };
     ui.tree.get(ui.tree.root).?.visual = .{ .background = zigui.Color.rgb(24, 25, 29) };
-    const split = try ui.add(zigui.SplitView, ui.tree.root, .{ .style = .{ .grow = 1 }, .first_size = 460 });
-    const left = try ui.tree.create(.{ .style = .{ .direction = .column, .grow = 1, .padding = zigui.style.Edges.all(8), .gap = zigui.Length.px(6) } });
-    try ui.tree.appendChild(split.firstNode(), left);
+    const dock = try zigui.Dock.create(&ui, ui.tree.root, .{ .style = .{ .grow = 1 } });
+    const text_panel = try dock.addPanel("Document");
+    const left = text_panel.content;
+    ui.tree.get(left).?.style = .{ .direction = .column, .grow = 1, .padding = zigui.style.Edges.all(8), .gap = zigui.Length.px(6) };
     _ = try ui.add(zigui.Label, left, .{ .text = path, .size = 15 });
     app.editor = try ui.add(zigui.CodeEditor, left, .{ .style = .{ .grow = 1 }, .label = "UI document text", .size = 13 });
     try app.editor.setLanguage(&zigui.syntax.zig);
@@ -221,14 +224,17 @@ pub fn main(init: std.process.Init) !void {
     try app.editor.loadText(initial_text, true);
     app.editor.props.on_change = zigui.event.Callback.bind(&app, App.onTextChange);
 
-    app.builder = Builder.create(&ui, split.secondNode(), doc, .{
+    app.builder = Builder.create(&ui, ui.tree.root, doc, .{
         .save = .{ .ctx = &app, .call = App.save },
         .on_change = zigui.event.Callback.bind(&app, App.onBuilderChange),
+        .dock = dock,
     }) catch |err| {
         doc.deinit();
         return err;
     };
     defer app.builder.destroy();
+    try app.builder.arrange();
+    try dock.dockRoot(text_panel, .left, 460);
 
     const commands = try gpa.alloc(zigui.draw_list.Command, 32768);
     defer gpa.free(commands);

@@ -28,6 +28,9 @@ const SplitView = @import("split_view.zig").SplitView;
 const common = @import("common.zig");
 const Select = @import("select.zig").Select;
 const TabPanel = @import("tab_panel.zig").TabPanel;
+const Dock = @import("dock.zig").Dock;
+const TreeView = @import("tree_view.zig").TreeView;
+const MenuBar = @import("menu_bar.zig").MenuBar;
 
 pub const Error = schema.Error || error{ UnknownWidget, NotAWidget, StaleHandle };
 
@@ -158,6 +161,9 @@ pub const widgets = [_]Info{
     describe("split_view", SplitView),
     describe("select", Select),
     describe("tab_view", TabPanel),
+    describe("dock", Dock),
+    describe("tree_view", TreeView),
+    describe("menu_bar", MenuBar),
 };
 
 pub fn find(name: []const u8) ?*const Info {

@@ -18,7 +18,7 @@
 }</code></pre>
 <table>
 <tr><th>Key</th><th>Meaning</th></tr>
-<tr><td><code>.type</code></td><td>A <a href="widgets/index.html">widget name</a> (<code>label</code>, <code>button</code>, <code>text_field</code>, <code>code_editor</code>, <code>canvas</code>, <code>scroll_view</code>, <code>split_view</code>, <code>select</code>, <code>tab_view</code>) or <code>"box"</code> for a plain container.</td></tr>
+<tr><td><code>.type</code></td><td>A <a href="widgets/index.html">widget name</a> (<code>label</code>, <code>button</code>, <code>text_field</code>, <code>code_editor</code>, <code>canvas</code>, <code>scroll_view</code>, <code>split_view</code>, <code>select</code>, <code>tab_view</code>, <code>dock</code>, <code>tree_view</code>, <code>menu_bar</code>) or <code>"box"</code> for a plain container.</td></tr>
 <tr><td><code>.style</code></td><td>Sparse <a href="layout.html">Style</a>. Lengths: a number is pixels; <code>.fill</code>, <code>.fit</code>, <code>.auto</code>; percent as the string <code>"50%"</code> (or <code>.{ .percent = 50 }</code>). Enums by name (<code>.direction = .column</code>).</td></tr>
 <tr><td><code>.props</code></td><td>Sparse widget props: the widget's <code>Props</code> fields (see each widget page). Content text for <code>text_field</code> and <code>code_editor</code> goes in <code>.text</code>.</td></tr>
 <tr><td><code>.on</code></td><td>Event to action name: <code>.on = .{ .click = "confirm" }</code>. The app supplies the actions.</td></tr>

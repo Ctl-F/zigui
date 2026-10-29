@@ -25,8 +25,11 @@
 <li><b>Drop-downs:</b> the Layout tab's choices (direction, align, justify, wrap, size modes, position) and enum props are <a href="widgets/select.html">Select</a> drop-downs.</li>
 </ul>
 
+<h2>Dockable panels</h2>
+<p>The builder's four regions &mdash; <b>Toolbox</b>, <b>Outline</b>, <b>Preview</b> and <b>Inspector</b> &mdash; are <a href="widgets/dock.html">Dock</a> panels. Drag a tab onto another group to tab it in, onto an edge to split, hold Shift or drop it outside to float it; right-click a tab to float or close it. The View menu brings back a panel you closed. <code>Builder.create(..., .{ .dock = my_dock })</code> puts the panels in your own dock (then call <code>builder.arrange()</code> for the default layout); without it the builder makes its own. The workbench does this so the document text is a fifth panel in the same dock.</p>
+<p>The toolbox lists every registered widget (all of those on the <a href="widgets/index.html">widgets page</a> with a document name, plus <code>box</code>); it scrolls when the panel is small. New <code>tree_view</code>, <code>menu_bar</code>, <code>tab_view</code> and <code>dock</code> nodes start with sample content.</p>
 <h2>Resizable regions</h2>
-<p>The tools and outline, the preview, and the inspector are <a href="widgets/split-view.html">SplitViews</a>: drag the dividers to resize them. The palette sits above the outline in a vertical split. In the preview, drag a <code>split_view</code>'s own divider to set its <code>first_size</code> (recorded as one undo step) instead of typing the number.</p>
+<p>Dock panels are separated by <a href="widgets/split-view.html">SplitView</a> dividers: drag them to resize. In the preview, drag a <code>split_view</code>'s own divider to set its <code>first_size</code> (recorded as one undo step) instead of typing the number.</p>
 
 <h2>Defaults for new nodes</h2>
 <p>Area widgets added from the palette (<code>box</code>, <code>scroll_view</code>, <code>split_view</code>, <code>code_editor</code>, <code>canvas</code>) start with <code>.width = .fill, .height = .fill</code>, and a split view's two panes are boxes that fill their halves. Change them in the Layout tab.</p>

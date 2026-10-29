@@ -398,6 +398,14 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   multi-root rendering and per-window input in the platform layer).
   Destruction is deferred during dispatch, so code that tears nodes down from
   an event handler must walk children once instead of waiting for them to go.
+- Registry widgets that wrap code-only things: `TreeView.items` (indented
+  text), `MenuBar.menus` (indented text, `= command`, `-`), `Dock.titles` with
+  children as panels. Each does its widget creation/destruction in
+  `rebuildIfDirty`, called from `Ui.update` before the sweeps (docks first, so
+  the tab panels they build are themselves rebuilt that frame).
+- The builder's regions are dock panels (its own dock, or one passed in with
+  `Options.dock`); the workbench adds the document text as a fifth panel, so
+  every region can be tabbed, split, floated and closed (View menu).
 - Workbench (`zig build workbench`): a code editor on the ZON text beside the
   builder, synced both ways; parse errors go to the status line. Examples build
   ReleaseSafe by default (`-Dexample_optimize`) because the software rasterizer

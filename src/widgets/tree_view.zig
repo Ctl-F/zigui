@@ -86,6 +86,8 @@ pub const TreeView = struct {
     hover_id: u32 = no_item,
     rows_dirty: bool = false,
     pending_scroll: u32 = no_item,
+    /// The `props.items` text the items were last loaded from.
+    seen_items: []const u8 = "",
 
     pub const Props = struct {
         /// Pixels of indentation per level.
@@ -103,8 +105,16 @@ pub const TreeView = struct {
         /// Ctrl-click toggles items and Shift-click or Shift-arrows select a
         /// range. `out.selected` is then the item last clicked (the primary).
         multi_select: bool = false,
+        /// The items as text, one per line, indented by two spaces (or a tab)
+        /// per level: how documents and the builder describe a tree. Setting it
+        /// replaces the items.
+        items: Text = .{},
+        /// Expand every item that has children when `items` is loaded.
+        expand_all: bool = true,
 
         pub const dirty_map = .{
+            .items = shadow.Category.layout,
+            .expand_all = shadow.Category.none,
             .indent = shadow.Category.layout,
             .row_height = shadow.Category.layout,
         };
@@ -136,6 +146,9 @@ pub const TreeView = struct {
         on_toggle: ?event.Callback = null,
         activate_toggles: bool = true,
         multi_select: bool = false,
+        /// Items as indented text (see `Props.items`); copied.
+        items: []const u8 = "",
+        expand_all: bool = true,
     };
 
     pub const listened_kinds = [_]event.EventKind{ .pointer_down, .pointer_move, .pointer_leave, .key_down, .focus_in, .focus_out };
@@ -161,6 +174,7 @@ pub const TreeView = struct {
         self.items.deinit(self.ui.gpa);
         self.roots.deinit(self.ui.gpa);
         self.order.deinit(self.ui.gpa);
+        self.ui.freeText(&self.props.items);
     }
 
     pub fn apply(self: *TreeView, o: Options) !void {
@@ -171,6 +185,8 @@ pub const TreeView = struct {
         self.props.on_toggle = o.on_toggle;
         self.props.activate_toggles = o.activate_toggles;
         self.props.multi_select = o.multi_select;
+        self.props.expand_all = o.expand_all;
+        if (o.items.len > 0) try self.ui.replaceText(&self.props.items, o.items);
         try self.ui.tree.setLabel(self.node, o.label);
         self.scroll = try self.ui.add(ScrollView, self.node, .{
             .style = .{ .grow = 1 },
@@ -256,6 +272,34 @@ pub const TreeView = struct {
         return false;
     }
 
+    /// Replace the items with those described by `text` (see `Props.items`).
+    fn loadItemsText(self: *TreeView, text: []const u8) void {
+        self.clear();
+        var stack: [32]u32 = undefined;
+        var last_level: usize = 0;
+        var any = false;
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |raw| {
+            var depth: usize = 0;
+            var spaces: usize = 0;
+            var i: usize = 0;
+            while (i < raw.len and (raw[i] == ' ' or raw[i] == '\t')) : (i += 1) {
+                if (raw[i] == '\t') depth += 1 else spaces += 1;
+            }
+            depth = @min(depth + spaces / 2, 30);
+            const label = std.mem.trim(u8, raw[i..], " \t\r");
+            if (label.len == 0) continue;
+            // A line indented deeper than its predecessor allows hangs off that predecessor.
+            const level = @min(depth, if (any) last_level + 1 else 0);
+            const parent: u32 = if (level == 0) no_item else stack[level - 1];
+            const id = self.addItem(parent, label) catch return;
+            if (level < stack.len) stack[level] = id;
+            last_level = level;
+            any = true;
+        }
+        if (self.props.expand_all) self.expandAll();
+    }
+
     /// Remove every item.
     pub fn clear(self: *TreeView) void {
         while (self.roots.items.len > 0) self.removeItem(self.roots.items[0]);
@@ -269,7 +313,7 @@ pub const TreeView = struct {
         return if (self.get(id)) |it| it.text.bytes else "";
     }
 
-    pub fn setText(self: *TreeView, id: u32, new_text: []const u8) !void {
+    pub fn setItemText(self: *TreeView, id: u32, new_text: []const u8) !void {
         const it = self.get(id) orelse return error.InvalidItem;
         try self.ui.replaceText(&it.text, new_text);
         self.rows_dirty = true;
@@ -733,6 +777,11 @@ pub const TreeView = struct {
     /// in the same frame and the new ones are prepared and shaped in it.
     pub fn rebuildIfDirty(self: *TreeView) void {
         if (!self.ui.tree.isValid(self.node)) return; // destroyed; not swept yet
+        const items = self.props.items.bytes;
+        if (items.ptr != self.seen_items.ptr or items.len != self.seen_items.len) {
+            self.seen_items = items;
+            if (items.len > 0) self.loadItemsText(items);
+        }
         if (self.rows_dirty) {
             self.rows_dirty = false;
             self.rebuildRows() catch {};
@@ -950,7 +999,7 @@ test "text, user data, insertion order, and child lookup" {
     try testing.expectEqual(b, t.childAt(no_item, 1));
     try testing.expectEqual(c, t.childAt(no_item, 2));
     try testing.expectEqual(@as(usize, 3), t.childCount(no_item));
-    try t.setText(a, "alpha");
+    try t.setItemText(a, "alpha");
     try testing.expectEqualStrings("alpha", t.itemText(a));
     t.setUserData(b, 42);
     try testing.expectEqual(@as(u64, 42), t.userData(b));
@@ -1032,4 +1081,28 @@ test "without multi_select, ctrl-click just selects" {
     r.click(p_b.x, p_b.y, 1);
     try testing.expectEqual(@as(usize, 1), t.selectedCount());
     try testing.expectEqual(s.b, t.selected());
+}
+
+test "items text builds the tree: indentation is depth, blank lines are skipped, deeper jumps hang off the last item" {
+    const r = try Rig.init();
+    defer r.deinit();
+    const t = try r.ui.add(TreeView, r.ui.tree.root, .{
+        .style = .{ .width = Length.px(200), .height = Length.px(200), .shrink = 0 },
+        .items = "src\n  main.zig\n  ui\n    layout.zig\n\ndocs\n      deep\n",
+    });
+    try r.settle();
+    try testing.expectEqual(@as(usize, 2), t.childCount(no_item));
+    const src = t.childAt(no_item, 0);
+    try testing.expectEqualStrings("src", t.itemText(src));
+    try testing.expectEqual(@as(usize, 2), t.childCount(src));
+    const ui_dir = t.childAt(src, 1);
+    try testing.expectEqualStrings("layout.zig", t.itemText(t.childAt(ui_dir, 0)));
+    const docs = t.childAt(no_item, 1);
+    try testing.expectEqualStrings("deep", t.itemText(t.childAt(docs, 0))); // over-indented: one level down
+    try testing.expect(t.isExpanded(src)); // expand_all
+    // Changing the prop replaces the items.
+    try r.ui.replaceText(&t.props.items, "only");
+    try r.settle();
+    try testing.expectEqual(@as(usize, 1), t.childCount(no_item));
+    try testing.expectEqualStrings("only", t.itemText(t.childAt(no_item, 0)));
 }

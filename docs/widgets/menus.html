@@ -66,6 +66,10 @@ try bar.addMenu("File", &amp;.{
 try bar.addMenu("Edit", &amp;.{ .{ .label = "Undo", .command = "edit.undo" } }, null);</code></pre>
 <p>Clicking a title opens its menu below it; while one is open, moving over another title switches to it; clicking the open title again closes it. The optional last argument is a <code>PickHook</code> for that menu. Like <a href="../forms.html">Form</a>, the bar is a heap object you <code>destroy</code>. Put <code>bar.node</code> in your layout. It looks like an application menu bar: a strip (<code>.background</code>) of plain titles that highlight on hover and while their menu is open. Pass <code>.style</code> in the options to size or pad it.</p>
 
+<h2>MenuBar in documents</h2>
+<p><code>menu_bar</code> reads its menus from the <code>menus</code> prop: an unindented line titles a menu, indented lines are its items (<code>Label</code>, <code>Label = command.name</code>, or <code>-</code> for a separator), and a line indented one level further is an item of the previous item's submenu. Items with a command run it (and show its shortcut) so register the commands in your app.</p>
+<pre><code>.{ .type = "menu_bar", .props = .{ .menus = "File\\n  Open = file.open\\n  -\\n  Quit = app.quit\\nEdit\\n  Undo = edit.undo" } }</code></pre>
+<p>Menus added from code with <code>addMenu</code> stay after the text menus when the prop changes. <code>MenuBar.create</code> is shorthand for <code>ui.add(MenuBar, parent, opts)</code>; <code>destroy()</code> removes the nodes.</p>
 <h2>Limits</h2>
 <ul>
 <li>No icons, no keyboard mnemonics (Alt+letter) or arrow-key switching between bar menus yet.</li>

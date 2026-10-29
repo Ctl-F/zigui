@@ -36,6 +36,11 @@ try dock.dockSplit(files, editor, .left, 220); // a 220px column to the left of 
 <tr><td><code>closePanel(panel)</code>, <code>showPanel(panel)</code>, <code>destroyPanel(panel)</code></td><td>Hide, restore, or remove for good (destroying its content).</td></tr>
 <tr><td><code>panelNamed(title)</code>, <code>rebuild()</code></td><td>Lookup; rebuild the widgets from the model (done after every change).</td></tr>
 </table>
+<h2>In documents</h2>
+<p><code>dock</code> is a registered widget: each child of the node is a panel, named by the <code>titles</code> prop (one per line), and they start as tabs of one group. The user can then drag, split and float them at run time; the arrangement is not stored in the document.</p>
+<pre><code>.{ .type = "dock", .props = .{ .titles = "Files\\nOutput" }, .style = .{ .width = .fill, .height = .fill },
+   .children = .{ .{ .type = "box" }, .{ .type = "box" } } }</code></pre>
+<p><code>Dock.create(ui, parent, opts)</code> is shorthand for <code>ui.add(Dock, parent, opts)</code>; <code>dock.destroy()</code> removes its nodes (its memory goes at the next <code>Ui.update</code>). <code>dockRoot(panel, side, size)</code> docks a panel along a whole side of the dock, beside every other group. A split whose new group is on the right or bottom keeps that group at <code>size</code> pixels.</p>
 <h2>How it works</h2>
 <p>The layout is a model (groups, splits, floating windows) that the dock turns into <code>TabPanel</code>s and <code>SplitView</code>s. After each change it detaches every panel's content, rebuilds the widgets and re-parents the content into its new page, so a panel keeps its widgets, text and scroll state when it moves. Split sizes are remembered across rebuilds.</p>
 <h2>Limits</h2>

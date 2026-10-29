@@ -62,6 +62,8 @@ const SplitView = @import("../widgets/split_view.zig").SplitView;
 const menu_mod = @import("../widgets/menu.zig");
 const MenuBar = @import("../widgets/menu_bar.zig").MenuBar;
 const TabPanel = @import("../widgets/tab_panel.zig").TabPanel;
+const dock_mod = @import("../widgets/dock.zig");
+const Dock = dock_mod.Dock;
 const tree_view = @import("../widgets/tree_view.zig");
 const TreeView = tree_view.TreeView;
 const registry = @import("../widgets/registry.zig");
@@ -94,6 +96,10 @@ pub const Options = struct {
     command_prefix: []const u8 = "builder",
     /// Called after the document changes (edit, undo, redo, load).
     on_change: ?event.Callback = null,
+    /// Put the builder's panels (Toolbox, Outline, Preview, Inspector) in this
+    /// dock, which the builder moves under its own toolbar, instead of making
+    /// one. Call `Builder.arrange` to dock them in the default layout.
+    dock: ?*Dock = null,
 };
 
 const panel_bg = Color.rgb(34, 36, 41);
@@ -230,6 +236,13 @@ pub const Builder = struct {
     resize: ?Resize = null,
     split_drag: ?SplitDrag = null,
     menu_bar: ?*MenuBar = null,
+    /// The dock holding the panels below (the caller's, or one made here).
+    dock: *Dock = undefined,
+    owns_dock: bool = false,
+    toolbox_panel: *dock_mod.Panel = undefined,
+    outline_panel: *dock_mod.Panel = undefined,
+    preview_panel: *dock_mod.Panel = undefined,
+    inspector_panel: *dock_mod.Panel = undefined,
     /// The inline editor for a node's id (double-click in the outline).
     rename: ?*TextField = null,
     rename_uid: u32 = 0,
@@ -269,6 +282,7 @@ pub const Builder = struct {
         try self.registerCommands();
         errdefer self.unregisterCommands();
         try self.addMenus();
+        if (self.owns_dock) try self.arrange();
         errdefer {
             self.clearInspector();
             if (self.inst) |*i| i.destroy();
@@ -289,6 +303,10 @@ pub const Builder = struct {
         if (self.menu_bar) |mb| mb.destroy();
         self.menu_bar = null;
         self.unregisterCommands();
+        if (!self.owns_dock) {
+            // The dock is the caller's: take our panels out of it first.
+            for ([_]*dock_mod.Panel{ self.toolbox_panel, self.outline_panel, self.preview_panel, self.inspector_panel }) |p| self.dock.destroyPanel(p);
+        }
         _ = self.ui.tree.destroySubtree(self.root);
         self.event_fields.deinit(self.gpa);
         self.outline_expanded.deinit(self.gpa);
@@ -349,6 +367,24 @@ pub const Builder = struct {
         return h;
     }
 
+    /// Style a dock panel's content node as one of the builder's boxes.
+    fn skin(self: *Builder, h: Handle, style: Style, bg: Color) void {
+        const n = self.ui.tree.get(h).?;
+        n.style = style;
+        n.visual = .{ .background = bg, .border_color = panel_border, .border_width = 1, .radius = 4 };
+    }
+
+    /// Dock the four panels in the default layout (toolbox over outline on the
+    /// left, preview in the middle, inspector on the right). Done for you when
+    /// the builder made its own dock.
+    pub fn arrange(self: *Builder) !void {
+        const d = self.dock;
+        try d.dockTab(self.preview_panel, null);
+        try d.dockSplit(self.inspector_panel, self.preview_panel, .right, self.opts.inspector_width);
+        try d.dockSplit(self.outline_panel, self.preview_panel, .left, self.opts.side_width);
+        try d.dockSplit(self.toolbox_panel, self.outline_panel, .top, palette_height);
+    }
+
     fn panel(self: *Builder, parent: Handle, style: Style, bg: Color) !Handle {
         const h = try self.node(parent, style);
         self.ui.tree.get(h).?.visual = .{ .background = bg, .border_color = panel_border, .border_width = 1, .radius = 4 };
@@ -358,7 +394,7 @@ pub const Builder = struct {
     /// Width of the dividers between the main regions (the gap they replace).
     const split_gap: f32 = 8;
     /// The palette's starting height: its title and five rows of buttons.
-    const palette_height: f32 = 184;
+    const palette_height: f32 = 210;
 
     const tool_button_style: Style = .{ .padding = Edges.xy(7, 3), .shrink = 0 };
 
@@ -396,26 +432,26 @@ pub const Builder = struct {
             ui.tree.get(b.node).?.user_data = @ptrFromInt(i + 1);
         }
 
-        // Three resizable regions: tools and outline | preview | inspector.
-        // The dividers are as wide as the old gaps, so the default look holds.
-        const fill: Style = .{ .width = .fill, .height = .fill };
-        const outer = try ui.add(SplitView, self.root, .{
-            .style = fill,
-            .first_size = self.opts.side_width,
-            .min_first = 140,
-            .min_second = 360,
-            .divider_size = split_gap,
-        });
-        const tools = try ui.add(SplitView, outer.firstNode(), .{
-            .style = fill,
-            .vertical = true,
-            .first_size = palette_height,
-            .min_first = 60,
-            .min_second = 80,
-            .divider_size = split_gap,
-        });
-        self.palette = try self.panel(tools.firstNode(), .{ .direction = .column, .gap = Length.px(2), .padding = Edges.all(8), .width = .fill, .height = .fill }, panel_bg);
-        const outline_panel = try self.panel(tools.secondNode(), .{ .direction = .column, .gap = Length.px(4), .padding = Edges.all(8), .width = .fill, .height = .fill }, panel_bg);
+        // The regions are dock panels: Toolbox, Outline, Preview and Inspector.
+        // (`arrange` docks them side by side; the user can rearrange them.)
+        if (self.opts.dock) |d| {
+            self.dock = d;
+            try ui.tree.appendChild(self.root, d.node);
+            ui.tree.get(d.node).?.style.grow = 1;
+        } else {
+            self.dock = try Dock.create(ui, self.root, .{ .style = .{ .grow = 1 } });
+            self.owns_dock = true;
+        }
+        const dock = self.dock;
+        self.toolbox_panel = try dock.addPanel("Toolbox");
+        self.outline_panel = try dock.addPanel("Outline");
+        self.preview_panel = try dock.addPanel("Preview");
+        self.inspector_panel = try dock.addPanel("Inspector");
+
+        self.palette = self.toolbox_panel.content;
+        self.skin(self.palette, .{ .direction = .column, .gap = Length.px(2), .padding = Edges.all(8), .grow = 1 }, panel_bg);
+        const outline_panel = self.outline_panel.content;
+        self.skin(outline_panel, .{ .direction = .column, .gap = Length.px(4), .padding = Edges.all(8), .grow = 1 }, panel_bg);
         _ = try ui.add(Label, outline_panel, .{ .text = "Outline", .size = 15 });
         self.outline = try ui.add(TreeView, outline_panel, .{
             .style = .{ .grow = 1 },
@@ -431,15 +467,8 @@ pub const Builder = struct {
         self.outline_scroll = self.outline.scroll;
         self.outline_scroll.overlay = tree_mod.PaintHook.bind(self, paintOutlineOverlay);
 
-        const inner = try ui.add(SplitView, outer.secondNode(), .{
-            .style = fill,
-            .first_size = self.opts.inspector_width,
-            .anchor_second = true,
-            .min_first = 200,
-            .min_second = 220,
-            .divider_size = split_gap,
-        });
-        self.preview_host = try self.panel(inner.firstNode(), .{ .direction = .column, .padding = Edges.all(12), .width = .fill, .height = .fill }, host_bg);
+        self.preview_host = self.preview_panel.content;
+        self.skin(self.preview_host, .{ .direction = .column, .padding = Edges.all(12), .grow = 1 }, host_bg);
         {
             const h = ui.tree.get(self.preview_host).?;
             h.flags.clip_children = true;
@@ -456,13 +485,8 @@ pub const Builder = struct {
         ui.tree.get(self.preview_frame).?.visual = .{ .background = frame_bg };
         try self.applyFrameSize();
 
-        const inspector = try self.panel(inner.secondNode(), .{
-            .direction = .column,
-            .gap = Length.px(6),
-            .padding = Edges.all(8),
-            .width = .fill,
-            .height = .fill,
-        }, panel_bg);
+        const inspector = self.inspector_panel.content;
+        self.skin(inspector, .{ .direction = .column, .gap = Length.px(6), .padding = Edges.all(8), .grow = 1 }, panel_bg);
         self.inspector_tabs = try self.node(inspector, .{ .direction = .column, .gap = Length.px(6), .shrink = 0 });
         self.inspector_scroll = try ui.add(ScrollView, inspector, .{
             .style = .{ .grow = 1 },
@@ -471,7 +495,9 @@ pub const Builder = struct {
         self.status = try ui.add(Label, self.root, .{});
 
         _ = try ui.add(Label, self.palette, .{ .text = "Add (click or drag)", .size = 15 });
-        self.palette_grid = try self.node(self.palette, .{ .grid_columns = 2, .gap = Length.px(4), .shrink = 0 });
+        // The buttons scroll when the toolbox is made small.
+        const palette_scroll = try ui.add(ScrollView, self.palette, .{ .style = .{ .grow = 1 }, .content_style = .{ .direction = .column, .padding = .{ .right = Length.px(10) } } });
+        self.palette_grid = try self.node(palette_scroll.contentNode(), .{ .grid_columns = 2, .gap = Length.px(4), .shrink = 0 });
         for (registry.widgets, 0..) |w, i| try self.paletteButton(w.name, i + 1);
         try self.paletteButton(doc_mod.box_type, registry.widgets.len + 1);
     }
@@ -611,6 +637,7 @@ pub const Builder = struct {
             separator,
             self.cmdItem("Rename id", .rename),
         }, null);
+        try self.addViewMenu(mb);
         try mb.addMenu("Structure", &.{
             self.cmdItem("Wrap in box", .wrap),
             self.cmdItem("Unwrap", .unwrap),
@@ -620,6 +647,24 @@ pub const Builder = struct {
             self.cmdItem("Move up", .up),
             self.cmdItem("Move down", .down),
         }, null);
+    }
+
+    /// View: one item per dock panel, to show or hide it.
+    fn addViewMenu(self: *Builder, mb: *MenuBar) !void {
+        var items: [16]menu_mod.Item = undefined;
+        var n: usize = 0;
+        for (self.dock.panels.items) |p| {
+            if (n == items.len) break;
+            items[n] = .{ .label = p.title };
+            n += 1;
+        }
+        try mb.addMenu("View", items[0..n], menu_mod.PickHook.bind(self, onViewPick));
+    }
+
+    fn onViewPick(self: *Builder, index: usize) void {
+        if (index >= self.dock.panels.items.len) return;
+        const p = self.dock.panels.items[index];
+        if (p.state == .hidden) self.dock.showPanel(p) catch {} else self.dock.closePanel(p);
     }
 
     /// The right-click menu for the selected node: the common commands, then
@@ -1536,7 +1581,7 @@ pub const Builder = struct {
 
     fn addWidgetInner(self: *Builder, type_name: []const u8, parent: u32, index: usize) !void {
         // A widget with starting children is one undo step.
-        const multi = std.mem.eql(u8, type_name, "split_view") or std.mem.eql(u8, type_name, "tab_view");
+        const multi = std.mem.eql(u8, type_name, "split_view") or std.mem.eql(u8, type_name, "tab_view") or std.mem.eql(u8, type_name, "dock");
         if (multi) self.editor.beginBatch();
         errdefer if (multi) self.editor.abortBatch();
         const n = try self.editor.addNode(parent, index, type_name);
@@ -1545,8 +1590,18 @@ pub const Builder = struct {
         if (std.mem.eql(u8, type_name, "label")) n.props = try zon.parse(a, defaults.label_props, null);
         if (std.mem.eql(u8, type_name, "button")) n.props = try zon.parse(a, defaults.button_props, null);
         if (std.mem.eql(u8, type_name, doc_mod.box_type)) n.style = try zon.parse(a, defaults.box_style, null);
-        for ([_][]const u8{ "scroll_view", "code_editor", "canvas", "tab_view" }) |area| {
+        for ([_][]const u8{ "scroll_view", "code_editor", "canvas", "tab_view", "dock", "tree_view" }) |area| {
             if (std.mem.eql(u8, type_name, area)) n.style = try zon.parse(a, defaults.area_style, null);
+        }
+        if (std.mem.eql(u8, type_name, "tree_view")) n.props = try zon.parse(a, ".{ .items = \"Parent\\n  Child 1\\n  Child 2\" }", null);
+        if (std.mem.eql(u8, type_name, "menu_bar")) n.props = try zon.parse(a, ".{ .menus = \"File\\n  New\\n  Open\\nEdit\\n  Undo\" }", null);
+        if (std.mem.eql(u8, type_name, "dock")) {
+            n.props = try zon.parse(a, ".{ .titles = \"Panel 1\\nPanel 2\" }", null);
+            // Each panel starts as a box that fills it.
+            for (0..2) |_| {
+                const page = try self.editor.addNode(n.uid, n.children.items.len, doc_mod.box_type);
+                page.style = try zon.parse(a, defaults.pane_style, null);
+            }
         }
         if (std.mem.eql(u8, type_name, "tab_view")) {
             n.props = try zon.parse(a, ".{ .titles = \"Tab 1\\nTab 2\" }", null);
@@ -3148,7 +3203,7 @@ test "the menu bar offers the commands and runs them" {
     const b = r.b;
     try r.frame();
     const mb = b.menu_bar.?;
-    try testing.expectEqual(@as(usize, 3), mb.tops.items.len);
+    try testing.expectEqual(@as(usize, 4), mb.tops.items.len); // File, Edit, View, Structure
     const edit_btn = r.center(mb.tops.items[1].button.node);
     try r.click(edit_btn[0], edit_btn[1]);
     try testing.expect(r.ui.menuOpen());
@@ -3437,4 +3492,32 @@ test "a tab view from the palette starts with two filled pages, and selecting in
     try testing.expectEqual(@as(usize, 1), tabs.activeTab());
     try r.frame();
     try testing.expect(!r.ui.tree.get(r.liveOf(tv.children.items[1].uid)).?.flags.hidden);
+}
+
+test "every registered widget is in the toolbox, and the new ones build from their default document" {
+    const r = try sampleRig();
+    defer r.deinit();
+    const b = r.b;
+    // One palette button per registry entry, plus box.
+    var buttons: usize = 0;
+    var c = b.ui.tree.get(b.palette_grid).?.first_child;
+    while (b.ui.tree.get(c)) |n| : (c = n.next) buttons += 1;
+    try testing.expectEqual(registry.widgets.len + 1, buttons);
+    for (registry.widgets) |w| _ = paletteButton(b, w.name);
+
+    for ([_][]const u8{ "tree_view", "menu_bar", "dock", "tab_view", "select" }) |name| {
+        b.select(b.doc().root.uid);
+        clickButton(paletteButton(b, name));
+        try testing.expectEqualStrings(name, b.selectedNode().type_name);
+    }
+    try r.frame();
+    try r.frame();
+    // (The sample document's own `.padding = 10` is the one known problem.)
+    for (b.inst.?.problems.items) |pr| try testing.expect(std.mem.startsWith(u8, pr.message, "style.padding"));
+    // The tree view and menu bar read their defaults from text props.
+    const tv = b.doc().root.children.items[b.doc().root.children.items.len - 5];
+    try testing.expectEqualStrings("tree_view", tv.type_name);
+    const tree: *TreeView = @ptrCast(@alignCast(r.ui.tree.get(r.liveOf(tv.uid)).?.widget.?));
+    try testing.expectEqual(@as(usize, 1), tree.childCount(tree_view.no_item));
+    try testing.expectEqual(@as(usize, 2), tree.childCount(tree.childAt(tree_view.no_item, 0)));
 }

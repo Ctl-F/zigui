@@ -23,6 +23,9 @@ const Length = @import("../core/length.zig").Length;
 const Button = @import("button.zig").Button;
 const Color = @import("../core/geometry.zig").Color;
 const paint_ctx = @import("../core/paint_ctx.zig");
+const shadow = @import("../core/shadow.zig");
+const tree_mod = @import("../core/tree.zig");
+const Text = @import("common.zig").Text;
 const PaintCtx = paint_ctx.PaintCtx;
 const menu = @import("menu.zig");
 
@@ -31,65 +34,149 @@ const Top = struct {
     arena: std.heap.ArenaAllocator,
     items: []menu.Item,
     on_pick: ?menu.PickHook,
+    /// Read from `props.menus` (and replaced when it changes), as opposed to `addMenu`.
+    from_text: bool = false,
+    /// The title, for re-creating its button.
+    title: []const u8 = "",
 };
 
 pub const MenuBar = struct {
-    ui: *Ui,
+    props: Props = .{},
+    out: Out = .{},
     node: Handle,
+    ui: *Ui,
+    checker: shadow.Checker(Props),
     tops: std.ArrayListUnmanaged(*Top) = .empty,
+    /// The `props.menus` text the text-defined menus were last read from.
+    seen_menus: []const u8 = "",
+
+    pub const Props = struct {
+        /// Menus as text, for documents and the builder. A line with no
+        /// indentation titles a menu; indented lines are its items: `Label`,
+        /// `Label = command.name` (picking runs the command), or `-` for a
+        /// separator. A line indented one level further is an item of the
+        /// previous item's submenu.
+        ///
+        ///     File
+        ///       Open = file.open
+        ///       -
+        ///       Quit = app.quit
+        ///     Edit
+        ///       Undo = edit.undo
+        menus: Text = .{},
+
+        pub const dirty_map = .{
+            .menus = shadow.Category.layout,
+        };
+    };
+
+    pub const Out = struct {
+        menu_count: u32 = 0,
+    };
 
     pub const Options = struct {
         style: Style = .{},
         /// The strip behind the titles; transparent for none.
         background: Color = Color.rgb(0x2b, 0x2d, 0x31),
+        /// Menus as text (see `Props.menus`); copied.
+        menus: []const u8 = "",
     };
 
-    pub fn create(ui: *Ui, parent: Handle, opts: Options) !*MenuBar {
-        const self = try ui.gpa.create(MenuBar);
-        errdefer ui.gpa.destroy(self);
-        var style = opts.style;
-        style.direction = .row;
-        if (style.gap == .pixels and style.gap.pixels == 0) style.gap = Length.px(2);
-        if (std.meta.eql(style.padding, .{})) style.padding = Edges.xy(4, 2);
-        style.align_items = .center;
-        const node = try ui.tree.create(.{ .style = style, .role = .panel, .visual = .{ .background = opts.background, .radius = 4 } });
-        errdefer _ = ui.tree.destroySubtree(node);
-        try ui.tree.appendChild(parent, node);
-        try ui.tree.setLabel(node, "Menu bar");
-        self.* = .{ .ui = ui, .node = node };
-        return self;
+    pub const listened_kinds = [_]event.EventKind{};
+
+    pub fn nodeTemplate(style: Style) tree_mod.Node {
+        var s = style;
+        s.direction = .row;
+        if (s.gap == .pixels and s.gap.pixels == 0) s.gap = Length.px(2);
+        if (std.meta.eql(s.padding, .{})) s.padding = Edges.xy(4, 2);
+        s.align_items = .center;
+        return .{ .style = s, .role = .panel, .visual = .{ .radius = 4 } };
     }
 
-    pub fn destroy(self: *MenuBar) void {
-        if (self.ui.menu) |m| {
-            for (self.tops.items) |t| {
-                if (m.owner.eql(t.button.node)) self.ui.closeMenu();
-            }
-        }
-        _ = self.ui.tree.destroySubtree(self.node);
+    pub fn init(ui: *Ui, node: Handle) MenuBar {
+        const props: Props = .{};
+        return .{ .node = node, .ui = ui, .checker = shadow.Checker(Props).init(&props) };
+    }
+
+    pub fn apply(self: *MenuBar, o: Options) !void {
+        self.ui.tree.get(self.node).?.visual.background = o.background;
+        try self.ui.tree.setLabel(self.node, "Menu bar");
+        if (o.menus.len > 0) try self.ui.replaceText(&self.props.menus, o.menus);
+        self.checker.sync(&self.props);
+    }
+
+    pub fn deinit(self: *MenuBar) void {
         for (self.tops.items) |t| {
             t.arena.deinit();
             self.ui.gpa.destroy(t);
         }
         self.tops.deinit(self.ui.gpa);
-        self.ui.gpa.destroy(self);
+        self.ui.freeText(&self.props.menus);
+    }
+
+    /// Make a bar under `parent` (shorthand for `ui.add(MenuBar, parent, opts)`).
+    pub fn create(ui: *Ui, parent: Handle, opts: Options) !*MenuBar {
+        return ui.add(MenuBar, parent, opts);
+    }
+
+    /// Remove the bar's nodes (its memory is released at the next `Ui.update`).
+    pub fn destroy(self: *MenuBar) void {
+        if (self.ui.menu) |m| {
+            for (self.tops.items) |t| {
+                if (self.ui.tree.isValid(t.button.node) and m.owner.eql(t.button.node)) self.ui.closeMenu();
+            }
+        }
+        _ = self.ui.tree.destroySubtree(self.node);
+    }
+
+    pub fn handleEvent(self: *MenuBar, ev: *event.Event) void {
+        _ = self;
+        _ = ev;
+    }
+
+    pub fn paintHook(self: *MenuBar, pc: *PaintCtx) paint_ctx.Error!void {
+        _ = self;
+        _ = pc;
+    }
+
+    pub fn prepare(self: *MenuBar) void {
+        _ = self;
+    }
+
+    pub fn update(self: *MenuBar) void {
+        self.ui.verifyProps(self.node, &self.checker, &self.props, "menu_bar");
+    }
+
+    pub fn endFrame(self: *MenuBar) void {
+        _ = self;
     }
 
     /// Add a menu titled `label` (the items are copied).
     pub fn addMenu(self: *MenuBar, label: []const u8, items: []const menu.Item, on_pick: ?menu.PickHook) !void {
+        const top = try self.newTop(label, items, on_pick, false);
+        errdefer self.freeTop(top);
+        try self.attach(top, label);
+        try self.tops.append(self.ui.gpa, top);
+        self.out.menu_count = @intCast(self.tops.items.len);
+    }
+
+    fn newTop(self: *MenuBar, label: []const u8, items: []const menu.Item, on_pick: ?menu.PickHook, from_text: bool) !*Top {
         const gpa = self.ui.gpa;
         const top = try gpa.create(Top);
         errdefer gpa.destroy(top);
-        top.arena = std.heap.ArenaAllocator.init(gpa);
+        top.* = .{ .button = undefined, .arena = std.heap.ArenaAllocator.init(gpa), .items = &.{}, .on_pick = on_pick, .from_text = from_text };
         errdefer top.arena.deinit();
-        const a = top.arena.allocator();
-        top.items = try a.alloc(menu.Item, items.len);
-        for (items, top.items) |src, *dst| {
-            dst.* = src;
-            dst.label = try a.dupe(u8, src.label);
-            if (src.command) |c| dst.command = try a.dupe(u8, c);
-        }
-        top.on_pick = on_pick;
+        top.items = try dupItems(top.arena.allocator(), items);
+        top.title = try top.arena.allocator().dupe(u8, label);
+        return top;
+    }
+
+    fn freeTop(self: *MenuBar, top: *Top) void {
+        top.arena.deinit();
+        self.ui.gpa.destroy(top);
+    }
+
+    fn attach(self: *MenuBar, top: *Top, label: []const u8) !void {
         top.button = try self.ui.add(Button, self.node, .{
             .text = label,
             .variant = .flat,
@@ -98,7 +185,104 @@ pub const MenuBar = struct {
         });
         top.button.props.on_click = event.Callback.bind(self, onClick);
         try self.ui.tree.addListener(top.button.node, .{ .kind = .pointer_enter, .callback = event.Callback.bind(self, onHover) });
-        try self.tops.append(gpa, top);
+    }
+
+    fn dupItems(a: std.mem.Allocator, items: []const menu.Item) std.mem.Allocator.Error![]menu.Item {
+        const out = try a.alloc(menu.Item, items.len);
+        for (items, out) |src, *dst| {
+            dst.* = src;
+            dst.label = try a.dupe(u8, src.label);
+            if (src.command) |c| dst.command = try a.dupe(u8, c);
+            dst.submenu = try dupItems(a, src.submenu);
+        }
+        return out;
+    }
+
+    /// Re-read `props.menus` when it changed. `Ui.update` calls this before
+    /// reclaiming destroyed widgets (the title buttons come and go).
+    pub fn rebuildIfDirty(self: *MenuBar) void {
+        if (!self.ui.tree.isValid(self.node)) return;
+        const t = self.props.menus.bytes;
+        if (t.ptr == self.seen_menus.ptr and t.len == self.seen_menus.len) return;
+        self.seen_menus = t;
+        self.ui.closeMenu();
+        // Drop every title button; code-defined menus get new ones below.
+        var i: usize = self.tops.items.len;
+        while (i > 0) {
+            i -= 1;
+            const top = self.tops.items[i];
+            _ = self.ui.tree.destroySubtree(top.button.node);
+            if (top.from_text) {
+                self.freeTop(top);
+                _ = self.tops.orderedRemove(i);
+            }
+        }
+        // Text menus first, then the ones added from code.
+        const code = self.tops.toOwnedSlice(self.ui.gpa) catch return;
+        defer self.ui.gpa.free(code);
+        self.parseMenus(t);
+        for (code) |top| {
+            self.tops.append(self.ui.gpa, top) catch {};
+        }
+        for (self.tops.items) |top| self.attach(top, top.title) catch {};
+        self.out.menu_count = @intCast(self.tops.items.len);
+    }
+
+    /// Build text-defined menus from `text` (see `Props.menus`).
+    fn parseMenus(self: *MenuBar, text: []const u8) void {
+        var scratch = std.heap.ArenaAllocator.init(self.ui.gpa);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        const Entry = struct { item: menu.Item, subs: std.ArrayListUnmanaged(menu.Item) = .empty };
+        var title: []const u8 = "";
+        var entries: std.ArrayListUnmanaged(Entry) = .empty;
+        var it = std.mem.splitScalar(u8, text, '\n');
+        var pending = false;
+        while (true) {
+            const maybe = it.next();
+            const raw = maybe orelse "";
+            const trimmed = std.mem.trim(u8, raw, " \t\r");
+            const indent = raw.len - std.mem.trimStart(u8, raw, " \t").len;
+            const is_title = maybe != null and trimmed.len > 0 and indent == 0;
+            if ((maybe == null or is_title) and pending) {
+                // Close the menu being collected.
+                const items = a.alloc(menu.Item, entries.items.len) catch return;
+                for (entries.items, items) |e, *dst| {
+                    dst.* = e.item;
+                    dst.submenu = e.subs.items;
+                }
+                if (self.newTop(title, items, null, true)) |top| {
+                    self.tops.append(self.ui.gpa, top) catch self.freeTop(top);
+                } else |_| {}
+                entries = .empty;
+                pending = false;
+            }
+            if (maybe == null) break;
+            if (trimmed.len == 0) continue;
+            if (is_title) {
+                title = trimmed;
+                pending = true;
+                continue;
+            }
+            if (!pending) continue;
+            const item = parseItem(trimmed);
+            if (indent >= 4 and entries.items.len > 0) {
+                entries.items[entries.items.len - 1].subs.append(a, item) catch return;
+            } else {
+                entries.append(a, .{ .item = item }) catch return;
+            }
+        }
+    }
+
+    fn parseItem(line: []const u8) menu.Item {
+        if (std.mem.eql(u8, line, "-")) return .{ .separator = true };
+        if (std.mem.indexOfScalar(u8, line, '=')) |eq| {
+            return .{
+                .label = std.mem.trim(u8, line[0..eq], " \t"),
+                .command = std.mem.trim(u8, line[eq + 1 ..], " \t"),
+            };
+        }
+        return .{ .label = line };
     }
 
     /// A title looks like text on the bar: no box until it is hovered or its menu is open.
@@ -244,4 +428,45 @@ test "a menu bar opens its menus, switches on hover, runs commands, and toggles 
     try testing.expect(r.ui.menuOpen());
     try r.click(file[0], file[1]);
     try testing.expect(!r.ui.menuOpen());
+}
+
+test "menus text defines titles, items, commands, separators and submenus; code-added menus survive a change" {
+    const r = try Rig.init();
+    defer r.deinit();
+    _ = try r.ui.registerCommand("t.save", .{ .title = "Save", .run = .bind(r, Rig.onSave) });
+    const bar = try MenuBar.create(&r.ui, r.ui.tree.root, .{
+        .menus = "File\n  Save = t.save\n  -\n  Recent\n    one\n    two\nEdit\n  Undo\n",
+    });
+    try bar.addMenu("Extra", &.{.{ .label = "x" }}, null);
+    try r.frame();
+    try r.frame();
+    try testing.expectEqual(@as(usize, 3), bar.tops.items.len);
+    try testing.expectEqualStrings("File", bar.tops.items[0].title);
+    const file = bar.tops.items[0].items;
+    try testing.expectEqual(@as(usize, 3), file.len);
+    try testing.expectEqualStrings("t.save", file[0].command.?);
+    try testing.expect(file[1].separator);
+    try testing.expectEqual(@as(usize, 2), file[2].submenu.len);
+    try testing.expectEqualStrings("Extra", bar.tops.items[2].title);
+
+    // Running the command through the menu.
+    const at = r.centerOf(bar.tops.items[0].button.node);
+    try r.click(at[0], at[1]);
+    try testing.expect(r.ui.menuOpen());
+    try r.frame();
+    const save = r.centerOf(r.ui.menu.?.entries[0].row);
+    try r.click(save[0], save[1]);
+    try testing.expectEqual(@as(u32, 1), r.saved);
+
+    // New text replaces the text menus and keeps "Extra".
+    try r.ui.replaceText(&bar.props.menus, "Only\n  one\n");
+    try r.frame();
+    try r.frame();
+    try testing.expectEqual(@as(usize, 2), bar.tops.items.len);
+    try testing.expectEqualStrings("Only", bar.tops.items[0].title);
+    try testing.expectEqualStrings("Extra", bar.tops.items[1].title);
+    const again = r.centerOf(bar.tops.items[1].button.node);
+    try r.click(again[0], again[1]);
+    try testing.expect(r.ui.menuOpen());
+    r.ui.closeMenu();
 }
