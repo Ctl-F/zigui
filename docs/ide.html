@@ -18,6 +18,10 @@ out.poll();</code></pre>
 <p>The workbench docks one at the bottom; <b>F5</b> (or Build &rarr; Build) runs <code>zig build</code> and <b>Ctrl+Shift+T</b> runs <code>zig build test</code> in the current directory.</p>
 <h2>Compiler output parsing</h2>
 <p><code>zigui.ide.buildout</code>: <code>parseLine(line)</code> reads <code>path:line:col: error|warning|note: message</code> (Zig's format; Windows drive paths work) into a <code>Diagnostic</code> and returns null for anything else; <code>stripAnsi</code> removes color and cursor escape sequences. No UI.</p>
+<h2>Projects</h2>
+<p><code>zigui.ide.Project</code> wraps a root directory (UI-free). <code>Project.open(gpa, io, path)</code>, <code>listDir(gpa, rel)</code> (directories first, sorted ignoring case, skipping <code>.git</code>, <code>.zig-cache</code>, <code>zig-out</code>, <code>node_modules</code> and similar; free with <code>freeEntries</code>), <code>readFile</code>, <code>writeFile</code>, <code>hasBuildZig</code>, and <code>absPath</code>/<code>relPath</code> converters. Project paths are relative to the root with <code>/</code> separators.</p>
+<h2>Find in project</h2>
+<p><code>zigui.ide.search_project.Searcher.start(gpa, &amp;project, query, options, wake)</code> walks the project on a worker thread and streams <code>Event.hit{path, line, col, text}</code> followed by one <code>Event.done{files, hits, truncated, cancelled}</code>. Call <code>drain</code> from the UI thread, <code>deinit</code> each event, <code>cancel</code> to stop, <code>destroy</code> to join and free. It skips excluded folders, binary files (a NUL in the first 8 KiB) and files over 4 MiB, stops at 5000 hits, and uses the same matcher (case, whole word) as the editor's find bar.</p>
 <h2>What is planned</h2>
-<p>Projects and a file tree, find in project, a completion popup with offline Zig standard-library indexing, language-server support on top of that, a terminal, and event-to-handler wiring with refactors: see <code>NOTES/ide-plan.md</code>.</p>
+<p>A file tree and search panels over these services, a completion popup with offline Zig standard-library indexing, language-server support on top of that, a terminal, and event-to-handler wiring with refactors: see <code>NOTES/ide-plan.md</code>.</p>
 </main><script src="nav.js"></script></body></html>
