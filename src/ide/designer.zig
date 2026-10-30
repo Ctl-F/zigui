@@ -230,6 +230,8 @@ pub const Designer = struct {
             if (self.scan) |*s| s.deinit();
             self.scan = handlers.scan(self.gpa, self.project) catch null;
             const s = &(self.scan orelse return);
+            // Handlers grouped by the file they are in; places to create one; and
+            // the default place, the document's own companion file.
             for (s.handlers, 0..) |h, i| {
                 const action = self.service.manifest.actionFor(h.container, h.file, h.name) orelse h.name;
                 var buf: [160]u8 = undefined;
@@ -237,7 +239,18 @@ pub const Designer = struct {
                     std.fmt.bufPrint(&buf, "{s}.{s}", .{ h.container, h.name }) catch h.name
                 else
                     h.name;
-                out.add(@intCast(i), action, label);
+                out.addIn(h.file, @intCast(i), action, label);
+            }
+            for (s.containers, 0..) |c, i| {
+                var buf: [200]u8 = undefined;
+                out.addTarget(@intCast(i), std.fmt.bufPrint(&buf, "{s}: {s}", .{ c.file, c.name }) catch c.name);
+            }
+            if (self.companion()) |t| {
+                defer self.gpa.free(t.file);
+                defer self.gpa.free(t.container);
+                defer self.gpa.free(t.doc);
+                var buf: [200]u8 = undefined;
+                out.setNewLabel(std.fmt.bufPrint(&buf, "New handler in {s}", .{t.file}) catch "New handler");
             }
         }
 
@@ -247,9 +260,24 @@ pub const Designer = struct {
             return self.service.bindExisting(s.handlers[id]) catch null;
         }
 
-        pub fn create(self: *Designer, node_id: []const u8, widget_type: []const u8, event_name: []const u8) ?[]const u8 {
+        pub fn create(self: *Designer, node_id: []const u8, widget_type: []const u8, event_name: []const u8, target: ?u32) ?[]const u8 {
             const base = if (node_id.len > 0) node_id else widget_type;
-            const action = self.service.create(base, event_name) catch return null;
+            var want: ?handlers.Target = null;
+            var owned: ?handlers.Target = null;
+            defer if (owned) |t| {
+                self.gpa.free(t.file);
+                self.gpa.free(t.container);
+                self.gpa.free(t.doc);
+            };
+            if (target) |id| {
+                const s = self.scan orelse return null;
+                if (id >= s.containers.len) return null;
+                want = .{ .file = s.containers[id].file, .container = s.containers[id].name };
+            } else {
+                owned = self.companion();
+                want = owned;
+            }
+            const action = self.service.create(base, event_name, want) catch return null;
             // Show the new function.
             if (self.service.manifest.find(action)) |b| _ = self.openHandler(b.container, b.file, b.function);
             return action;
@@ -260,6 +288,20 @@ pub const Designer = struct {
             return self.openHandler(b.container, b.file, b.function);
         }
     };
+
+    /// Where the document's own handlers go: a Zig file of the same name next to it
+    /// (`ui/main.ui.zon` -> `ui/main.zig`). Free the strings with the Designer's allocator.
+    fn companion(self: *Designer) ?handlers.Target {
+        if (self.current_path.len == 0) return null;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const t = handlers.companionFor(arena.allocator(), self.current_path) catch return null;
+        return .{
+            .file = self.gpa.dupe(u8, t.file) catch return null,
+            .container = self.gpa.dupe(u8, t.container) catch return null,
+            .doc = self.gpa.dupe(u8, t.doc) catch return null,
+        };
+    }
 
     fn openHandler(self: *Designer, container: []const u8, file: []const u8, function: []const u8) bool {
         var sc = handlers.scan(self.gpa, self.project) catch return false;
@@ -385,25 +427,40 @@ test "the Events tab's provider lists, binds, creates and reveals handlers" {
     const chosen = Designer.Provider.choose(des, items.items[0].id).?;
     try testing.expectEqualStrings("onSave", chosen);
 
-    // Creating opens the main file (the struct's) with a new stub, in the editor buffer.
-    const action = Designer.Provider.create(des, "save", "button", "click").?;
+    // The list says where things are: grouped by file, with the document's companion as the default.
+    try testing.expectEqualStrings("main.zig", items.items[0].group);
+    try testing.expectEqualStrings("New handler in ui/main.zig", out.new_label);
+    // Creating with no target goes to the companion file next to the document, which is
+    // created (and opened) with a struct named after it.
+    const action = Designer.Provider.create(des, "save", "button", "click", null).?;
     try testing.expectEqualStrings("saveClick", action);
+    const comp_doc = docs.find("ui/main.zig").?;
+    const ctext = try comp_doc.editor.textAlloc(testing.allocator);
+    defer testing.allocator.free(ctext);
+    try testing.expect(std.mem.indexOf(u8, ctext, "pub const Main = struct {") != null);
+    try testing.expect(std.mem.indexOf(u8, ctext, "pub fn onSaveClick(self: *Main, ev: *zigui.event.Event) void") != null);
+    const gen = try p.readFile(testing.allocator, handlers.binding_file, 1 << 20);
+    defer testing.allocator.free(gen);
+    try testing.expect(std.mem.indexOf(u8, gen, ".Main.onSaveClick") != null);
+    // Creating in a chosen place (the struct in main.zig) goes into that open buffer, and is saved.
+    Designer.Provider.list(des, "button", "click", &out);
+    var app_target: ?u32 = null;
+    for (des.scan.?.containers, 0..) |c, i| {
+        if (std.mem.eql(u8, c.name, "App")) app_target = @intCast(i);
+    }
+    const action2 = Designer.Provider.create(des, "save", "button", "click", app_target).?;
+    try testing.expectEqualStrings("saveClick2", action2);
     const main_doc = docs.find("main.zig").?;
     const text = try main_doc.editor.textAlloc(testing.allocator);
     defer testing.allocator.free(text);
-    try testing.expect(std.mem.indexOf(u8, text, "pub fn onSaveClick(self: *App, ev: *zigui.event.Event) void") != null);
-    // The buffer was saved, so the disk agrees and the binding file names the new method.
+    try testing.expect(std.mem.indexOf(u8, text, "pub fn onSaveClick2(self: *App, ev: *zigui.event.Event) void") != null);
     const disk = try p.readFile(testing.allocator, "main.zig", 1 << 20);
     defer testing.allocator.free(disk);
     try testing.expectEqualStrings(text, disk);
     try testing.expect(!main_doc.isDirty());
-    const gen = try p.readFile(testing.allocator, handlers.binding_file, 1 << 20);
-    defer testing.allocator.free(gen);
-    try testing.expect(std.mem.indexOf(u8, gen, "f0.App.onSaveClick") != null);
     try testing.expect(Designer.Provider.reveal(des, "saveClick"));
     try testing.expect(!Designer.Provider.reveal(des, "nonexistent"));
-    // The caret is on the new function's line.
+    // Revealing shows the companion file at the function.
     try r.frame();
-    const line = main_doc.editor.out.caret_line;
-    try testing.expect(line >= 8);
+    try testing.expect(comp_doc.editor.out.caret_line >= 4);
 }

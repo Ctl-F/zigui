@@ -233,6 +233,14 @@ const App = struct {
         const zon = doc.toZon(self.gpa) catch return;
         defer self.gpa.free(zon);
         self.project.writeFile(name, zon) catch |err| return self.setStatus("could not create {s}: {s}", .{ name, @errorName(err) });
+        // The Zig file that goes with it, where its event handlers will live.
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        if (ide.handlers.companionFor(arena.allocator(), name)) |t| {
+            if (self.project.readFile(self.gpa, t.file, 16)) |existing| self.gpa.free(existing) else |_| {
+                if (ide.handlers.newFileText(arena.allocator(), t, "")) |body| self.project.writeFile(t.file, body) catch {} else |_| {}
+            }
+        } else |_| {}
         self.files.reload() catch {};
         self.designer.open(name) catch |err| self.setStatus("could not open {s}: {s}", .{ name, @errorName(err) });
     }

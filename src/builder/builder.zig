@@ -36,6 +36,7 @@
 //! To embed it in a larger program (an IDE): create it under any parent node,
 //! give it a `command_prefix` so several can coexist, watch `on_change` and
 //! `modified()`, and load documents with `loadDocument`.
+const zigui = @import("zigui");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -93,17 +94,45 @@ pub const HandlerChoice = struct {
     action: []const u8,
     /// What the menu shows (`App.onSave`).
     label: []const u8,
+    /// Choices with the same group are one submenu (a file name); "" is top level.
+    group: []const u8 = "",
+};
+
+/// Somewhere a new handler can be created (a struct in a file).
+pub const HandlerTarget = struct {
+    id: u32,
+    label: []const u8,
 };
 
 /// Where a `HandlerProvider` puts its candidates (strings are copied).
 pub const HandlerList = struct {
     arena: Allocator,
     items: *std.ArrayListUnmanaged(HandlerChoice),
+    targets: ?*std.ArrayListUnmanaged(HandlerTarget) = null,
+    /// The menu text for creating a handler in the default place ("New handler in ui/main.zig").
+    new_label: []const u8 = "New handler...",
 
     pub fn add(self: *HandlerList, id: u32, action: []const u8, label: []const u8) void {
+        self.addIn("", id, action, label);
+    }
+
+    /// A handler shown in the submenu `group`.
+    pub fn addIn(self: *HandlerList, group: []const u8, id: u32, action: []const u8, label: []const u8) void {
         const a = self.arena.dupe(u8, action) catch return;
         const l = self.arena.dupe(u8, label) catch return;
-        self.items.append(self.arena, .{ .id = id, .action = a, .label = l }) catch {};
+        const g = self.arena.dupe(u8, group) catch return;
+        self.items.append(self.arena, .{ .id = id, .action = a, .label = l, .group = g }) catch {};
+    }
+
+    /// An entry of the "New handler in..." submenu.
+    pub fn addTarget(self: *HandlerList, id: u32, label: []const u8) void {
+        const t = self.targets orelse return;
+        const l = self.arena.dupe(u8, label) catch return;
+        t.append(self.arena, .{ .id = id, .label = l }) catch {};
+    }
+
+    pub fn setNewLabel(self: *HandlerList, text: []const u8) void {
+        self.new_label = self.arena.dupe(u8, text) catch return;
     }
 };
 
@@ -117,8 +146,9 @@ pub const HandlerProvider = struct {
     list: *const fn (ctx: ?*anyopaque, widget_type: []const u8, event_name: []const u8, out: *HandlerList) void,
     /// Use candidate `id`; returns the action name to store (null: failed).
     choose: *const fn (ctx: ?*anyopaque, id: u32) ?[]const u8,
-    /// Create a new handler for a node called `node_id`; returns its action name.
-    create: *const fn (ctx: ?*anyopaque, node_id: []const u8, widget_type: []const u8, event_name: []const u8) ?[]const u8,
+    /// Create a new handler for a node called `node_id`, in `target` (a
+    /// `HandlerTarget.id`; null: the default place); returns its action name.
+    create: *const fn (ctx: ?*anyopaque, node_id: []const u8, widget_type: []const u8, event_name: []const u8, target: ?u32) ?[]const u8,
     /// Show the source of the handler for `action`; false if there is none.
     reveal: *const fn (ctx: ?*anyopaque, action: []const u8) bool,
 
@@ -133,8 +163,8 @@ pub const HandlerProvider = struct {
             fn choose(c: ?*anyopaque, id: u32) ?[]const u8 {
                 return T.choose(@as(Ptr, @ptrCast(@alignCast(c.?))), id);
             }
-            fn create(c: ?*anyopaque, n: []const u8, w: []const u8, e: []const u8) ?[]const u8 {
-                return T.create(@as(Ptr, @ptrCast(@alignCast(c.?))), n, w, e);
+            fn create(c: ?*anyopaque, n: []const u8, w: []const u8, e: []const u8, t: ?u32) ?[]const u8 {
+                return T.create(@as(Ptr, @ptrCast(@alignCast(c.?))), n, w, e, t);
             }
             fn reveal(c: ?*anyopaque, a: []const u8) bool {
                 return T.reveal(@as(Ptr, @ptrCast(@alignCast(c.?))), a);
@@ -291,7 +321,11 @@ pub const Builder = struct {
     event_fields: std.ArrayListUnmanaged(*TextField) = .empty,
     /// The Events tab's menu: choices from the provider, and the event it is for.
     choice_arena: std.heap.ArenaAllocator = undefined,
+    /// The menu's handlers, ungrouped first and then each group's, so a submenu's items are contiguous.
     choices: []const HandlerChoice = &.{},
+    targets: []const HandlerTarget = &.{},
+    /// What each top-level menu entry does (by its index).
+    root_kinds: []const RootKind = &.{},
     choice_event: usize = 0,
     /// Embedded: the toolbar's panel.
     tools_panel: ?*dock_mod.Panel = null,
@@ -2147,8 +2181,23 @@ pub const Builder = struct {
         self.markInspectorEdit(before);
     }
 
-    /// The "..." button of an event row: a menu of handlers that fit, "New
-    /// handler..." and "No handler".
+    const RootKind = union(enum) { choice: usize, group, new, new_in, none };
+    const GroupCtx = struct {
+        b: *Builder,
+        first: usize,
+        fn pick(self: *GroupCtx, index: usize) void {
+            self.b.pickChoice(self.first + index);
+        }
+    };
+    const TargetCtx = struct {
+        b: *Builder,
+        fn pick(self: *TargetCtx, index: usize) void {
+            if (index < self.b.targets.len) self.b.pickNew(self.b.targets[index].id);
+        }
+    };
+
+    /// The "..." button of an event row: a menu of the handlers that fit,
+    /// grouped by file, then "New handler", "New handler in..." and "No handler".
     fn onHandlerMenu(self: *Builder, ev: *event.Event) void {
         const prov = self.opts.handlers orelse return;
         const tag = self.tagOf(ev.current);
@@ -2159,36 +2208,117 @@ pub const Builder = struct {
         if (i >= info.events.len) return;
         _ = self.choice_arena.reset(.retain_capacity);
         const a = self.choice_arena.allocator();
-        var list: std.ArrayListUnmanaged(HandlerChoice) = .empty;
-        var out: HandlerList = .{ .arena = a, .items = &list };
+        var raw: std.ArrayListUnmanaged(HandlerChoice) = .empty;
+        var targets: std.ArrayListUnmanaged(HandlerTarget) = .empty;
+        var out: HandlerList = .{ .arena = a, .items = &raw, .targets = &targets };
         prov.list(prov.ctx, n.type_name, info.events[i], &out);
-        self.choices = list.items;
         self.choice_event = i;
+        self.targets = targets.items;
         var current: []const u8 = "";
         for (n.on) |b| if (std.mem.eql(u8, b.event, info.events[i])) {
             current = b.action;
         };
-        const items = a.alloc(menu_mod.Item, list.items.len + 2) catch return;
-        for (list.items, 0..) |c, k| items[k] = .{ .label = c.label, .checked = std.mem.eql(u8, c.action, current) };
-        items[list.items.len] = .{ .label = "New handler..." };
-        items[list.items.len + 1] = .{ .label = "No handler", .enabled = current.len > 0 };
+
+        // Ungrouped first, then each distinct group (alphabetical), each contiguous.
+        var sorted: std.ArrayListUnmanaged(HandlerChoice) = .empty;
+        for (raw.items) |c| if (c.group.len == 0) sorted.append(a, c) catch return;
+        const ungrouped = sorted.items.len;
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (raw.items) |c| {
+            if (c.group.len == 0) continue;
+            var seen = false;
+            for (names.items) |g| if (std.mem.eql(u8, g, c.group)) {
+                seen = true;
+            };
+            if (!seen) names.append(a, c.group) catch return;
+        }
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn less(_: void, x: []const u8, y: []const u8) bool {
+                return std.mem.lessThan(u8, x, y);
+            }
+        }.less);
+        var starts: std.ArrayListUnmanaged(usize) = .empty;
+        for (names.items) |g| {
+            starts.append(a, sorted.items.len) catch return;
+            for (raw.items) |c| if (std.mem.eql(u8, c.group, g)) sorted.append(a, c) catch return;
+        }
+        self.choices = sorted.items;
+
+        var items: std.ArrayListUnmanaged(menu_mod.Item) = .empty;
+        var kinds: std.ArrayListUnmanaged(RootKind) = .empty;
+        for (sorted.items[0..ungrouped], 0..) |c, k| {
+            items.append(a, .{ .label = c.label, .checked = std.mem.eql(u8, c.action, current) }) catch return;
+            kinds.append(a, .{ .choice = k }) catch return;
+        }
+        for (names.items, 0..) |g, gi| {
+            const first = starts.items[gi];
+            const end = if (gi + 1 < starts.items.len) starts.items[gi + 1] else sorted.items.len;
+            const sub = a.alloc(menu_mod.Item, end - first) catch return;
+            var has_current = false;
+            for (sorted.items[first..end], sub) |c, *it| {
+                const is_cur = std.mem.eql(u8, c.action, current);
+                has_current = has_current or is_cur;
+                it.* = .{ .label = c.label, .checked = is_cur };
+            }
+            const ctx = a.create(GroupCtx) catch return;
+            ctx.* = .{ .b = self, .first = first };
+            items.append(a, .{ .label = g, .submenu = sub, .checked = has_current, .on_pick = menu_mod.PickHook.bind(ctx, GroupCtx.pick) }) catch return;
+            kinds.append(a, .group) catch return;
+        }
+        items.append(a, .{ .label = out.new_label }) catch return;
+        kinds.append(a, .new) catch return;
+        if (targets.items.len > 0) {
+            const sub = a.alloc(menu_mod.Item, targets.items.len) catch return;
+            for (targets.items, sub) |t, *it| it.* = .{ .label = t.label };
+            const ctx = a.create(TargetCtx) catch return;
+            ctx.* = .{ .b = self };
+            items.append(a, .{ .label = "New handler in...", .submenu = sub, .on_pick = menu_mod.PickHook.bind(ctx, TargetCtx.pick) }) catch return;
+            kinds.append(a, .new_in) catch return;
+        }
+        items.append(a, .{ .label = "No handler", .enabled = current.len > 0 }) catch return;
+        kinds.append(a, .none) catch return;
+        self.root_kinds = kinds.items;
         const rect = self.ui.tree.absoluteRect(ev.current) orelse return;
-        self.ui.openMenu(items, rect.x, rect.bottom(), .{ .on_pick = menu_mod.PickHook.bind(self, onHandlerPicked), .anchor = rect, .owner = ev.current, .min_width = 200 }) catch |e| self.updateStatus(e);
+        self.ui.openMenu(items.items, rect.x, rect.bottom(), .{ .on_pick = menu_mod.PickHook.bind(self, onHandlerPicked), .anchor = rect, .owner = ev.current, .min_width = 220 }) catch |e| self.updateStatus(e);
     }
 
     fn onHandlerPicked(self: *Builder, index: usize) void {
-        const prov = self.opts.handlers orelse return;
-        const n = self.selectedNode();
-        const info = (self.live(n) orelse return).info orelse return;
-        const i = self.choice_event;
-        if (i >= info.events.len or i >= self.event_fields.items.len) return;
-        var action: []const u8 = "";
-        if (index < self.choices.len) {
-            action = prov.choose(prov.ctx, self.choices[index].id) orelse return self.updateStatusText("Could not use that handler");
-        } else if (index == self.choices.len) {
-            action = prov.create(prov.ctx, n.id, n.type_name, info.events[i]) orelse return self.updateStatusText("Could not create a handler");
+        if (index >= self.root_kinds.len) return;
+        switch (self.root_kinds[index]) {
+            .choice => |k| self.pickChoice(k),
+            .new => self.pickNew(null),
+            .none => self.pickNone(),
+            .group, .new_in => {},
         }
-        self.setEventAction(i, action);
+    }
+
+    fn eventForMenu(self: *Builder) ?struct { info: *const registry.Info, i: usize } {
+        const n = self.selectedNode();
+        const info = (self.live(n) orelse return null).info orelse return null;
+        const i = self.choice_event;
+        if (i >= info.events.len or i >= self.event_fields.items.len) return null;
+        return .{ .info = info, .i = i };
+    }
+
+    fn pickChoice(self: *Builder, k: usize) void {
+        const prov = self.opts.handlers orelse return;
+        const e = self.eventForMenu() orelse return;
+        if (k >= self.choices.len) return;
+        const action = prov.choose(prov.ctx, self.choices[k].id) orelse return self.updateStatusText("Could not use that handler");
+        self.setEventAction(e.i, action);
+    }
+
+    fn pickNew(self: *Builder, target: ?u32) void {
+        const prov = self.opts.handlers orelse return;
+        const e = self.eventForMenu() orelse return;
+        const n = self.selectedNode();
+        const action = prov.create(prov.ctx, n.id, n.type_name, e.info.events[e.i], target) orelse return self.updateStatusText("Could not create a handler");
+        self.setEventAction(e.i, action);
+    }
+
+    fn pickNone(self: *Builder) void {
+        const e = self.eventForMenu() orelse return;
+        self.setEventAction(e.i, "");
     }
 
     /// Bind (or with "" unbind) event `i` of the selected node and show it in the field.
@@ -2631,6 +2761,11 @@ pub const Builder = struct {
     fn paintOutlineOverlay(self: *Builder, pc: *PaintCtx) paint_ctx.Error!void {
         _ = pc;
         _ = self;
+    }
+
+    pub fn onButtonClick(self: *Builder, ev: *zigui.event.Event) void {
+        _ = self;
+        _ = ev;
     }
 };
 
@@ -3787,22 +3922,34 @@ const FakeHandlers = struct {
     revealed_len: usize = 0,
     last_node: [32]u8 = undefined,
     last_node_len: usize = 0,
+    last_target: ?u32 = null,
 
     pub fn list(self: *FakeHandlers, widget_type: []const u8, event_name: []const u8, out: *HandlerList) void {
         _ = self;
         if (std.mem.eql(u8, widget_type, "button") and std.mem.eql(u8, event_name, "click")) {
-            out.add(7, "save", "App.onSave");
-            out.add(8, "quit", "App.onQuit");
+            out.addIn("src/app.zig", 7, "save", "App.onSave");
+            out.addIn("src/app.zig", 8, "quit", "App.onQuit");
+            out.addIn("ui/main.zig", 9, "ok", "Main.onOk");
+            out.add(10, "free", "onFree");
+            out.addTarget(5, "src/app.zig: App");
+            out.addTarget(6, "ui/other.zig: Other");
+            out.setNewLabel("New handler in ui/main.zig");
         }
     }
     pub fn choose(self: *FakeHandlers, id: u32) ?[]const u8 {
         _ = self;
-        return if (id == 7) "save" else "quit";
+        return switch (id) {
+            7 => "save",
+            8 => "quit",
+            9 => "ok",
+            else => "free",
+        };
     }
-    pub fn create(self: *FakeHandlers, node_id: []const u8, widget_type: []const u8, event_name: []const u8) ?[]const u8 {
+    pub fn create(self: *FakeHandlers, node_id: []const u8, widget_type: []const u8, event_name: []const u8, target: ?u32) ?[]const u8 {
         _ = widget_type;
         _ = event_name;
         self.created += 1;
+        self.last_target = target;
         @memcpy(self.last_node[0..node_id.len], node_id);
         self.last_node_len = node_id.len;
         return "okClick";
@@ -3849,27 +3996,41 @@ test "the Events tab offers handlers from the provider: choose, create, go to, c
     try r.frame();
     try testing.expectEqual(@as(usize, 1), b.event_fields.items.len);
 
-    // "..." opens a menu: the two handlers, "New handler...", "No handler".
+    // "..." opens a menu: ungrouped handlers, one submenu per file, then "New handler in ...",
+    // "New handler in..." (a submenu of places) and "No handler".
     clickButton(eventsButton(b, "..."));
     try testing.expect(r.ui.menuOpen());
-    try testing.expectEqual(@as(usize, 2), b.choices.len);
-    try testing.expectEqualStrings("App.onQuit", b.choices[1].label);
+    try testing.expectEqual(@as(usize, 4), b.choices.len);
+    try testing.expectEqualStrings("onFree", b.choices[0].label); // top level first
+    try testing.expectEqualStrings("App.onSave", b.choices[1].label); // then src/app.zig's, contiguous
+    try testing.expectEqualStrings("App.onQuit", b.choices[2].label);
+    try testing.expectEqualStrings("Main.onOk", b.choices[3].label); // then ui/main.zig's
+    try testing.expectEqual(@as(usize, 6), b.root_kinds.len); // free, 2 groups, new, new in, none
+    try testing.expect(b.root_kinds[1] == .group and b.root_kinds[2] == .group);
+    try testing.expect(b.root_kinds[3] == .new and b.root_kinds[4] == .new_in and b.root_kinds[5] == .none);
+    try testing.expectEqual(@as(usize, 2), b.targets.len);
     r.ui.closeMenu();
 
-    // Choosing one binds it and shows it in the field.
-    b.onHandlerPicked(0);
-    try testing.expectEqualStrings("save", ok.on[0].action);
-    try testing.expectEqualStrings("save", b.event_fields.items[0].text());
-    // Creating gets a name from the provider, with the node's id as the base.
-    b.onHandlerPicked(2);
+    // Choosing a handler (from a submenu) binds it and shows it in the field.
+    b.pickChoice(2);
+    try testing.expectEqualStrings("quit", ok.on[0].action);
+    try testing.expectEqualStrings("quit", b.event_fields.items[0].text());
+    b.onHandlerPicked(0); // the top-level one, through the menu's own dispatch
+    try testing.expectEqualStrings("free", ok.on[0].action);
+    // "New handler" creates in the default place, with the node's id as the base.
+    b.onHandlerPicked(3);
     try testing.expectEqual(@as(u32, 1), fake.created);
+    try testing.expectEqual(@as(?u32, null), fake.last_target);
     try testing.expectEqualStrings("ok", fake.last_node[0..fake.last_node_len]);
     try testing.expectEqualStrings("okClick", ok.on[0].action);
+    // "New handler in..." passes the chosen place.
+    b.pickNew(b.targets[1].id);
+    try testing.expectEqual(@as(?u32, 6), fake.last_target);
     // "Go" asks the provider to show the source.
     clickButton(eventsButton(b, "Go"));
     try testing.expectEqualStrings("okClick", fake.revealed[0..fake.revealed_len]);
     // "No handler" clears it, and undo brings it back.
-    b.onHandlerPicked(3);
+    b.onHandlerPicked(5);
     try testing.expectEqual(@as(usize, 0), ok.on.len);
     b.undo();
     try testing.expectEqualStrings("okClick", byId(b, "ok").on[0].action);

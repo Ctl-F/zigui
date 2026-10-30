@@ -459,7 +459,11 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   and renames as lists of file edits, and applies them through open editor
   buffers when there are any. `ide/designer.zig` syncs a `.ui.zon` text tab and
   the builder both ways; `ide/prompt.zig` is the one-line question bar (two-step
-  rename confirmation). Rename finds references by name (declaration, member
+  rename confirmation). The Events menu groups handlers into a submenu per file
+  (`HandlerChoice.group`), offers "New handler in <companion>.zig" (`ui/main.ui.zon`
+  -> `ui/main.zig` with `Main`, created with the document) and "New handler in..."
+  (`HandlerTarget`s); `planCreate` takes an optional `Target` and creates a missing
+  file or appends a missing struct. Rename finds references by name (declaration, member
   accesses in its file, `Container.name` elsewhere), not by type; moving a
   handler is not done yet. The IDE app got a full menu bar of commands.
 - Restart (`ide/relaunch.zig`; `resolveExe` prefers `zig-out/bin/<name>` over a copy run from `.zig-cache/o/...`, which a rebuild leaves stale, Ctrl+Shift+F6 / Ctrl+Shift+F5 in the IDE app): spawn

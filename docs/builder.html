@@ -63,14 +63,17 @@ try builder.loadDocument(new_doc);   // swap the document</code></pre>
 <p>By default an event row in the Events tab is a text field for the action name. Give the builder a <code>HandlerProvider</code> and each row also gets <b>...</b> and <b>Go</b> buttons:</p>
 <pre><code>const Provider = struct {
     pub fn list(self: *Provider, widget_type: []const u8, event_name: []const u8, out: *HandlerList) void {
-        out.add(id, "save", "App.onSave");           // id (yours), action name to store, menu text
+        out.addIn("src/app.zig", id, "save", "App.onSave");   // group (a submenu), id (yours), action to store, menu text
+        out.add(id2, "free", "onFree");                         // no group: a top-level item
+        out.addTarget(5, "src/app.zig: App");                  // an entry of "New handler in..."
+        out.setNewLabel("New handler in ui/main.zig");        // the default place, named
     }
     pub fn choose(self: *Provider, id: u32) ?[]const u8 { ... }       // use candidate id; returns the action name
-    pub fn create(self: *Provider, node_id: []const u8, widget_type: []const u8, event_name: []const u8) ?[]const u8 { ... }
+    pub fn create(self: *Provider, node_id: []const u8, widget_type: []const u8, event_name: []const u8, target: ?u32) ?[]const u8 { ... }
     pub fn reveal(self: *Provider, action: []const u8) bool { ... }   // show its source
 };
 .handlers = HandlerProvider.bind(&amp;provider, Provider),</code></pre>
-<p><b>...</b> opens a menu of the candidates (the current one checked), <b>New handler...</b> and <b>No handler</b>; choosing sets the event on the node as an undoable edit. <b>Go</b> calls <code>reveal</code> with the field's action name. <code>list</code> runs every time the menu opens, so a provider can rescan its sources.</p>
+<p><b>...</b> opens a menu: ungrouped candidates, then one <b>submenu per group</b> (the IDE groups by file, so you drill down by file; the submenu holding the current handler is checked), then the new-handler entry (<code>setNewLabel</code> text), <b>New handler in...</b> (a submenu of the places added with <code>addTarget</code>; <code>create</code> receives its id, or null for the default place) and <b>No handler</b>; choosing sets the event on the node as an undoable edit. <b>Go</b> calls <code>reveal</code> with the field's action name. <code>list</code> runs every time the menu opens, so a provider can rescan its sources.</p>
 
 <h2>Limits</h2>
 <p>No zoom, no live text editing on the preview, no drag from the preview onto the inspector.</p>

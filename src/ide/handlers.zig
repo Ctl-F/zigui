@@ -582,14 +582,56 @@ pub fn chooseTarget(scan_result: *const Scan, manifest: *const Manifest) ?*const
     return best;
 }
 
-/// Plan a new handler for event `event_name` of the node called `base`.
-pub fn planCreate(gpa: Allocator, project: *const Project, scan_result: *const Scan, manifest: *const Manifest, base: []const u8, event_name: []const u8) !Plan {
+/// Where a new handler goes: a struct in a file (either may not exist yet).
+pub const Target = struct {
+    file: []const u8,
+    container: []const u8,
+    /// The UI document it is for, named in a new file's header comment.
+    doc: []const u8 = "",
+};
+
+/// `main_window` -> `MainWindow`, `untitled-1` -> `Untitled1` (a valid type name).
+pub fn pascalCase(a: Allocator, s: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    try capitalized(a, s, &out);
+    if (out.items.len == 0 or std.ascii.isDigit(out.items[0])) try out.insert(a, 0, 'U');
+    return out.items;
+}
+
+/// The Zig file that goes with a UI document: `ui/main.ui.zon` -> `ui/main.zig`
+/// holding `Main`.
+pub fn companionFor(a: Allocator, ui_path: []const u8) !Target {
+    const base_name = std.fs.path.basename(ui_path);
+    const stem = if (std.mem.endsWith(u8, base_name, ".ui.zon")) base_name[0 .. base_name.len - ".ui.zon".len] else if (std.mem.endsWith(u8, base_name, ".zon")) base_name[0 .. base_name.len - ".zon".len] else base_name;
+    const dir = std.fs.path.dirname(ui_path) orelse "";
+    const file = if (dir.len > 0) try std.fmt.allocPrint(a, "{s}/{s}.zig", .{ dir, stem }) else try std.fmt.allocPrint(a, "{s}.zig", .{stem});
+    return .{ .file = file, .container = try pascalCase(a, stem), .doc = try a.dupe(u8, base_name) };
+}
+
+/// The text of a new handlers file (with `body` inside the struct).
+pub fn newFileText(a: Allocator, t: Target, body: []const u8) ![]u8 {
+    const subject = if (t.doc.len > 0) t.doc else "this project's UI documents";
+    return std.fmt.allocPrint(a,
+        \\//! Event handlers for {s}. The IDE adds a method to `{s}` for each "New handler"
+        \\//! you create in the designer (Events tab); edit them, or move them where you like.
+        \\const zigui = @import("zigui");
+        \\
+        \\pub const {s} = struct {{
+        \\{s}}};
+        \\
+    , .{ subject, t.container, t.container, body });
+}
+
+/// Plan a new handler for event `event_name` of the node called `base`, in
+/// `want` (if that struct or file is missing it is created) or else the default struct.
+pub fn planCreate(gpa: Allocator, project: *const Project, scan_result: *const Scan, manifest: *const Manifest, base: []const u8, event_name: []const u8, want: ?Target) !Plan {
     var p: Plan = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
     errdefer p.arena.deinit();
     const a = p.arena.allocator();
-    const target = chooseTarget(scan_result, manifest);
-    const file: []const u8 = if (target) |t| t.file else fallback_file;
-    const container: []const u8 = if (target) |t| t.name else fallback_container;
+    const existing: ?*const Container = if (want) |w| scan_result.findContainer(w.container, w.file) else chooseTarget(scan_result, manifest);
+    const goal: Target = if (want) |w| w else if (existing) |t| .{ .file = t.file, .container = t.name } else .{ .file = fallback_file, .container = fallback_container };
+    const file = try a.dupe(u8, goal.file);
+    const container = try a.dupe(u8, goal.container);
 
     // A free action name and function name.
     const action0 = try suggestAction(a, base, event_name);
@@ -602,44 +644,42 @@ pub fn planCreate(gpa: Allocator, project: *const Project, scan_result: *const S
     }
 
     var edits: std.ArrayListUnmanaged(FileEdit) = .empty;
-    if (target) |t| {
-        const bytes = try project.readFile(gpa, file, 4 * 1024 * 1024);
-        defer gpa.free(bytes);
-        const src = try gpa.dupeSentinel(u8, bytes, 0);
+    const bytes: ?[]u8 = project.readFile(gpa, file, 4 * 1024 * 1024) catch null;
+    defer if (bytes) |b| gpa.free(b);
+    if (bytes) |b| {
+        const src = try gpa.dupeSentinel(u8, b, 0);
         defer gpa.free(src);
         var ast = try Ast.parse(gpa, src, .{});
         defer ast.deinit(gpa);
         const alias = zigAlias(&ast) orelse "zigui";
-        const body_empty = blk: {
-            var i = t.close;
-            while (i > 0 and (src[i - 1] == ' ' or src[i - 1] == '\n' or src[i - 1] == '\r' or src[i - 1] == '\t')) i -= 1;
-            break :blk i > 0 and src[i - 1] == '{';
-        };
-        const stub = try stubText(a, t.indent, container, function, alias, !body_empty);
-        // Before the closing brace's line when it stands alone on it.
-        const ls = lineStartOf(src, t.close);
-        const alone = std.mem.trim(u8, src[ls..t.close], " \t").len == 0;
-        const at = if (alone) ls else t.close;
-        try edits.append(a, .{ .file = file, .start = at, .end = at, .text = stub });
+        if (existing) |t| {
+            const body_empty = blk: {
+                var i = t.close;
+                while (i > 0 and (src[i - 1] == ' ' or src[i - 1] == '\n' or src[i - 1] == '\r' or src[i - 1] == '\t')) i -= 1;
+                break :blk i > 0 and src[i - 1] == '{';
+            };
+            const stub = try stubText(a, t.indent, container, function, alias, !body_empty);
+            // Before the closing brace's line when it stands alone on it.
+            const ls = lineStartOf(src, t.close);
+            const alone = std.mem.trim(u8, src[ls..t.close], " \t").len == 0;
+            const at = if (alone) ls else t.close;
+            try edits.append(a, .{ .file = file, .start = at, .end = at, .text = stub });
+            if (!t.is_pub) {
+                // The binding file names the struct from another file.
+                const decl = declStart(&ast, container) orelse 0;
+                try edits.append(a, .{ .file = file, .start = decl, .end = decl, .text = "pub " });
+            }
+        } else {
+            // The file exists but has no such struct: add it at the end.
+            const lead: []const u8 = if (src.len > 0 and src[src.len - 1] != '\n') "\n\n" else "\n";
+            const text = try std.fmt.allocPrint(a, "{s}pub const {s} = struct {{\n{s}}};\n", .{ lead, container, try stubText(a, 4, container, function, alias, false) });
+            try edits.append(a, .{ .file = file, .start = src.len, .end = src.len, .text = text });
+        }
         if (zigAlias(&ast) == null) {
             try edits.append(a, .{ .file = file, .start = importOffset(src), .end = importOffset(src), .text = "const zigui = @import(\"zigui\");\n" });
         }
-        if (!t.is_pub) {
-            // The binding file names the struct from another file.
-            const decl = declStart(&ast, container) orelse 0;
-            try edits.append(a, .{ .file = file, .start = decl, .end = decl, .text = "pub " });
-        }
     } else {
-        const text = try std.fmt.allocPrint(a,
-            \\//! Event handlers for this project's UI documents. The IDE adds a method here
-            \\//! for each "New handler" you create in the designer; move them where you like.
-            \\const zigui = @import("zigui");
-            \\
-            \\pub const {s} = struct {{
-            \\{s}}};
-            \\
-        , .{ container, try stubText(a, 4, container, function, "zigui", false) });
-        p.new_file = text;
+        p.new_file = try newFileText(a, goal, try stubText(a, 4, container, function, "zigui", false));
     }
     p.edits = edits.items;
     p.action = action;
@@ -763,7 +803,10 @@ pub const Handlers = struct {
 
     /// Apply a plan's edits (open buffers through the hook, other files on disk).
     pub fn apply(self: *Handlers, plan: *const Plan) !void {
-        if (plan.new_file) |text| try self.project.writeFile(plan.file, text);
+        if (plan.new_file) |text| {
+            if (std.fs.path.dirname(plan.file)) |dir| try self.project.dir.createDirPath(self.project.io, dir);
+            try self.project.writeFile(plan.file, text);
+        }
         var i: usize = 0;
         while (i < plan.edits.len) {
             var j = i;
@@ -806,15 +849,16 @@ pub const Handlers = struct {
         return self.manifest.find(action).?.action;
     }
 
-    /// Create a handler for `event_name` of the node `base` and bind it; returns the action name.
-    pub fn create(self: *Handlers, base: []const u8, event_name: []const u8) ![]const u8 {
+    /// Create a handler for `event_name` of the node `base` in `want` (null: the
+    /// project's default struct) and bind it; returns the action name.
+    pub fn create(self: *Handlers, base: []const u8, event_name: []const u8, want: ?Target) ![]const u8 {
         var sc = try scan(self.gpa, self.project);
         defer sc.deinit();
-        var plan = try planCreate(self.gpa, self.project, &sc, &self.manifest, base, event_name);
+        var plan = try planCreate(self.gpa, self.project, &sc, &self.manifest, base, event_name, want);
         defer plan.deinit();
         try self.apply(&plan);
         try self.manifest.bind(plan.action, plan.container, plan.function, plan.file);
-        if (self.manifest.default_container.len == 0) try self.manifest.setDefault(plan.container, plan.file);
+        if (want == null and self.manifest.default_container.len == 0) try self.manifest.setDefault(plan.container, plan.file);
         try self.commit();
         return self.manifest.find(plan.action).?.action;
     }
@@ -983,7 +1027,7 @@ test "creating a handler adds a stub to the busiest struct, binds it and regener
     defer p.close();
     var h = try Handlers.init(testing.allocator, &p);
     defer h.deinit();
-    const action = try h.create("ok_button", "click");
+    const action = try h.create("ok_button", "click", null);
     try testing.expectEqualStrings("okButtonClick", action);
     const main = try p.readFile(testing.allocator, "src/main.zig", 1 << 20);
     defer testing.allocator.free(main);
@@ -1001,7 +1045,7 @@ test "creating a handler adds a stub to the busiest struct, binds it and regener
     defer testing.allocator.free(gen);
     try testing.expect(std.mem.indexOf(u8, gen, "f0.App.onOkButtonClick") != null);
     // A second request for the same widget and event gets a fresh name.
-    const again = try h.create("ok_button", "click");
+    const again = try h.create("ok_button", "click", null);
     try testing.expectEqualStrings("okButtonClick2", again);
     const main2 = try p.readFile(testing.allocator, "src/main.zig", 1 << 20);
     defer testing.allocator.free(main2);
@@ -1017,7 +1061,7 @@ test "with no struct to put it in, a handlers file is created" {
     defer p.close();
     var h = try Handlers.init(testing.allocator, &p);
     defer h.deinit();
-    const action = try h.create("go", "click");
+    const action = try h.create("go", "click", null);
     try testing.expectEqualStrings("goClick", action);
     const text = try p.readFile(testing.allocator, fallback_file, 1 << 20);
     defer testing.allocator.free(text);
@@ -1027,7 +1071,7 @@ test "with no struct to put it in, a handlers file is created" {
     defer sc.deinit();
     try testing.expect(sc.findHandler("Handlers", fallback_file, "onGoClick") != null);
     // Creating another one now lands in the same file.
-    _ = try h.create("stop", "click");
+    _ = try h.create("stop", "click", null);
     var sc2 = try scan(testing.allocator, &p);
     defer sc2.deinit();
     try testing.expectEqual(@as(u32, 2), sc2.findContainer("Handlers", fallback_file).?.handler_count);
@@ -1127,10 +1171,54 @@ test "an open editor buffer takes the edits instead of the disk" {
     h.on_apply = .{ .ctx = &hook, .call = Hook.apply };
     const before = try p.readFile(testing.allocator, "src/main.zig", 1 << 20);
     defer testing.allocator.free(before);
-    _ = try h.create("x", "click");
+    _ = try h.create("x", "click", null);
     try testing.expectEqual(@as(usize, 1), hook.files);
     try testing.expect(hook.edits >= 1);
     const after = try p.readFile(testing.allocator, "src/main.zig", 1 << 20);
     defer testing.allocator.free(after);
     try testing.expectEqualStrings(before, after); // the hook owns the text, so the disk is unchanged
+}
+
+test "a companion file goes with a UI document: names, creation in an existing file, and a missing struct" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t = try companionFor(a, "ui/main_window.ui.zon");
+    try testing.expectEqualStrings("ui/main_window.zig", t.file);
+    try testing.expectEqualStrings("MainWindow", t.container);
+    try testing.expectEqualStrings("main_window.ui.zon", t.doc);
+    const root_t = try companionFor(a, "untitled-1.ui.zon");
+    try testing.expectEqualStrings("untitled-1.zig", root_t.file);
+    try testing.expectEqualStrings("Untitled1", root_t.container);
+    try testing.expectEqualStrings("U9lives", try pascalCase(a, "9lives"));
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var p = try demoProject(&tmp);
+    defer p.close();
+    var h = try Handlers.init(testing.allocator, &p);
+    defer h.deinit();
+    // The file does not exist: it is created, with its directory, header and struct.
+    const action = try h.create("ok", "click", t);
+    try testing.expectEqualStrings("okClick", action);
+    const text = try p.readFile(testing.allocator, "ui/main_window.zig", 1 << 20);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "//! Event handlers for main_window.ui.zon.") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "pub const MainWindow = struct {") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "pub fn onOkClick(self: *MainWindow, ev: *zigui.event.Event) void {") != null);
+    // A second handler for the same document goes into the same struct.
+    _ = try h.create("cancel", "click", t);
+    var sc = try scan(testing.allocator, &p);
+    defer sc.deinit();
+    try testing.expectEqual(@as(u32, 2), sc.findContainer("MainWindow", "ui/main_window.zig").?.handler_count);
+    // The project's default struct is left alone (the manifest has none from this).
+    try testing.expectEqualStrings("", h.manifest.default_container);
+    // A file that exists without the struct gets it appended.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "ui/other.zig", .data = "const x = 1;" });
+    const t2 = try companionFor(a, "ui/other.ui.zon");
+    _ = try h.create("go", "click", t2);
+    const other = try p.readFile(testing.allocator, "ui/other.zig", 1 << 20);
+    defer testing.allocator.free(other);
+    try testing.expect(std.mem.indexOf(u8, other, "const x = 1;\n\npub const Other = struct {\n    pub fn onGoClick(self: *Other") != null);
+    try testing.expect(std.mem.indexOf(u8, other, "const zigui = @import(\"zigui\");") != null);
 }

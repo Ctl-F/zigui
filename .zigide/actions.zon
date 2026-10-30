@@ -1,0 +1,8 @@
+// UI action bindings, maintained by the zigui IDE. ui_actions.zig is generated from this.
+.{
+    .default_container = "Builder",
+    .default_file = "src/builder/builder.zig",
+    .bindings = .{
+        .{ .action = "buttonClick", .container = "Builder", .function = "onButtonClick", .file = "src/builder/builder.zig" },
+    },
+}
