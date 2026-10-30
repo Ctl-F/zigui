@@ -16,6 +16,8 @@ pub const jsonrpc = @import("ide/lsp/jsonrpc.zig");
 pub const lsp_assist = @import("ide/lsp_assist.zig");
 pub const lsp_client = @import("ide/lsp/client.zig");
 pub const lsp_results = @import("ide/lsp/results.zig");
+pub const terminal_panel = @import("ide/terminal_panel.zig");
+pub const TerminalPanel = terminal_panel.TerminalPanel;
 pub const documents = @import("ide/documents.zig");
 pub const Documents = documents.Documents;
 pub const output_panel = @import("ide/output_panel.zig");
@@ -28,6 +30,7 @@ test {
     _ = search_project;
     _ = files_panel;
     _ = documents;
+    _ = terminal_panel;
     _ = jsonrpc;
     _ = lsp_client;
     _ = lsp_assist;

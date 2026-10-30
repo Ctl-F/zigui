@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Terminal - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>Terminal</h1>
+<p>A terminal emulator widget: it draws the screen a program produces and turns keys, text, mouse and paste into the bytes the program expects. It is made of three parts you can use separately.</p>
+<table>
+<tr><th>Part</th><th>What it is</th></tr>
+<tr><td><code>zigui.vt.Screen</code> (<code>terminal/vt.zig</code>)</td><td>The emulator: feed it bytes, read the grid. No UI, no process.</td></tr>
+<tr><td><code>zigui.Terminal</code> (<code>widgets/terminal.zig</code>)</td><td>The widget: draws a <code>Screen</code>, sizes it to the node, handles input. Knows nothing about processes.</td></tr>
+<tr><td><code>zigui.pty.Pty</code> (<code>platform/pty.zig</code>)</td><td>A pseudo-terminal with a program (a shell) on the other end. Linux for now.</td></tr>
+</table>
+<h2>The widget</h2>
+<pre><code>const term = try ui.add(zigui.Terminal, parent, .{
+    .style = .{ .grow = 1 },
+    .on_write = .bind(&amp;session, Session.send),      // fn (*Session, bytes) void: what the user typed
+    .on_resize = .bind(&amp;session, Session.resized),  // fn (*Session, cols: u16, rows: u16) void
+});
+term.feed(bytes_the_program_printed);</code></pre>
+<p>The widget works out its size in character cells from its node and the mono font, and calls <code>on_resize</code> when it changes (and once when first laid out). <code>feed</code> shows output and sends answers to the program's queries (cursor position, device attributes) through <code>on_write</code>. <code>title()</code> is the program's window title; <code>out.title_changed</code> says it was set. Options: <code>scrollback</code> (lines of history, default 5000), <code>size</code>, <code>pass_function_keys</code>. Other methods: <code>paste(text)</code>, <code>scrollBy(lines)</code>, <code>selectedText(gpa)</code>, <code>clear()</code>.</p>
+<h2>Input</h2>
+<table>
+<tr><th>You do</th><th>What happens</th></tr>
+<tr><td>Type text</td><td>Sent as is (UTF-8).</td></tr>
+<tr><td>Enter, Tab, Shift+Tab, Backspace, Escape, arrows, Home/End, Insert, Delete, Page Up/Down</td><td>The usual sequences (arrows and Home/End use the application form when the program asked for it); with Shift, Alt or Ctrl they carry the modifier (<code>ESC [1;5C</code>).</td></tr>
+<tr><td>Ctrl+letter, Ctrl+Space, Ctrl+[ \ ] /</td><td>The control characters (Ctrl+C is 0x03).</td></tr>
+<tr><td>Alt+letter</td><td>Escape-prefixed (readline's word movement).</td></tr>
+<tr><td>F1&ndash;F12</td><td>Left to the application's shortcuts (F5 builds, F12 goes to definition) unless <code>pass_function_keys</code> is off.</td></tr>
+<tr><td>Ctrl+Shift+C / Ctrl+Insert, Ctrl+Shift+V / Shift+Insert</td><td>Copy the selection; paste (wrapped in <code>ESC [200~</code> when the program enabled bracketed paste). Other Ctrl+Shift combinations stay with the application.</td></tr>
+<tr><td>Wheel, Shift+Page Up/Down, Shift+Home/End</td><td>Scroll the history. The view stays on the same text while output arrives. On the alternate screen (less, vim) the wheel sends arrow keys.</td></tr>
+<tr><td>Drag, double-click, triple-click</td><td>Select text, a word, a line.</td></tr>
+<tr><td>Mouse in a program that asked for reports</td><td>Sent to it (SGR encoding); hold Shift to select instead.</td></tr>
+</table>
+<h2>What the emulator understands</h2>
+<p>UTF-8 text with wide (CJK, emoji) characters; BS, HT, LF, CR, BEL; cursor movement and positioning; erase, insert and delete of characters and lines; scroll regions; colors (16, 256, true color) and bold, dim, italic, underline, inverse, strikethrough; the alternate screen; save and restore cursor; tab stops; cursor-key, bracketed-paste, autowrap, cursor-visibility and mouse-report modes; window titles; device and cursor-position reports. Scrolled-off lines go to a ring buffer of history (not on the alternate screen). Not yet: combining characters (dropped), other character sets, sixel graphics, blinking text, cursor shapes.</p>
+<h2>The Pty</h2>
+<pre><code>const pty = try zigui.pty.Pty.open(gpa, .{ .argv = &amp;.{"/bin/bash"}, .cwd = dir, .cols = 80, .rows = 24,
+                                            .environ = init.environ_map, .wake = sdl.wake });
+defer pty.close();
+try pty.write("ls\n");
+pty.resize(120, 30);
+var batch: std.ArrayListUnmanaged(zigui.pty.Event) = .empty;
+pty.drain(&amp;batch);        // .data (bytes for the emulator) and .exited (status)</code></pre>
+<p>The program runs in its own session with the pseudo-terminal as its controlling terminal and as stdin, stdout and stderr, so it behaves as in a real terminal: prompts, colors, line editing, full-screen programs. <b>stdout and stderr arrive merged</b>, in order, on the one stream a terminal has; use <code>process.Runner</code> (the Output panel) when you need them separate. <code>TERM=xterm-256color</code> and <code>COLORTERM=truecolor</code> are set. Closing sends SIGHUP to the process group. Implemented with raw Linux system calls (no libc); other systems return <code>error.Unsupported</code> from <code>open</code>.</p>
+<p>The IDE's <a href="../ide.html">terminal panel</a> wires the three together. Code-only widget (not in the toolbox).</p>
+</main><script src="../nav.js"></script></body></html>

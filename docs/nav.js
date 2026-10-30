@@ -24,6 +24,7 @@
       ["widgets/popup.html", "Popup"],
       ["widgets/completion.html", "Completion"],
       ["widgets/hover.html", "Hover and signatures"],
+      ["widgets/terminal.html", "Terminal"],
       ["widgets/canvas.html", "Canvas"],
       ["widgets/scroll-view.html", "ScrollView"],
       ["widgets/split-view.html", "SplitView"],

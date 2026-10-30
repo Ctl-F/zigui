@@ -6,7 +6,7 @@
 //!       zig-out/bin/ide path/to/project
 //!
 //! Double-click a file in Files to open it; Ctrl+S saves; Ctrl+F finds in the
-//! file, Ctrl+Shift+F finds in the project; F5 runs `zig build run`, Ctrl+B `zig build`, and Ctrl+Shift+T
+//! file, Ctrl+Shift+F finds in the project; F5 runs `zig build run`, Ctrl+B `zig build`, Ctrl+` opens the terminal, and Ctrl+Shift+T
 //! `zig build test` (double-click an error in Output to jump to it).
 //!
 //! Env (headless checks, with SDL_VIDEODRIVER=dummy):
@@ -34,6 +34,8 @@ const App = struct {
     output: *ide.OutputPanel = undefined,
     status: *zigui.Label = undefined,
     lsp: *ide.lsp_assist.Assist = undefined,
+    terminal: *ide.TerminalPanel = undefined,
+    terminal_panel: *zigui.dock.Panel = undefined,
     files_panel: *zigui.dock.Panel = undefined,
     search_panel: *zigui.dock.Panel = undefined,
 
@@ -66,6 +68,10 @@ const App = struct {
         const name = ev.text;
         if (std.mem.eql(u8, name, "ide.build")) self.runBuild("") else if (std.mem.eql(u8, name, "ide.run")) self.runBuild("run") else if (std.mem.eql(u8, name, "ide.test")) self.runBuild("test") else if (std.mem.eql(u8, name, "file.save")) {
             _ = self.docs.saveActive();
+        } else if (std.mem.eql(u8, name, "view.terminal")) {
+            self.dock.showPanel(self.terminal_panel) catch {};
+            self.dock.activatePanel(self.terminal_panel);
+            self.terminal.focus();
         } else if (std.mem.eql(u8, name, "editor.definition")) {
             if (self.docs.active()) |d| self.lsp.gotoDefinition(d.editor);
         } else if (std.mem.eql(u8, name, "project.search")) {
@@ -80,6 +86,7 @@ const App = struct {
         self.search.poll();
         self.docs.poll();
         self.lsp.poll();
+        self.terminal.poll();
         const doc_msg = self.docs.statusText();
         const msg = if (doc_msg.len > 0) doc_msg else self.lsp.statusText();
         if (!std.mem.eql(u8, msg, self.status.props.text.bytes)) self.status.setText(msg) catch {};
@@ -283,6 +290,14 @@ pub fn main(init: std.process.Init) !void {
     defer app.output.destroy();
     try dock.dockRoot(output_panel, .bottom, 220);
 
+    // The terminal shares the bottom group with Output.
+    const terminal_panel = try dock.addPanel("Terminal");
+    app.terminal_panel = terminal_panel;
+    app.terminal = try ide.TerminalPanel.create(&ui, terminal_panel.content, .{ .cwd = project.root, .environ = init.environ_map, .wake = sdl.wake });
+    defer app.terminal.destroy();
+    try dock.dockTab(terminal_panel, output_panel);
+    dock.activatePanel(output_panel);
+
     inline for (.{
         .{ "ide.build", "Build" },
         .{ "ide.run", "Run" },
@@ -290,6 +305,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "file.save", "Save" },
         .{ "project.search", "Find in project" },
         .{ "editor.definition", "Go to definition" },
+        .{ "view.terminal", "Terminal" },
     }) |c| _ = try ui.registerCommand(c[0], .{ .title = c[1], .run = zigui.event.Callback.bind(&app, App.onCommand) });
     try ui.bindShortcut("f5", "ide.run", .app, null);
     try ui.bindShortcut("mod+b", "ide.build", .app, null);
@@ -297,6 +313,7 @@ pub fn main(init: std.process.Init) !void {
     try ui.bindShortcut("mod+s", "file.save", .app, null);
     try ui.bindShortcut("mod+shift+f", "project.search", .app, null);
     try ui.bindShortcut("f12", "editor.definition", .app, null);
+    try ui.bindShortcut("mod+`", "view.terminal", .app, null);
 
     const commands = try gpa.alloc(zigui.draw_list.Command, 32768);
     defer gpa.free(commands);

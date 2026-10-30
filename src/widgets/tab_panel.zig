@@ -464,6 +464,7 @@ pub const TabPanel = struct {
             self.ui.setHidden(p.node, i != self.props.active);
             self.ui.tree.markDirty(p.tab, .{ .paint = true });
         }
+        self.ui.tree.markDirty(self.node, .{ .layout = true, .paint = true });
     }
 
     fn closeTab(self: *TabPanel, index: usize) void {

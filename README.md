@@ -446,6 +446,14 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   answer for Zig from `std.zig.Ast` alone (std found via `zig env`), no language
   server; types of values are not inferred, which is where an LSP will add to it.
   The test rig moved to `core/test_rig.zig` so framework tests can share it.
+- Terminal (plan step 6): `terminal/vt.zig` (UI-free emulator: UTF-8 and wide
+  characters, CSI/SGR, scroll regions, alternate screen, scrollback ring, queries
+  answered), `widgets/terminal.zig` (draws a Screen, encodes keys, selection,
+  history, mouse reports; talks to its host only through `on_write`/`on_resize`
+  hooks), `platform/pty.zig` (raw-syscall pty: `/dev/ptmx`, own session,
+  controlling terminal; stdout and stderr merge as on any terminal; Linux only)
+  and `ide/terminal_panel.zig` (a shell in the project folder, restart on key).
+  Alt+letter sends ESC-prefixed bytes and drops the text event that may follow.
 - Language servers (plan step 5): `ide/lsp/jsonrpc.zig` (framing), `lsp/client.zig`
   (transport-agnostic client: handshake, request ids and cancel, server requests,
   full-text sync, UTF-8/UTF-16 positions), `lsp/results.zig` (tolerant readers),
