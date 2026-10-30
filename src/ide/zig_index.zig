@@ -68,7 +68,8 @@ pub const File = struct {
 
 const Ref = struct { file: *File, node: ?Node.Index = null };
 
-const max_depth = 8;
+const max_depth = 12;
+const none: usize = std.math.maxInt(usize);
 const max_source = 8 * 1024 * 1024;
 
 pub const Index = struct {
@@ -76,15 +77,20 @@ pub const Index = struct {
     io: std.Io,
     std_dir: ?[]u8,
     files: std.StringHashMapUnmanaged(*File) = .empty,
+    /// Signatures with their line breaks folded away, kept once each.
+    strings: std.StringHashMapUnmanaged(void) = .empty,
+    string_arena: std.heap.ArenaAllocator,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, std_dir: ?[]const u8) !Index {
-        return .{ .gpa = gpa, .io = io, .std_dir = if (std_dir) |d| try gpa.dupe(u8, d) else null };
+        return .{ .gpa = gpa, .io = io, .std_dir = if (std_dir) |d| try gpa.dupe(u8, d) else null, .string_arena = std.heap.ArenaAllocator.init(gpa) };
     }
 
     pub fn deinit(self: *Index) void {
         var it = self.files.valueIterator();
         while (it.next()) |f| self.freeFile(f.*);
         self.files.deinit(self.gpa);
+        self.strings.deinit(self.gpa);
+        self.string_arena.deinit();
         if (self.std_dir) |d| self.gpa.free(d);
     }
 
@@ -210,16 +216,7 @@ pub const Index = struct {
         if (depth > max_depth) return null;
         const ast = &file.ast;
         switch (ast.nodeTag(node)) {
-            .identifier => {
-                const name = ast.tokenSlice(ast.nodeMainToken(node));
-                const here: Ref = .{ .file = file };
-                if (findDeclAny(here, name)) |d| return self.declRef(file, d, depth + 1);
-                if (std.mem.eql(u8, name, "std")) {
-                    const f = self.importTarget(file, "std") orelse return null;
-                    return .{ .file = f };
-                }
-                return null;
-            },
+            .identifier => return self.resolveFirst(file, ast.tokenSlice(ast.nodeMainToken(node)), none, depth + 1),
             .field_access => {
                 const lhs, const name_tok = ast.nodeData(node).node_and_token;
                 const base = self.eval(file, lhs, depth + 1) orelse return null;
@@ -227,7 +224,9 @@ pub const Index = struct {
                 return self.declRef(base.file, d, depth + 1);
             },
             .builtin_call_two, .builtin_call_two_comma => {
-                if (!std.mem.eql(u8, ast.tokenSlice(ast.nodeMainToken(node)), "@import")) return null;
+                const name = ast.tokenSlice(ast.nodeMainToken(node));
+                if (std.mem.eql(u8, name, "@This")) return containerAt(file, ast.tokenStart(ast.nodeMainToken(node)));
+                if (!std.mem.eql(u8, name, "@import")) return null;
                 const arg = ast.nodeData(node).opt_node_and_opt_node[0].unwrap() orelse return null;
                 if (ast.nodeTag(arg) != .string_literal) return null;
                 const lit = ast.tokenSlice(ast.nodeMainToken(arg));
@@ -235,6 +234,7 @@ pub const Index = struct {
                 const target = self.importTarget(file, lit[1 .. lit.len - 1]) orelse return null;
                 return .{ .file = target };
             },
+            .grouped_expression => return self.eval(file, ast.nodeData(node).node_and_token[0], depth + 1),
             else => if (isContainer(ast, node)) return .{ .file = file, .node = node },
         }
         return null;
@@ -250,12 +250,140 @@ pub const Index = struct {
         return null;
     }
 
-    /// Where declaration `node` leads: a file, a container, or whatever an alias names.
+    /// Where declaration `node` leads: a file, a container, an alias's target,
+    /// or the type of a typed variable or field.
     fn declRef(self: *Index, file: *File, node: Node.Index, depth: u32) ?Ref {
         const ast = &file.ast;
-        const vd = ast.fullVarDecl(node) orelse return null;
-        const rhs = vd.ast.init_node.unwrap() orelse return null;
-        return self.eval(file, rhs, depth);
+        if (ast.fullVarDecl(node)) |vd| {
+            if (vd.ast.type_node.unwrap()) |t| return self.evalType(file, t, none, depth);
+            const rhs = vd.ast.init_node.unwrap() orelse return null;
+            return self.evalValue(file, rhs, none, depth);
+        }
+        if (ast.fullContainerField(node)) |cf| {
+            if (cf.ast.type_expr.unwrap()) |t| return self.evalType(file, t, none, depth);
+        }
+        return null;
+    }
+
+    /// The container a type expression names: `*T`, `?T`, `!T` and `(T)` lead to `T`.
+    fn evalType(self: *Index, file: *File, node: Node.Index, at: usize, depth: u32) ?Ref {
+        if (depth > max_depth) return null;
+        const ast = &file.ast;
+        switch (ast.nodeTag(node)) {
+            .optional_type => return self.evalType(file, ast.nodeData(node).node, at, depth + 1),
+            .error_union => return self.evalType(file, ast.nodeData(node).node_and_node[1], at, depth + 1),
+            .ptr_type_aligned, .ptr_type_sentinel, .ptr_type, .ptr_type_bit_range => {
+                const pt = ast.fullPtrType(node) orelse return null;
+                return self.evalType(file, pt.ast.child_type, at, depth + 1);
+            },
+            else => return self.eval(file, node, depth + 1),
+        }
+    }
+
+    /// The container an expression's *value* belongs to: a namespace or type
+    /// stands for itself; a variable, call result or struct literal for its type.
+    fn evalValue(self: *Index, file: *File, node: Node.Index, at: usize, depth: u32) ?Ref {
+        if (depth > max_depth) return null;
+        const ast = &file.ast;
+        switch (ast.nodeTag(node)) {
+            .@"try", .address_of, .unwrap_optional => return self.evalValue(file, ast.nodeData(node).node, at, depth + 1),
+            .identifier => return self.resolveFirst(file, ast.tokenSlice(ast.nodeMainToken(node)), at, depth + 1),
+            .field_access => {
+                const lhs, const name_tok = ast.nodeData(node).node_and_token;
+                const base = self.evalValue(file, lhs, at, depth + 1) orelse return null;
+                const d = findDecl(base, ast.tokenSlice(name_tok)) orelse return null;
+                return self.declRef(base.file, d, depth + 1);
+            },
+            .call, .call_comma, .call_one, .call_one_comma => {
+                var cb: [1]Node.Index = undefined;
+                const call = ast.fullCall(&cb, node) orelse return null;
+                const target = self.declOf(file, call.ast.fn_expr, at, depth + 1) orelse return null;
+                var fb: [1]Node.Index = undefined;
+                const proto = if (target.file.ast.nodeTag(target.node) == .fn_decl) target.file.ast.nodeData(target.node).node_and_node[0] else target.node;
+                const fp = target.file.ast.fullFnProto(&fb, proto) orelse return null;
+                const rt = fp.ast.return_type.unwrap() orelse return null;
+                return self.evalType(target.file, rt, none, depth + 1);
+            },
+            .struct_init_one, .struct_init_one_comma, .struct_init, .struct_init_comma => {
+                var sb: [2]Node.Index = undefined;
+                const si = ast.fullStructInit(&sb, node) orelse return null;
+                const t = si.ast.type_expr.unwrap() orelse return null;
+                return self.evalType(file, t, at, depth + 1);
+            },
+            else => return self.eval(file, node, depth + 1),
+        }
+    }
+
+    const DeclAt = struct { file: *File, node: Node.Index };
+
+    /// The declaration a callee expression (`foo`, `b.addExecutable`) names.
+    fn declOf(self: *Index, file: *File, expr: Node.Index, at: usize, depth: u32) ?DeclAt {
+        const ast = &file.ast;
+        switch (ast.nodeTag(expr)) {
+            .identifier => {
+                const d = findDeclAny(.{ .file = file }, ast.tokenSlice(ast.nodeMainToken(expr))) orelse return null;
+                return .{ .file = file, .node = d };
+            },
+            .field_access => {
+                const lhs, const name_tok = ast.nodeData(expr).node_and_token;
+                const base = self.evalValue(file, lhs, at, depth + 1) orelse return null;
+                const d = findDecl(base, ast.tokenSlice(name_tok)) orelse return null;
+                return .{ .file = base.file, .node = d };
+            },
+            else => return null,
+        }
+    }
+
+    /// What `name` means at offset `at` of `file`: a parameter or local variable
+    /// (its type's container), a top-level declaration, or `std`.
+    fn resolveFirst(self: *Index, file: *File, name: []const u8, at: usize, depth: u32) ?Ref {
+        if (depth > max_depth) return null;
+        if (at != none) {
+            if (self.localRef(file, name, at, depth)) |r| return r;
+        }
+        if (findDeclAny(.{ .file = file }, name)) |d| return self.declRef(file, d, depth + 1);
+        if (std.mem.eql(u8, name, "std")) {
+            const f = self.importTarget(file, "std") orelse return null;
+            return .{ .file = f };
+        }
+        return null;
+    }
+
+    /// A parameter of the function around `at`, or a local declared before it.
+    fn localRef(self: *Index, file: *File, name: []const u8, at: usize, depth: u32) ?Ref {
+        const ast = &file.ast;
+        const fn_node = innermostFn(ast, at) orelse return null;
+        var fb: [1]Node.Index = undefined;
+        const proto = ast.nodeData(fn_node).node_and_node[0];
+        if (ast.fullFnProto(&fb, proto)) |fp0| {
+            const fp = fp0;
+            var it = fp.iterate(ast);
+            while (it.next()) |p| {
+                const nt = p.name_token orelse continue;
+                if (!std.mem.eql(u8, ast.tokenSlice(nt), name)) continue;
+                const te = p.type_expr orelse return null;
+                return self.evalType(file, te, at, depth + 1);
+            }
+        }
+        const sp = nodeSpan(ast, fn_node);
+        var found: ?Ref = null;
+        var found_at: usize = 0;
+        var i: u32 = 1;
+        while (i < ast.nodes.len) : (i += 1) {
+            const n: Node.Index = @enumFromInt(i);
+            const vd = ast.fullVarDecl(n) orelse continue;
+            if (!std.mem.eql(u8, ast.tokenSlice(vd.ast.mut_token + 1), name)) continue;
+            const st = ast.tokenStart(vd.ast.mut_token);
+            if (st < sp.start or st >= at or st < found_at) continue;
+            found_at = st;
+            found = if (vd.ast.type_node.unwrap()) |t|
+                self.evalType(file, t, at, depth + 1)
+            else if (vd.ast.init_node.unwrap()) |rhs|
+                self.evalValue(file, rhs, st, depth + 1)
+            else
+                null;
+        }
+        return found;
     }
 
     // ---- queries ----
@@ -263,15 +391,15 @@ pub const Index = struct {
     /// Append the names `path` (`{"std", "mem"}`) is followed by in `scope`.
     /// False if the path does not resolve to a namespace or type.
     pub fn membersOf(self: *Index, scope: *File, path: []const []const u8, out: *std.ArrayListUnmanaged(Member)) bool {
+        return self.membersOfAt(scope, path, none, out);
+    }
+
+    /// `membersOf` for a path written at byte offset `at` of `scope`, so the
+    /// first name may be a parameter or local variable (`b.` in
+    /// `fn build(b: *std.Build)` lists what a `std.Build` has).
+    pub fn membersOfAt(self: *Index, scope: *File, path: []const []const u8, at: usize, out: *std.ArrayListUnmanaged(Member)) bool {
         if (path.len == 0) return false;
-        var cur: Ref = blk: {
-            const here: Ref = .{ .file = scope };
-            if (findDeclAny(here, path[0])) |d| break :blk self.declRef(scope, d, 0) orelse return false;
-            if (std.mem.eql(u8, path[0], "std")) {
-                break :blk .{ .file = self.importTarget(scope, "std") orelse return false };
-            }
-            return false;
-        };
+        var cur = self.resolveFirst(scope, path[0], at, 0) orelse return false;
         for (path[1..]) |seg| {
             const d = findDecl(cur, seg) orelse return false;
             cur = self.declRef(cur.file, d, 0) orelse return false;
@@ -283,15 +411,15 @@ pub const Index = struct {
     /// The declaration `path` names (`{"std","mem","eql"}`), or null. A single
     /// name is looked up among `scope`'s own top-level names.
     pub fn lookup(self: *Index, scope: *File, path: []const []const u8) ?Member {
+        return self.lookupAt(scope, path, none);
+    }
+
+    /// `lookup` for a path written at offset `at` (see `membersOfAt`).
+    pub fn lookupAt(self: *Index, scope: *File, path: []const []const u8, at: usize) ?Member {
         if (path.len == 0) return null;
         var parent: Ref = .{ .file = scope };
         if (path.len > 1) {
-            parent = blk: {
-                const here: Ref = .{ .file = scope };
-                if (findDeclAny(here, path[0])) |d| break :blk self.declRef(scope, d, 0) orelse return null;
-                if (std.mem.eql(u8, path[0], "std")) break :blk .{ .file = self.importTarget(scope, "std") orelse return null };
-                return null;
-            };
+            parent = self.resolveFirst(scope, path[0], at, 0) orelse return null;
             for (path[1 .. path.len - 1]) |seg| {
                 const d = findDecl(parent, seg) orelse return null;
                 parent = self.declRef(parent.file, d, 0) orelse return null;
@@ -329,8 +457,34 @@ pub const Index = struct {
         return m;
     }
 
+    /// `text` with runs of whitespace (line breaks included) folded to one
+    /// space, shortened to `max` bytes; stored once and valid until `deinit`.
+    fn flatten(self: *Index, text: []const u8, max: usize) []const u8 {
+        var buf: [400]u8 = undefined;
+        var n: usize = 0;
+        var space = false;
+        for (text) |c| {
+            if (c == ' ' or c == '\n' or c == '\t' or c == '\r') {
+                space = n > 0;
+                continue;
+            }
+            if (space and n < buf.len) {
+                buf[n] = ' ';
+                n += 1;
+            }
+            space = false;
+            if (n >= @min(buf.len, max)) break;
+            buf[n] = c;
+            n += 1;
+        }
+        const flat = buf[0..n];
+        if (self.strings.getKey(flat)) |k| return k;
+        const copy = self.string_arena.allocator().dupe(u8, flat) catch return oneLine(text);
+        self.strings.put(self.gpa, copy, {}) catch return copy;
+        return copy;
+    }
+
     fn describeBare(self: *Index, file: *File, node: Node.Index, name: []const u8, in_enum: bool) Member {
-        _ = self;
         const ast = &file.ast;
         if (ast.fullVarDecl(node)) |vd| {
             const rhs = vd.ast.init_node.unwrap();
@@ -343,7 +497,7 @@ pub const Index = struct {
                     if (std.mem.eql(u8, ast.tokenSlice(ast.nodeMainToken(i)), "@import")) kind = .namespace;
                 }
             }
-            if (vd.ast.type_node.unwrap()) |t| detail = oneLine(ast.getNodeSource(t));
+            if (vd.ast.type_node.unwrap()) |t| detail = self.flatten(ast.getNodeSource(t), 100);
             return .{ .name = name, .kind = kind, .detail = detail };
         }
         var fb: [1]Node.Index = undefined;
@@ -352,15 +506,58 @@ pub const Index = struct {
             const start = ast.tokenStart(fp.lparen);
             const end_tok = if (fp.ast.return_type.unwrap()) |r| ast.lastToken(r) else fp.lparen;
             const end = ast.tokenStart(end_tok) + ast.tokenSlice(end_tok).len;
-            return .{ .name = name, .kind = .function, .detail = oneLine(file.source[start..end]) };
+            return .{ .name = name, .kind = .function, .detail = self.flatten(file.source[start..end], 300) };
         }
         var detail: []const u8 = "";
         if (ast.fullContainerField(node)) |cf| {
-            if (cf.ast.type_expr.unwrap()) |t| detail = oneLine(ast.getNodeSource(t));
+            if (cf.ast.type_expr.unwrap()) |t| detail = self.flatten(ast.getNodeSource(t), 100);
         }
         return .{ .name = name, .kind = if (in_enum) .enum_value else .field, .detail = detail };
     }
 };
+
+const Span = struct { start: usize, end: usize };
+
+fn nodeSpan(ast: *const Ast, node: Node.Index) Span {
+    const first = ast.firstToken(node);
+    const last = ast.lastToken(node);
+    return .{ .start = ast.tokenStart(first), .end = ast.tokenStart(last) + ast.tokenSlice(last).len };
+}
+
+/// The innermost function declaration whose text contains byte offset `at`.
+fn innermostFn(ast: *const Ast, at: usize) ?Node.Index {
+    var best: ?Node.Index = null;
+    var best_len: usize = std.math.maxInt(usize);
+    var i: u32 = 1;
+    while (i < ast.nodes.len) : (i += 1) {
+        const n: Node.Index = @enumFromInt(i);
+        if (ast.nodeTag(n) != .fn_decl) continue;
+        const sp = nodeSpan(ast, n);
+        if (at >= sp.start and at <= sp.end and sp.end - sp.start < best_len) {
+            best = n;
+            best_len = sp.end - sp.start;
+        }
+    }
+    return best;
+}
+
+/// The innermost container (struct, enum, union) around byte offset `at`, or the file itself.
+fn containerAt(file: *File, at: usize) Ref {
+    const ast = &file.ast;
+    var best: ?Node.Index = null;
+    var best_len: usize = std.math.maxInt(usize);
+    var i: u32 = 1;
+    while (i < ast.nodes.len) : (i += 1) {
+        const n: Node.Index = @enumFromInt(i);
+        if (!Index.isContainer(ast, n)) continue;
+        const sp = nodeSpan(ast, n);
+        if (at >= sp.start and at <= sp.end and sp.end - sp.start < best_len) {
+            best = n;
+            best_len = sp.end - sp.start;
+        }
+    }
+    return .{ .file = file, .node = best };
+}
 
 /// The `///` lines directly above `node`, raw.
 fn docComment(ast: *const Ast, source: []const u8, node: Node.Index) []const u8 {
@@ -501,6 +698,56 @@ test "lookup finds one declaration with its signature and doc comment" {
     try testing.expectEqualStrings("/// Mine.", l.doc);
     try testing.expect(index.lookup(buf, &.{ "std", "mem", "nothing" }) == null);
     try testing.expect(index.lookup(buf, &.{"nothing"}) == null);
+}
+
+test "parameters, locals and call results lead to their types (the build.zig case)" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "lib/std/Build/Step");
+    try tmp.dir.writeFile(io, .{ .sub_path = "lib/std/std.zig", .data = "pub const Build = @import(\"Build.zig\");\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "lib/std/Build.zig", .data =
+        \\const Build = @This();
+        \\pub const Step = @import("Build/Step.zig");
+        \\pub const Options = struct { name: []const u8 };
+        \\graph: Graph,
+        \\pub const Graph = struct { host: u8 };
+        \\/// Make an executable.
+        \\pub fn addExecutable(b: *Build, o: Options) *Step.Compile { _ = b; _ = o; }
+        \\pub fn installArtifact(b: *Build, c: *Step.Compile) void { _ = b; _ = c; }
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "lib/std/Build/Step.zig", .data = "pub const Compile = @import(\"Step/Compile.zig\");\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "lib/std/Build/Step/Compile.zig", .data = "pub fn linkLibC(c: *Compile) void { _ = c; }\nconst Compile = @This();\n" });
+    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+    var index = try Index.init(testing.allocator, io, try stdPath(&tmp, &pbuf));
+    defer index.deinit();
+    const src = "const std = @import(\"std\");\npub fn build(b: *std.Build) void {\n    const exe = b.addExecutable(.{ .name = \"x\" });\n    exe.linkLibC();\n    b.installArtifact(exe);\n}\n";
+    const buf = try index.parseBuffer(src, "/p");
+    defer index.freeBuffer(buf);
+    const at_exe = std.mem.indexOf(u8, src, "exe.link").?;
+    const at_b = std.mem.indexOf(u8, src, "b.add").?;
+    var out: std.ArrayListUnmanaged(Member) = .empty;
+    defer out.deinit(testing.allocator);
+
+    // `b.` : a parameter of type *std.Build.
+    try testing.expect(index.membersOfAt(buf, &.{"b"}, at_b, &out));
+    try testing.expect(find(out.items, "addExecutable") != null);
+    try testing.expect(find(out.items, "graph") != null);
+    // `exe.` : a local whose type is the return type of b.addExecutable.
+    out.clearRetainingCapacity();
+    try testing.expect(index.membersOfAt(buf, &.{"exe"}, at_exe, &out));
+    try testing.expect(find(out.items, "linkLibC") != null);
+    // `b.graph.` : a field with a declared type.
+    out.clearRetainingCapacity();
+    try testing.expect(index.membersOfAt(buf, &.{ "b", "graph" }, at_b, &out));
+    try testing.expect(find(out.items, "host") != null);
+    // Hover on a method of a parameter, with its doc comment.
+    const m = index.lookupAt(buf, &.{ "b", "addExecutable" }, at_b).?;
+    try testing.expectEqual(Kind.function, m.kind);
+    try testing.expectEqualStrings("/// Make an executable.", m.doc);
+    // Outside the function the names do not exist.
+    out.clearRetainingCapacity();
+    try testing.expect(!index.membersOfAt(buf, &.{"b"}, 0, &out));
 }
 
 test "no std dir means std does not resolve, and a broken buffer still indexes what parses" {

@@ -114,6 +114,9 @@ pub const CodeEditor = struct {
     scroll_y: f32 = 0,
     scroll_x: f32 = 0,
     dragging: bool = false,
+    /// Dragging the scrollbar thumb; `sb_grab` is where on the thumb it was taken.
+    sb_drag: bool = false,
+    sb_grab: f32 = 0,
     blink_on: bool = true,
     blink_at: u64 = 0,
     /// Set by input handling: repaint, and scroll the caret into view.
@@ -554,6 +557,9 @@ pub const CodeEditor = struct {
     /// Show `composition` as an uncommitted IME string over the text at the
     /// primary caret (empty clears it).
     fn setPreedit(self: *CodeEditor, composition: []const u8, ime_caret: u32) void {
+        // An IME reports an empty composition whenever it is told the caret moved
+        // (scrolling moves it); that is not an edit and must not pull the view back.
+        if (composition.len == 0 and self.preedit.items.len == 0) return;
         self.preedit.clearRetainingCapacity();
         self.preedit_cursor = 0;
         if (composition.len > 0) {
@@ -1337,6 +1343,7 @@ pub const CodeEditor = struct {
             .focus_out => {
                 out.focused = false;
                 self.dragging = false;
+                self.sb_drag = false;
                 if (self.preedit.items.len > 0) self.setPreedit("", 0);
                 self.touch(false);
             },
@@ -1344,6 +1351,21 @@ pub const CodeEditor = struct {
             .pointer_enter => out.hovered = true,
             .pointer_leave => out.hovered = false,
             .pointer_down => if (props.enabled and ev.button == 1) {
+                if (self.metrics()) |m| {
+                    const geo = self.geometry(m);
+                    const node_w = self.ui.tree.get(self.node).?.rect.w;
+                    if (ev.local_x >= node_w - scrollbar_hit_w) {
+                        if (self.scrollbar(m, geo)) |bar| {
+                            // On the thumb: grab it where it is. On the track: center it there.
+                            const on_thumb = ev.local_y >= bar.thumb_top and ev.local_y < bar.thumb_top + bar.thumb_h;
+                            self.sb_grab = if (on_thumb) ev.local_y - bar.thumb_top else bar.thumb_h / 2;
+                            self.sb_drag = true;
+                            self.scrollToThumb(bar, geo, ev.local_y);
+                            ev.markHandled();
+                            return;
+                        }
+                    }
+                }
                 if (self.props.folding) {
                     if (self.foldColumnLine(ev.local_x, ev.local_y)) |fl| {
                         self.toggleFold(fl);
@@ -1364,11 +1386,19 @@ pub const CodeEditor = struct {
                 self.dragging = true;
                 self.touch(true);
             },
-            .pointer_move => if (self.dragging) {
+            .pointer_move => if (self.sb_drag) {
+                if (self.metrics()) |m| {
+                    const geo = self.geometry(m);
+                    if (self.scrollbar(m, geo)) |bar| self.scrollToThumb(bar, geo, ev.local_y);
+                }
+            } else if (self.dragging) {
                 ed.dragPrimaryTo(self.offsetAtPoint(ev.local_x, ev.local_y));
                 self.touch(true);
             },
-            .pointer_up => self.dragging = false,
+            .pointer_up => {
+                self.dragging = false;
+                self.sb_drag = false;
+            },
             .wheel => {
                 if (self.metrics()) |m| {
                     if (ev.mods.shift) {
@@ -1529,6 +1559,27 @@ pub const CodeEditor = struct {
         return if (elapsed >= blink_ms) 1 else blink_ms - elapsed;
     }
 
+    const scrollbar_hit_w: f32 = 14;
+
+    const Bar = struct { thumb_top: f32, thumb_h: f32, track: f32, max_scroll: f32 };
+
+    /// The scrollbar thumb in node-local coordinates, or null when everything fits.
+    fn scrollbar(self: *CodeEditor, m: Metrics, geo: Geo) ?Bar {
+        const content = @as(f32, @floatFromInt(self.visibleRows())) * m.line_h;
+        if (content <= geo.view_h or geo.view_h <= 0) return null;
+        const thumb_h = @max(geo.view_h * geo.view_h / content, 24);
+        const track = geo.view_h - thumb_h;
+        const max_scroll = content - geo.view_h;
+        return .{ .thumb_top = geo.pad.t + track * self.scroll_y / max_scroll, .thumb_h = thumb_h, .track = track, .max_scroll = max_scroll };
+    }
+
+    fn scrollToThumb(self: *CodeEditor, bar: Bar, geo: Geo, local_y: f32) void {
+        if (bar.track <= 0) return;
+        const t = std.math.clamp((local_y - geo.pad.t - self.sb_grab) / bar.track, 0, 1);
+        self.scroll_y = t * bar.max_scroll;
+        self.repaint = true;
+    }
+
     /// Rectangle (window coordinates, width 1) of the character boundary at
     /// `offset`, or null before the first layout or when its line is folded away.
     pub fn rectOfOffset(self: *CodeEditor, offset: usize) ?Rect {
@@ -1648,4 +1699,74 @@ pub const CodeEditor = struct {
 pub fn defaultPainter(pc: *PaintCtx, ed: *CodeEditor) paint_ctx.Error!void {
     try pc.box(.{ .background = ed.palette().background });
     try ed.paintContent(pc);
+}
+
+// ---- scrolling tests -------------------------------------------------------
+
+const testing = std.testing;
+const Rig = @import("../core/test_rig.zig").Rig;
+
+fn longEditor(r: *Rig) !*CodeEditor {
+    const ed = try r.ui.add(CodeEditor, r.ui.tree.root, .{ .style = .{ .grow = 1 }, .label = "t" });
+    const text = try r.ui.gpa.alloc(u8, 300 * 10);
+    for (0..300) |i| @memcpy(text[i * 10 ..][0..10], "line text\n");
+    try ed.loadText(text, true);
+    r.ui.setFocus(ed.node);
+    try r.frame();
+    return ed;
+}
+
+test "wheel scrolling away from the caret sticks, even while an IME reports empty compositions" {
+    const r = try Rig.init();
+    defer r.deinit();
+    const ed = try longEditor(r);
+    ed.core().setCaret(0, false);
+    try r.frame();
+    const abs = r.ui.tree.absoluteRect(ed.node).?;
+    r.ui.wheel(abs.x + 50, abs.y + 50, 0, -3);
+    try r.frame();
+    const after = ed.scroll_y;
+    try testing.expect(after > 0);
+    // The platform tells the IME the caret moved; it answers with empty compositions.
+    for (0..3) |_| {
+        r.ui.textEditing("", 0);
+        try r.frame();
+    }
+    try testing.expectEqual(after, ed.scroll_y);
+    r.ui.wheel(abs.x + 50, abs.y + 50, 0, -3);
+    try r.frame();
+    try testing.expect(ed.scroll_y > after);
+}
+
+test "the scrollbar thumb can be dragged, and a click on the track moves it" {
+    const r = try Rig.init();
+    defer r.deinit();
+    const ed = try longEditor(r);
+    const abs = r.ui.tree.absoluteRect(ed.node).?;
+    const m = ed.metrics().?;
+    const geo = ed.geometry(m);
+    const bar = ed.scrollbar(m, geo).?;
+    const x = abs.x + abs.w - 6;
+    // Grab the thumb and pull it down by a quarter of the track.
+    const y0 = abs.y + bar.thumb_top + 4;
+    r.ui.pointerMove(x, y0);
+    r.ui.pointerButtonEx(x, y0, 1, true, 1);
+    r.ui.pointerMove(x, y0 + bar.track / 4);
+    try r.frame();
+    try testing.expectApproxEqAbs(bar.max_scroll / 4, ed.scroll_y, 2);
+    r.ui.pointerMove(x, y0 + bar.track * 10); // past the end: clamps
+    try r.frame();
+    try testing.expectApproxEqAbs(bar.max_scroll, ed.scroll_y, 1);
+    r.ui.pointerButtonEx(x, y0 + bar.track * 10, 1, false, 1);
+    // The caret did not move, and moving the pointer afterwards does nothing.
+    try testing.expectEqual(@as(usize, 0), ed.core().primaryHead());
+    const fixed = ed.scroll_y;
+    r.ui.pointerMove(x, y0);
+    try r.frame();
+    try testing.expectEqual(fixed, ed.scroll_y);
+    // Click on the empty track near the top: the thumb jumps there.
+    r.ui.pointerButtonEx(x, abs.y + geo.pad.t + 10, 1, true, 1);
+    r.ui.pointerButtonEx(x, abs.y + geo.pad.t + 10, 1, false, 1);
+    try r.frame();
+    try testing.expect(ed.scroll_y < fixed / 4);
 }

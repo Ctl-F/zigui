@@ -11,7 +11,7 @@
 //!
 //! Env (headless checks, with SDL_VIDEODRIVER=dummy):
 //!   ZIGUI_SCRIPT="open src/main.zig;search needle;sleep 300"   open PATH[:LINE] |
-//!       search TEXT | sleep MS | click X Y | type TEXT | key [mods+]NAME
+//!       search TEXT | sleep MS | wheel X Y DY | click X Y | type TEXT | key [mods+]NAME
 //!   ZIGUI_SCREENSHOT=out.png
 
 const std = @import("std");
@@ -122,6 +122,13 @@ fn runCommand(app: *App, ui: *Ui, cmd: []const u8) void {
         const k = zigui.keys.parseKey(last) orelse .unknown;
         ui.key(k, mods, true, false);
         ui.key(k, mods, false, false);
+    } else if (std.mem.eql(u8, verb, "wheel")) {
+        var nums = std.mem.tokenizeScalar(u8, rest, ' ');
+        const x = std.fmt.parseFloat(f32, nums.next() orelse return) catch return;
+        const y = std.fmt.parseFloat(f32, nums.next() orelse return) catch return;
+        const dy = std.fmt.parseFloat(f32, nums.next() orelse return) catch return;
+        ui.pointerMove(x, y);
+        ui.wheel(x, y, 0, dy);
     } else if (std.mem.eql(u8, verb, "click") or std.mem.eql(u8, verb, "move")) {
         var nums = std.mem.tokenizeScalar(u8, rest, ' ');
         const x = std.fmt.parseFloat(f32, nums.next() orelse return) catch return;

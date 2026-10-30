@@ -446,6 +446,11 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   answer for Zig from `std.zig.Ast` alone (std found via `zig env`), no language
   server; types of values are not inferred, which is where an LSP will add to it.
   The test rig moved to `core/test_rig.zig` so framework tests can share it.
+- Editor fixes: the wheel no longer snaps back to the caret (an IME's empty
+  composition report, sent whenever the text-input area moves, was counted as an
+  edit that scrolls to the caret); the scrollbar thumb drags. The Zig index
+  resolves parameters, locals and call results to their types, so `b.` in
+  `build.zig` completes from `std.Build`.
 - Hover and signature help: `Ui.setTimer/cancelTimer` (one-shot timers folded into
   `tick`/`nextWakeMs`); a second popup slot `Ui.tip` so a suggestion list and a
   hint coexist; `CodeEditor` key/edit hook *lists* (`addKeyHook`, `addEditHook`,

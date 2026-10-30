@@ -226,7 +226,7 @@ pub const ZigCompleter = struct {
         }
         segs[n] = req.word;
         n += 1;
-        const m = self.index.lookup(file, segs[0..n]) orelse return;
+        const m = self.index.lookupAt(file, segs[0..n], req.word_start) orelse return;
         var buf: [320]u8 = undefined;
         const head = switch (m.kind) {
             .function => std.fmt.bufPrint(&buf, "fn {s}{s}", .{ m.name, m.detail }),
@@ -268,7 +268,7 @@ pub const ZigCompleter = struct {
                 segs[n] = seg;
                 n += 1;
             }
-            const m = self.index.lookup(file, segs[0..n]) orelse return;
+            const m = self.index.lookupAt(file, segs[0..n], req.editor.core().primaryHead()) orelse return;
             if (m.kind != .function) return;
             name = m.name;
             detail = m.detail;
@@ -290,7 +290,7 @@ pub const ZigCompleter = struct {
         if (req.afterDot()) {
             var segs: [8][]const u8 = undefined;
             const path = dottedPath(req.line_before, &segs) orelse return;
-            if (!self.index.membersOf(file, path, &members)) return;
+            if (!self.index.membersOfAt(file, path, req.word_start, &members)) return;
             for (members.items) |m| sink.add(.{ .label = m.name, .detail = m.detail, .tag = m.kind.tag() });
             return;
         }
