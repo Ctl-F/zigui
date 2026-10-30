@@ -172,16 +172,14 @@ pub const Completion = struct {
     /// Watch `ed`: typing there opens the list.
     pub fn attach(self: *Completion, ed: *CodeEditor) !void {
         try self.attached.append(self.gpa, ed);
-        ed.props.on_key = event.Callback.bind(self, onKey);
-        ed.props.on_edit = event.Callback.bind(self, onEdit);
+        try ed.addKeyHook(event.Callback.bind(self, onKey));
+        try ed.addEditHook(event.Callback.bind(self, onEdit));
         ed.ui.tree.addListener(ed.node, .{ .kind = .pointer_down, .callback = event.Callback.bind(self, onDismiss) }) catch {};
         ed.ui.tree.addListener(ed.node, .{ .kind = .focus_out, .callback = event.Callback.bind(self, onDismiss) }) catch {};
     }
 
     fn unbind(self: *Completion, ed: *CodeEditor) void {
-        _ = self;
-        ed.props.on_key = null;
-        ed.props.on_edit = null;
+        ed.removeHooks(self);
     }
 
     /// Stop watching `ed` (do this before destroying it).

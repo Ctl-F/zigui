@@ -23,6 +23,7 @@
       ["widgets/find-bar.html", "FindBar"],
       ["widgets/popup.html", "Popup"],
       ["widgets/completion.html", "Completion"],
+      ["widgets/hover.html", "Hover and signatures"],
       ["widgets/canvas.html", "Canvas"],
       ["widgets/scroll-view.html", "ScrollView"],
       ["widgets/split-view.html", "SplitView"],

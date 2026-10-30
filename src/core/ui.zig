@@ -88,6 +88,10 @@ pub fn typeTag(comptime W: type) *const anyopaque {
 /// The UI context: tree, layout, input, theme, and every widget.
 ///
 /// DO NOT MOVE a `Ui` after the first widget is added (see the file header).
+/// A one-shot timer set with `Ui.setTimer`.
+pub const TimerId = u32;
+const Timer = struct { id: TimerId, due: u64, cb: event_types.Callback };
+
 pub const Ui = struct {
     gpa: std.mem.Allocator,
     text: TextSystem,
@@ -117,6 +121,11 @@ pub const Ui = struct {
     /// The open popup (completion list or tooltip), if any (see `showPopup`).
     popup: ?*popup_mod.Popup = null,
     popup_closed: std.ArrayListUnmanaged(*popup_mod.Popup) = .empty,
+    /// The open tooltip or signature hint, if any (separate from `popup`, so a
+    /// suggestion list and a hint can show together).
+    tip: ?*popup_mod.Popup = null,
+    timers: std.ArrayListUnmanaged(Timer) = .empty,
+    next_timer: u32 = 1,
     /// The widget whose press just closed a menu; it must not reopen it on the click.
     menu_suppress: Handle = Handle.invalid,
     /// Recorded draw commands of repaint-boundary subtrees (see `paint.Cache`).
@@ -217,6 +226,8 @@ pub const Ui = struct {
     pub fn deinit(self: *Ui) void {
         if (self.menu) |m| m.close();
         if (self.popup) |p| p.close();
+        if (self.tip) |p| p.close();
+        self.timers.deinit(self.gpa);
         for (self.menu_closed.items) |m| m.destroyClosed();
         self.menu_closed.deinit(self.gpa);
         for (self.popup_closed.items) |p| p.destroyClosed();
@@ -338,6 +349,20 @@ pub const Ui = struct {
     pub fn tick(self: *Ui, now_ms: u64) bool {
         self.now_ms = now_ms;
         var changed = false;
+        // Timers run first; one may set another (it waits for the next tick).
+        var i: usize = 0;
+        while (i < self.timers.items.len) {
+            const t = self.timers.items[i];
+            if (t.due > now_ms) {
+                i += 1;
+                continue;
+            }
+            _ = self.timers.orderedRemove(i);
+            var ev: event_types.Event = .{ .kind = .command, .target = self.tree.root, .current = self.tree.root };
+            t.cb.invoke(&ev);
+            changed = true;
+            i = 0; // the callback may have changed the list
+        }
         inline for (.{ &self.fields, &self.editors, &self.canvases }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| changed = e.ptr.tick(now_ms) or changed;
@@ -345,10 +370,33 @@ pub const Ui = struct {
         return changed;
     }
 
+    /// Run `cb` once, `delay_ms` from now (on the UI thread, at a `tick`). The
+    /// event is a `command` event with no name. Returns an id for `cancelTimer`.
+    pub fn setTimer(self: *Ui, delay_ms: u64, cb: event_types.Callback) !TimerId {
+        const id = self.next_timer;
+        self.next_timer +%= 1;
+        try self.timers.append(self.gpa, .{ .id = id, .due = self.now_ms + delay_ms, .cb = cb });
+        return id;
+    }
+
+    /// Cancel a timer that has not fired (no effect if it already did).
+    pub fn cancelTimer(self: *Ui, id: TimerId) void {
+        for (self.timers.items, 0..) |t, i| {
+            if (t.id == id) {
+                _ = self.timers.orderedRemove(i);
+                return;
+            }
+        }
+    }
+
     /// Milliseconds until the next timed update (caret blink, canvas frame), or null if
     /// nothing needs one. Use as the event-wait timeout.
     pub fn nextWakeMs(self: *Ui) ?u32 {
         var best: ?u64 = null;
+        for (self.timers.items) |t| {
+            const left = t.due -| self.now_ms;
+            if (best == null or left < best.?) best = left;
+        }
         inline for (.{ &self.fields, &self.editors }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| {
@@ -541,6 +589,13 @@ pub const Ui = struct {
 
     /// Show a tooltip with `text` (one label per line) beside `anchor`.
     pub fn showTip(self: *Ui, text: []const u8, anchor: geometry.Rect) !void {
+        try self.showTipOpts(text, anchor, .{});
+    }
+
+    /// `showTip` with options: `above` opens it over the anchor, and
+    /// `mark_start`..`mark_end` (bytes of the first line) is drawn emphasized
+    /// (the active parameter of a signature).
+    pub fn showTipOpts(self: *Ui, text: []const u8, anchor: geometry.Rect, o: struct { above: bool = false, mark_start: usize = 0, mark_end: usize = 0 }) !void {
         var lines: std.ArrayListUnmanaged(popup_mod.Row) = .empty;
         defer lines.deinit(self.gpa);
         var it = std.mem.splitScalar(u8, text, '\n');
@@ -548,11 +603,20 @@ pub const Ui = struct {
             if (lines.items.len == 24) break;
             try lines.append(self.gpa, .{ .label = l });
         }
-        try popup_mod.Popup.open(self, lines.items, .{ .anchor = anchor, .kind = .tip });
+        try popup_mod.Popup.open(self, lines.items, .{ .anchor = anchor, .kind = .tip, .above = o.above, .mark_start = o.mark_start, .mark_end = o.mark_end });
     }
 
     pub fn hidePopup(self: *Ui) void {
         if (self.popup) |p| p.close();
+    }
+
+    /// Close the tooltip or signature hint.
+    pub fn hideTip(self: *Ui) void {
+        if (self.tip) |p| p.close();
+    }
+
+    pub fn tipOpen(self: *const Ui) bool {
+        return self.tip != null;
     }
 
     pub fn popupOpen(self: *const Ui) bool {
@@ -924,6 +988,7 @@ pub const Ui = struct {
         self.popup_closed.clearRetainingCapacity();
         if (self.menu) |m| m.update();
         if (self.popup) |p| p.update();
+        if (self.tip) |p| p.update();
         // Container widgets that create and destroy child widgets do it first,
         // so what they destroy is reclaimed below and what they create is
         // prepared and updated like the rest.

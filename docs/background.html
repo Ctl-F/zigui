@@ -47,4 +47,6 @@ batch.clearRetainingCapacity();</code></pre>
 <tr><td><code>stop()</code></td><td>Ask it to end (SIGTERM).</td></tr>
 </table>
 <p>Limits: no stop on Windows yet; output is read in chunks of up to 4 KiB with no line splitting (a front end splits lines &mdash; see the <a href="ide.html">Output panel</a>); no pseudo-terminal, so programs that expect a terminal behave as if piped (the terminal widget will add a PTY).</p>
+<h2>Timers</h2>
+<p><code>ui.setTimer(delay_ms, callback)</code> runs a callback once on the UI thread, <code>delay_ms</code> after the current time (at the next <code>ui.tick</code> that is due), and returns an id; <code>ui.cancelTimer(id)</code> cancels one that has not fired. The event passed is a <code>command</code> event with no name. <code>ui.nextWakeMs()</code> includes pending timers, so an idle event loop sleeps exactly until the next one. Hover tooltips and signature-help refreshes use them.</p>
 </main><script src="nav.js"></script></body></html>

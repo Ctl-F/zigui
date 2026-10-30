@@ -28,6 +28,7 @@ const CodeEditor = code_editor.CodeEditor;
 const FindBar = @import("../widgets/find_bar.zig").FindBar;
 const syntax = @import("../editor/syntax.zig");
 const Completion = @import("../widgets/completion.zig").Completion;
+const hover_mod = @import("../widgets/hover.zig");
 const ZigCompleter = @import("zig_complete.zig").ZigCompleter;
 const project_mod = @import("project.zig");
 const Project = project_mod.Project;
@@ -70,6 +71,8 @@ pub const Documents = struct {
     /// Suggestions for every editor opened from now on (see `enableCompletion`).
     completion: ?*Completion = null,
     zig: ?*ZigCompleter = null,
+    hover: ?*hover_mod.Hover = null,
+    signature: ?*hover_mod.SignatureHelp = null,
     /// The latest thing worth telling the user (a failed save, a refused close).
     message: [200]u8 = undefined,
     message_len: usize = 0,
@@ -103,7 +106,16 @@ pub const Documents = struct {
         self.zig = zig;
     }
 
+    /// Give every editor opened from now on hover tooltips and signature help.
+    /// Both must outlive the documents.
+    pub fn enableHints(self: *Documents, hover: *hover_mod.Hover, signature: *hover_mod.SignatureHelp) void {
+        self.hover = hover;
+        self.signature = signature;
+    }
+
     fn releaseEditor(self: *Documents, ed: *CodeEditor) void {
+        if (self.hover) |h| h.detach(ed);
+        if (self.signature) |g| g.detach(ed);
         if (self.completion) |c| c.detach(ed);
         if (self.zig) |z| z.forget(ed);
     }
@@ -169,6 +181,8 @@ pub const Documents = struct {
             .read_only = read_only,
         });
         find_bar.attach(ed);
+        if (self.hover) |h| try h.attach(ed);
+        if (self.signature) |g| try g.attach(ed);
         if (self.completion) |c| {
             try c.attach(ed);
             if (self.zig) |z| {

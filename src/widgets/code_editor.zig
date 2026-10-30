@@ -64,6 +64,9 @@ const gutter_pad: f32 = 8;
 
 /// How many independent decoration sets an editor holds (find uses one,
 /// diagnostics another, ...). Owners are small integers chosen by the host.
+/// Key and edit hooks an editor can hold.
+pub const max_hooks = 6;
+
 pub const deco_owners = 8;
 
 pub const DecorationKind = enum {
@@ -131,6 +134,9 @@ pub const CodeEditor = struct {
     spans: std.ArrayListUnmanaged(syntax.Span) = .empty,
     number_buf: [24]u8 = undefined,
 
+    /// Tools watching this editor (see `addKeyHook`, `addEditHook`).
+    key_hooks: [max_hooks]?event.Callback = @splat(null),
+    edit_hooks: [max_hooks]?event.Callback = @splat(null),
     /// Syntax highlighting, if a language is set.
     highlighter: ?Highlighter = null,
     /// Decorations by owner (see `setDecorations`).
@@ -303,8 +309,46 @@ pub const CodeEditor = struct {
         };
     }
 
+    /// Call `cb` with each key press before the editor handles it, in the
+    /// order hooks were added; a callback that calls `ev.markHandled()` keeps
+    /// the editor (and later hooks) from acting on the key. A completion list
+    /// takes Up, Down and Enter this way. Fails when the editor has
+    /// `max_hooks` key hooks already.
+    pub fn addKeyHook(self: *CodeEditor, cb: event.Callback) error{TooManyHooks}!void {
+        return addHook(&self.key_hooks, cb);
+    }
+
+    /// Call `cb` after each edit (like `props.on_change`, but several tools can
+    /// watch while the host keeps `on_change`). `ev.kind` is `.text_input` for
+    /// typed text (`ev.text`) and `.key_down` for other edits.
+    pub fn addEditHook(self: *CodeEditor, cb: event.Callback) error{TooManyHooks}!void {
+        return addHook(&self.edit_hooks, cb);
+    }
+
+    /// Remove the hooks added with `ctx` as their context.
+    pub fn removeHooks(self: *CodeEditor, ctx: *anyopaque) void {
+        for (&self.key_hooks) |*h| if (h.*) |cb| {
+            if (cb.ctx == ctx) h.* = null;
+        };
+        for (&self.edit_hooks) |*h| if (h.*) |cb| {
+            if (cb.ctx == ctx) h.* = null;
+        };
+    }
+
+    fn addHook(list: *[max_hooks]?event.Callback, cb: event.Callback) error{TooManyHooks}!void {
+        for (list) |*h| {
+            if (h.* == null) {
+                h.* = cb;
+                return;
+            }
+        }
+        return error.TooManyHooks;
+    }
+
     pub fn apply(self: *CodeEditor, o: Options) !void {
         try self.ui.tree.setLabel(self.node, o.label);
+        if (o.on_key) |cb| try self.addKeyHook(cb);
+        if (o.on_edit) |cb| try self.addEditHook(cb);
         self.props = .{
             .font = o.font,
             .size = o.size,
@@ -315,8 +359,6 @@ pub const CodeEditor = struct {
             .auto_indent = o.auto_indent,
             .on_change = o.on_change,
             .on_find = o.on_find,
-            .on_key = o.on_key,
-            .on_edit = o.on_edit,
             .folding = o.folding,
             .colors = o.colors,
             .painter = o.painter,
@@ -542,7 +584,9 @@ pub const CodeEditor = struct {
         self.out.change_count +%= 1;
         self.touch(true);
         if (self.props.on_change) |cb| cb.invoke(ev);
-        if (self.props.on_edit) |cb| cb.invoke(ev);
+        for (self.edit_hooks) |h| {
+            if (h) |cb| cb.invoke(ev);
+        }
     }
 
     /// Replace [start, end) with `text` and put the caret after it, as one
@@ -1350,9 +1394,11 @@ pub const CodeEditor = struct {
     fn key(self: *CodeEditor, ev: *event.Event) void {
         const props = &self.props;
         if (!props.enabled) return;
-        if (props.on_key) |cb| {
-            cb.invoke(ev);
-            if (ev.handled) return;
+        for (self.key_hooks) |h| {
+            if (h) |cb| {
+                cb.invoke(ev);
+                if (ev.handled) return;
+            }
         }
         const ed = &self.editor;
         const now = self.ui.now_ms;
@@ -1483,6 +1529,55 @@ pub const CodeEditor = struct {
         return if (elapsed >= blink_ms) 1 else blink_ms - elapsed;
     }
 
+    /// Rectangle (window coordinates, width 1) of the character boundary at
+    /// `offset`, or null before the first layout or when its line is folded away.
+    pub fn rectOfOffset(self: *CodeEditor, offset: usize) ?Rect {
+        const m = self.metrics() orelse return null;
+        const geo = self.geometry(m);
+        const abs = self.ui.tree.absoluteRect(self.node) orelse return null;
+        const line = self.editor.doc.lineOfOffset(offset);
+        self.buildLine(line, m) catch return null;
+        const x = abs.x + geo.pad.l + geo.gutter_w + self.xOfOffset(self.editor.doc.lineStart(line), offset) - self.scroll_x;
+        const y = abs.y + geo.pad.t + @as(f32, @floatFromInt(self.rowOfLine(line))) * m.line_h - self.scroll_y;
+        return .{ .x = x, .y = y, .w = 1, .h = m.line_h };
+    }
+
+    pub const WordRange = struct { start: usize, end: usize };
+
+    /// The identifier (letters, digits, `_`, with a leading `@`) under a point
+    /// given relative to the node's top-left; null over the gutter, past the
+    /// end of a line, or on anything else.
+    pub fn wordAtPoint(self: *CodeEditor, local_x: f32, local_y: f32) ?WordRange {
+        const m = self.metrics() orelse return null;
+        const geo = self.geometry(m);
+        if (local_x < geo.pad.l + geo.gutter_w or local_y < geo.pad.t) return null;
+        const doc = &self.editor.doc;
+        const line = self.lineAtPoint(local_y);
+        if (line >= doc.lineCount()) return null;
+        const ls = doc.lineStart(line);
+        const le = doc.lineEnd(line);
+        self.buildLine(line, m) catch return null;
+        const x = local_x - geo.pad.l - geo.gutter_w + self.scroll_x;
+        if (x > self.xOfOffset(ls, le)) return null;
+        const text = doc.range(ls, le) catch return null;
+        const off = self.offsetAtX(ls, x) - ls;
+        const isWord = struct {
+            fn f(c: u8) bool {
+                return std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
+            }
+        }.f;
+        var at: usize = off;
+        if (at >= text.len or !isWord(text[at])) {
+            if (at > 0 and isWord(text[at - 1])) at -= 1 else return null;
+        }
+        var s0 = at;
+        var e0 = at + 1;
+        while (s0 > 0 and isWord(text[s0 - 1])) s0 -= 1;
+        while (e0 < text.len and isWord(text[e0])) e0 += 1;
+        if (s0 > 0 and text[s0 - 1] == '@') s0 -= 1;
+        return .{ .start = ls + s0, .end = ls + e0 };
+    }
+
     /// Caret rectangle in window coordinates, for IME placement.
     pub fn caretRect(self: *CodeEditor) ?Rect {
         const m = self.metrics() orelse return null;
@@ -1513,13 +1608,6 @@ pub const CodeEditor = struct {
         /// Ctrl+F / Ctrl+H pressed in the editor: the host shows its find bar
         /// (the callback's `ev.key` is `.f` for find and `.h` for replace).
         on_find: ?event.Callback = null,
-        /// Called with each key press before the editor handles it. A callback
-        /// that calls `ev.markHandled()` keeps the editor from acting on the key
-        /// (a completion list takes Up, Down and Enter this way).
-        on_key: ?event.Callback = null,
-        /// Called after each edit, like `on_change`, for a tool that watches the
-        /// text (completion) while the host keeps `on_change` for itself.
-        on_edit: ?event.Callback = null,
         /// Overrides the theme's editor colors for this editor.
         colors: ?EditorColors = null,
         /// Overrides the theme's painter for this editor (use `setPainter`).

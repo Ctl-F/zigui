@@ -50,6 +50,8 @@ pub const Member = struct {
     kind: Kind,
     /// A signature or type, shortened to one line.
     detail: []const u8 = "",
+    /// The `///` doc comment lines above the declaration, raw (with the slashes).
+    doc: []const u8 = "",
 };
 
 pub const File = struct {
@@ -278,6 +280,29 @@ pub const Index = struct {
         return true;
     }
 
+    /// The declaration `path` names (`{"std","mem","eql"}`), or null. A single
+    /// name is looked up among `scope`'s own top-level names.
+    pub fn lookup(self: *Index, scope: *File, path: []const []const u8) ?Member {
+        if (path.len == 0) return null;
+        var parent: Ref = .{ .file = scope };
+        if (path.len > 1) {
+            parent = blk: {
+                const here: Ref = .{ .file = scope };
+                if (findDeclAny(here, path[0])) |d| break :blk self.declRef(scope, d, 0) orelse return null;
+                if (std.mem.eql(u8, path[0], "std")) break :blk .{ .file = self.importTarget(scope, "std") orelse return null };
+                return null;
+            };
+            for (path[1 .. path.len - 1]) |seg| {
+                const d = findDecl(parent, seg) orelse return null;
+                parent = self.declRef(parent.file, d, 0) orelse return null;
+            }
+        }
+        const name = path[path.len - 1];
+        const d = if (path.len == 1) findDeclAny(parent, name) else findDecl(parent, name);
+        const node = d orelse return null;
+        return self.describe(parent.file, node, name, false);
+    }
+
     /// Append every top-level name of `scope` (what an unqualified name can be).
     pub fn topLevel(self: *Index, scope: *File, out: *std.ArrayListUnmanaged(Member)) void {
         self.collect(.{ .file = scope }, out);
@@ -299,6 +324,12 @@ pub const Index = struct {
     }
 
     fn describe(self: *Index, file: *File, node: Node.Index, name: []const u8, in_enum: bool) Member {
+        var m = self.describeBare(file, node, name, in_enum);
+        m.doc = docComment(&file.ast, file.source, node);
+        return m;
+    }
+
+    fn describeBare(self: *Index, file: *File, node: Node.Index, name: []const u8, in_enum: bool) Member {
         _ = self;
         const ast = &file.ast;
         if (ast.fullVarDecl(node)) |vd| {
@@ -330,6 +361,15 @@ pub const Index = struct {
         return .{ .name = name, .kind = if (in_enum) .enum_value else .field, .detail = detail };
     }
 };
+
+/// The `///` lines directly above `node`, raw.
+fn docComment(ast: *const Ast, source: []const u8, node: Node.Index) []const u8 {
+    const first = ast.firstToken(node);
+    var t = first;
+    while (t > 0 and ast.tokenTag(t - 1) == .doc_comment) t -= 1;
+    if (t == first) return "";
+    return std.mem.trimEnd(u8, source[ast.tokenStart(t)..ast.tokenStart(first)], " \t\r\n");
+}
 
 /// The first line of `s`, at most 100 bytes (a signature for a list row).
 fn oneLine(s: []const u8) []const u8 {
@@ -437,6 +477,30 @@ test "member lookup follows imports, aliases, containers and visibility" {
     index.topLevel(buf, &out);
     try testing.expect(find(out.items, "run") != null and find(out.items, "Local") != null);
     try testing.expectEqual(Kind.namespace, find(out.items, "std").?.kind);
+}
+
+test "lookup finds one declaration with its signature and doc comment" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try fakeStd(&tmp);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "lib/std/mem.zig", .data =
+        \\/// Compare two slices.
+        \\/// Returns true if equal.
+        \\pub fn eql(comptime T: type, a: []const T, b: []const T) bool { _ = a; _ = b; return true; }
+    });
+    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+    var index = try Index.init(testing.allocator, testing.io, try stdPath(&tmp, &pbuf));
+    defer index.deinit();
+    const buf = try index.parseBuffer("const std = @import(\"std\");\n/// Mine.\nfn local(x: u8) u8 { return x; }\n", "/p");
+    defer index.freeBuffer(buf);
+    const m = index.lookup(buf, &.{ "std", "mem", "eql" }).?;
+    try testing.expectEqual(Kind.function, m.kind);
+    try testing.expectEqualStrings("(comptime T: type, a: []const T, b: []const T) bool", m.detail);
+    try testing.expectEqualStrings("/// Compare two slices.\n/// Returns true if equal.", m.doc);
+    const l = index.lookup(buf, &.{"local"}).?;
+    try testing.expectEqualStrings("/// Mine.", l.doc);
+    try testing.expect(index.lookup(buf, &.{ "std", "mem", "nothing" }) == null);
+    try testing.expect(index.lookup(buf, &.{"nothing"}) == null);
 }
 
 test "no std dir means std does not resolve, and a broken buffer still indexes what parses" {

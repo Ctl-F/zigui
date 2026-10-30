@@ -45,6 +45,7 @@ pub const Row = struct {
     user: usize = 0,
 };
 
+/// A `list` is `Ui.popup`; a `tip` is `Ui.tip` (so both can be open together).
 pub const Kind = enum { list, tip };
 
 pub const Options = struct {
@@ -58,6 +59,11 @@ pub const Options = struct {
     min_width: f32 = 0,
     /// Row selected first.
     selected: usize = 0,
+    /// A tip opens over the anchor instead of below it.
+    above: bool = false,
+    /// A tip draws bytes `mark_start`..`mark_end` of its first line emphasized.
+    mark_start: usize = 0,
+    mark_end: usize = 0,
 };
 
 const panel_bg = Color.rgb(0x2b, 0x2d, 0x31);
@@ -99,9 +105,10 @@ pub const Popup = struct {
     y: f32 = 0,
     placed: bool = false,
     closed: bool = false,
+    above: bool = false,
 
     pub fn open(ui: *Ui, rows: []const Row, opts: Options) !void {
-        ui.hidePopup();
+        if (opts.kind == .tip) ui.hideTip() else ui.hidePopup();
         const self = try ui.gpa.create(Popup);
         errdefer ui.gpa.destroy(self);
         self.* = .{
@@ -110,6 +117,7 @@ pub const Popup = struct {
             .kind = opts.kind,
             .on_pick = opts.on_pick,
             .anchor = opts.anchor,
+            .above = opts.above,
             .x = opts.anchor.x,
             .y = opts.anchor.bottom() + 2,
             .selected = if (rows.len > 0) @min(opts.selected, rows.len - 1) else 0,
@@ -126,7 +134,7 @@ pub const Popup = struct {
             } };
         }
         try self.build(opts);
-        ui.popup = self;
+        if (opts.kind == .tip) ui.tip = self else ui.popup = self;
     }
 
     fn build(self: *Popup, opts: Options) !void {
@@ -150,7 +158,20 @@ pub const Popup = struct {
         try tree.setLabel(self.panel, if (self.kind == .tip) "Tooltip" else "Suggestions");
 
         if (self.kind == .tip) {
-            for (self.entries) |*e| _ = try ui.add(Label, self.panel, .{ .text = e.row.label });
+            for (self.entries, 0..) |*e, i| {
+                const l = e.row.label;
+                if (i == 0 and opts.mark_end > opts.mark_start and opts.mark_end <= l.len) {
+                    // One row of three pieces, the middle emphasized.
+                    const row = try tree.create(.{ .style = .{ .direction = .row, .shrink = 0 } });
+                    try tree.appendChild(self.panel, row);
+                    const mono: @import("label.zig").Font = .mono;
+                    if (opts.mark_start > 0) _ = try ui.add(Label, row, .{ .text = l[0..opts.mark_start], .font = mono, .style = .{ .shrink = 0 } });
+                    _ = try ui.add(Label, row, .{ .text = l[opts.mark_start..opts.mark_end], .font = mono, .color = Color.rgb(0xff, 0xc8, 0x57), .style = .{ .shrink = 0 } });
+                    if (opts.mark_end < l.len) _ = try ui.add(Label, row, .{ .text = l[opts.mark_end..], .font = mono, .style = .{ .shrink = 0 } });
+                } else {
+                    _ = try ui.add(Label, self.panel, .{ .text = l });
+                }
+            }
             return;
         }
         const row_h = ui.theme.font_size + 10;
@@ -192,6 +213,7 @@ pub const Popup = struct {
         self.closed = true;
         const ui = self.ui;
         if (ui.popup == self) ui.popup = null;
+        if (ui.tip == self) ui.tip = null;
         _ = ui.tree.destroySubtree(self.panel);
         ui.popup_closed.append(ui.gpa, self) catch {};
     }
@@ -265,7 +287,9 @@ pub const Popup = struct {
         const win = tree.get(tree.root).?.rect;
         var x = self.x;
         var y = self.y;
-        if (y + r.h > win.h and self.anchor.y - r.h - 2 >= 0) y = self.anchor.y - r.h - 2;
+        if (self.above) {
+            if (self.anchor.y - r.h - 2 >= 0) y = self.anchor.y - r.h - 2;
+        } else if (y + r.h > win.h and self.anchor.y - r.h - 2 >= 0) y = self.anchor.y - r.h - 2;
         x = @max(@min(x, win.w - r.w), 0);
         y = @max(@min(y, win.h - r.h), 0);
         if (x != self.x or y != self.y) {
@@ -344,13 +368,44 @@ test "a press outside closes a list, a tip ignores the pointer, and a new popup 
 
     try r.ui.showTip("Line one\nLine two", .{ .x = 50, .y = 50, .w = 10, .h = 16 });
     try r.frame();
-    try testing.expect(r.ui.popupOpen());
-    try testing.expectEqual(@as(?usize, null), r.ui.popup.?.selectedIndex());
-    const panel = r.ui.popup.?.panel;
-    try testing.expect(r.ui.tree.hitTest(60, 70) == null or !r.ui.tree.hitTest(60, 70).?.eql(panel));
-    try r.ui.showPopup(&.{.{ .label = "y" }}, .{});
-    try testing.expect(r.ui.popup.?.kind == .list);
-    r.ui.hidePopup();
-    try r.frame();
+    try testing.expect(r.ui.tipOpen());
     try testing.expect(!r.ui.popupOpen());
+    try testing.expectEqual(@as(?usize, null), r.ui.tip.?.selectedIndex());
+    const panel = r.ui.tip.?.panel;
+    try testing.expect(r.ui.tree.hitTest(60, 70) == null or !r.ui.tree.hitTest(60, 70).?.eql(panel));
+    // A list and a tip can be open together; each replaces only its own kind.
+    try r.ui.showPopup(&.{.{ .label = "y" }}, .{});
+    try testing.expect(r.ui.popup.?.kind == .list and r.ui.tipOpen());
+    try r.ui.showTipOpts("fn(a, b)", .{ .x = 50, .y = 200, .w = 10, .h = 16 }, .{ .above = true, .mark_start = 3, .mark_end = 4 });
+    try r.frame();
+    try testing.expect(r.ui.popupOpen());
+    r.ui.hidePopup();
+    r.ui.hideTip();
+    try r.frame();
+    try testing.expect(!r.ui.popupOpen() and !r.ui.tipOpen());
+}
+
+test "timers fire once when due and can be cancelled" {
+    const r = try Rig.init();
+    defer r.deinit();
+    const Hits = struct {
+        n: u32 = 0,
+        fn hit(self: *@This(), _: *event.Event) void {
+            self.n += 1;
+        }
+    };
+    var h: Hits = .{};
+    _ = r.ui.tick(1000);
+    const a = try r.ui.setTimer(50, event.Callback.bind(&h, Hits.hit));
+    const b = try r.ui.setTimer(80, event.Callback.bind(&h, Hits.hit));
+    try testing.expectEqual(@as(?u32, 50), r.ui.nextWakeMs());
+    r.ui.cancelTimer(b);
+    _ = a;
+    _ = r.ui.tick(1040);
+    try testing.expectEqual(@as(u32, 0), h.n);
+    _ = r.ui.tick(1060);
+    try testing.expectEqual(@as(u32, 1), h.n);
+    _ = r.ui.tick(2000);
+    try testing.expectEqual(@as(u32, 1), h.n);
+    try testing.expectEqual(@as(?u32, null), r.ui.nextWakeMs());
 }

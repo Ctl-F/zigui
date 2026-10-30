@@ -425,7 +425,7 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   `src/ide/` (exported as `zigui.ide`) holds IDE-level code: the Zig diagnostic
   parser and the Output panel (a read-only `CodeEditor` that follows the end,
   line tints as decorations, double-click to open a diagnostic). The workbench
-  docks it and binds F5 / Ctrl+Shift+T.
+  docks it and binds F5 / Ctrl+Shift+T. The panel echoes the command (`$ zig build run`) first and a result line (`[Finished: ... (exit 0, 1.2 s)]`) last, so a build that succeeds silently still shows something. The IDE app's F5 is `zig build run`, Ctrl+B is `zig build`.
 - Projects (plan step 3): `ide.Project` (root directory, excluded folders,
   sorted listings, file IO), `ide.search_project.Searcher` (worker-thread walk,
   skips binaries and files over 4 MiB, 5000-hit cap, cancelable), `FilesPanel`
@@ -446,6 +446,14 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   answer for Zig from `std.zig.Ast` alone (std found via `zig env`), no language
   server; types of values are not inferred, which is where an LSP will add to it.
   The test rig moved to `core/test_rig.zig` so framework tests can share it.
+- Hover and signature help: `Ui.setTimer/cancelTimer` (one-shot timers folded into
+  `tick`/`nextWakeMs`); a second popup slot `Ui.tip` so a suggestion list and a
+  hint coexist; `CodeEditor` key/edit hook *lists* (`addKeyHook`, `addEditHook`,
+  `removeHooks`; replaces the single `on_key`/`on_edit` props so completion,
+  signature help and others can all attach), `rectOfOffset`, `wordAtPoint`.
+  `widgets/hover.zig` has `Hover` (rest on a word) and `SignatureHelp`
+  (`enclosingCall` scans back for the unmatched `(`, counts commas); the Zig
+  providers answer from the AST index (`Index.lookup`, doc comments).
 - Workbench (`zig build workbench`): a code editor on the ZON text beside the
   builder, synced both ways; parse errors go to the status line. Examples build
   ReleaseSafe by default (`-Dexample_optimize`) because the software rasterizer

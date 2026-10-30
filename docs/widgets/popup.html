@@ -2,7 +2,7 @@
 <html lang="en"><head><meta charset="utf-8"><title>Popup - zigui</title><link rel="stylesheet" href="../style.css"></head>
 <body data-root="../"><nav id="nav"></nav><main>
 <h1>Popup</h1>
-<p>A small overlay that <b>does not take keyboard focus</b>: a suggestion list that follows typing, or a tooltip. The widget that opens it keeps receiving keys; it moves the selection and picks through the <code>Ui</code>. (Menus, by contrast, hold focus while open; see <a href="menus.html">menus</a>.)</p>
+<p>A small overlay that <b>does not take keyboard focus</b>: a suggestion list that follows typing, or a tooltip or signature hint. The widget that opens it keeps receiving keys; it moves the selection and picks through the <code>Ui</code>. (Menus, by contrast, hold focus while open; see <a href="menus.html">menus</a>.)</p>
 <pre><code>try ui.showPopup(&amp;.{
     .{ .tag = "fn", .label = "print", .detail = "(fmt, args) void" },
     .{ .tag = "fn", .label = "printErr" },
@@ -12,10 +12,15 @@ ui.popupMove(1);          // Down
 _ = ui.popupPick();       // Enter / Tab: closes, then calls on_pick(index)
 ui.hidePopup();           // Escape
 
+// A hint over the line, with part of its first line emphasized (the active parameter):
+try ui.showTipOpts("@Vector(len: comptime_int, Element: type) type", caret_rect,
+    .{ .above = true, .mark_start = 27, .mark_end = 39 });
+ui.hideTip();
+
 try ui.showTip("Returns the length.\nO(1)", anchor_rect);   // a tooltip, one label per line</code></pre>
 <h2>Behavior</h2>
 <ul>
-<li>One popup at a time; opening another replaces it.</li>
+<li>Two slots: a <b>list</b> (<code>ui.popup</code>) and a <b>tip</b> (<code>ui.tip</code>: a tooltip or a signature hint). Opening one replaces only the same kind, so a suggestion list and a signature hint can be open together.</li>
 <li>It opens below <code>anchor</code> (window coordinates), above if there is no room, and stays inside the window.</li>
 <li>A <b>list</b> closes when the pointer is pressed outside it; the press still reaches whatever is underneath. Clicking a row picks it without moving focus away from the editor.</li>
 <li>A <b>tooltip</b> ignores the pointer completely and has no selection.</li>
@@ -25,7 +30,7 @@ try ui.showTip("Returns the length.\nO(1)", anchor_rect);   // a tooltip, one la
 <ul>
 <li><code>Row</code>: <code>label</code>, <code>detail</code> (dimmed, after the label), <code>tag</code> (dimmed, before it), <code>user</code>.</li>
 <li><code>Options</code>: <code>anchor</code>, <code>kind</code> (<code>.list</code> or <code>.tip</code>), <code>on_pick</code>, <code>max_rows</code>, <code>min_width</code>, <code>selected</code>.</li>
-<li><code>Ui.showPopup(rows, opts)</code>, <code>showTip(text, anchor)</code>, <code>hidePopup()</code>, <code>popupOpen()</code>, <code>popupMove(delta)</code> (wraps), <code>popupPick() bool</code>.</li>
+<li><code>Ui.showPopup(rows, opts)</code>, <code>showTip(text, anchor)</code>, <code>showTipOpts(text, anchor, .{above, mark_start, mark_end})</code>, <code>hideTip()</code>, <code>tipOpen()</code>, <code>hidePopup()</code>, <code>popupOpen()</code>, <code>popupMove(delta)</code> (wraps), <code>popupPick() bool</code>.</li>
 <li><code>ui.popup</code> (the open <code>Popup</code>, or null): <code>count()</code>, <code>selectedIndex()</code>, <code>selectIndex(i)</code>, <code>userOf(i)</code>.</li>
 </ul>
 <p>Code-only (not a toolbox widget). <a href="completion.html">Completion</a> is built on it.</p>

@@ -140,6 +140,7 @@ pub const OutputPanel = struct {
         const joined = try std.mem.join(self.gpa, " ", argv);
         self.gpa.free(self.title);
         self.title = joined;
+        self.echo("$ ", joined);
         self.runner = try process.Runner.start(self.gpa, io, .{ .argv = argv, .cwd = cwd, .wake = wake });
         self.running = true;
         self.exit_code = null;
@@ -267,6 +268,16 @@ pub const OutputPanel = struct {
             },
         };
         self.status.setText(text) catch {};
+        self.echo("[", text);
+    }
+
+    /// A line of the panel's own (the command that started, how it ended), not
+    /// the process's: `prefix`, `text`, and a closing bracket if `prefix` opened one.
+    fn echo(self: *OutputPanel, prefix: []const u8, text: []const u8) void {
+        var buf: [700]u8 = undefined;
+        const close: []const u8 = if (std.mem.eql(u8, prefix, "[")) "]" else "";
+        const line = std.fmt.bufPrint(&buf, "{s}{s}{s}\n", .{ prefix, text, close }) catch return;
+        self.editor.appendText(line) catch {};
     }
 
     // ---- activating a diagnostic ----
@@ -357,7 +368,8 @@ test "the panel shows output as it arrives, tints diagnostics, and double-click 
     // stdout and stderr lines both appear, colors stripped, the unterminated tail kept.
     try testing.expect(std.mem.indexOf(u8, text, "building\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "src/a.zig:3:7: error: bad thing\n") != null);
-    try testing.expect(std.mem.endsWith(u8, text, "tail\n"));
+    try testing.expect(std.mem.indexOf(u8, text, "tail\n[Finished: ") != null);
+    try testing.expect(std.mem.startsWith(u8, text, "$ /bin/sh -c "));
     try testing.expectEqual(@as(usize, 2), out.diags.items.len);
     try testing.expectEqual(@as(usize, 2), out.editor.decos[0].items.len);
     try testing.expect(out.editor.decos[0].items[0].kind == .error_line or out.editor.decos[0].items[0].kind == .warning_line);

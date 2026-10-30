@@ -60,6 +60,7 @@ pub const select = @import("widgets/select.zig");
 pub const menu = @import("widgets/menu.zig");
 pub const popup = @import("widgets/popup.zig");
 pub const completion = @import("widgets/completion.zig");
+pub const hover = @import("widgets/hover.zig");
 pub const tab_panel = @import("widgets/tab_panel.zig");
 pub const dock = @import("widgets/dock.zig");
 pub const text_area = @import("widgets/text_area.zig");

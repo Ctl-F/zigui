@@ -6,7 +6,7 @@
 //!       zig-out/bin/ide path/to/project
 //!
 //! Double-click a file in Files to open it; Ctrl+S saves; Ctrl+F finds in the
-//! file, Ctrl+Shift+F finds in the project; F5 runs `zig build` and Ctrl+Shift+T
+//! file, Ctrl+Shift+F finds in the project; F5 runs `zig build run`, Ctrl+B `zig build`, and Ctrl+Shift+T
 //! `zig build test` (double-click an error in Output to jump to it).
 //!
 //! Env (headless checks, with SDL_VIDEODRIVER=dummy):
@@ -20,7 +20,7 @@ const sdl = @import("zigui_sdl");
 const stb = @import("zigui_stb");
 
 const Ui = zigui.Ui;
-const ide = zigui.ide;
+const ide = zigui.ide; // hello
 
 const App = struct {
     gpa: std.mem.Allocator,
@@ -63,7 +63,7 @@ const App = struct {
 
     fn onCommand(self: *App, ev: *zigui.Event) void {
         const name = ev.text;
-        if (std.mem.eql(u8, name, "ide.build")) self.runBuild("") else if (std.mem.eql(u8, name, "ide.test")) self.runBuild("test") else if (std.mem.eql(u8, name, "file.save")) {
+        if (std.mem.eql(u8, name, "ide.build")) self.runBuild("") else if (std.mem.eql(u8, name, "ide.run")) self.runBuild("run") else if (std.mem.eql(u8, name, "ide.test")) self.runBuild("test") else if (std.mem.eql(u8, name, "file.save")) {
             _ = self.docs.saveActive();
         } else if (std.mem.eql(u8, name, "project.search")) {
             self.dock.showPanel(self.search_panel) catch {};
@@ -212,7 +212,7 @@ pub fn main(init: std.process.Init) !void {
     const welcome = try dock.addPanel("Welcome");
     ui.tree.get(welcome.content).?.style = .{ .direction = .column, .grow = 1, .padding = zigui.style.Edges.all(16), .gap = zigui.Length.px(8) };
     _ = try ui.add(zigui.Label, welcome.content, .{ .text = project.name, .size = 20 });
-    _ = try ui.add(zigui.Label, welcome.content, .{ .text = "Double-click a file to open it. Ctrl+S saves, Ctrl+Shift+F searches the project, F5 builds." });
+    _ = try ui.add(zigui.Label, welcome.content, .{ .text = "Double-click a file to open it. Ctrl+S saves, Ctrl+Shift+F searches the project, F5 runs, Ctrl+B builds." });
     try dock.dockTab(welcome, null);
 
     // Suggestions that work with no language server: words in the file, plus
@@ -225,9 +225,16 @@ pub fn main(init: std.process.Init) !void {
     const completion = try zigui.completion.Completion.create(&ui);
     defer completion.destroy();
     try completion.addProvider(zig_completer.provider());
+    const hover = try zigui.hover.Hover.create(&ui);
+    defer hover.destroy();
+    try hover.addProvider(zig_completer.hoverProvider());
+    const signature = try zigui.hover.SignatureHelp.create(&ui);
+    defer signature.destroy();
+    try signature.addProvider(zig_completer.signatureProvider());
     app.docs = try ide.Documents.create(&ui, dock, &project, io, .{ .anchor = welcome });
     defer app.docs.destroy();
     app.docs.enableCompletion(completion, zig_completer);
+    app.docs.enableHints(hover, signature);
 
     const files_panel = try dock.addPanel("Files");
     app.files_panel = files_panel;
@@ -249,11 +256,13 @@ pub fn main(init: std.process.Init) !void {
 
     inline for (.{
         .{ "ide.build", "Build" },
+        .{ "ide.run", "Run" },
         .{ "ide.test", "Run tests" },
         .{ "file.save", "Save" },
         .{ "project.search", "Find in project" },
     }) |c| _ = try ui.registerCommand(c[0], .{ .title = c[1], .run = zigui.event.Callback.bind(&app, App.onCommand) });
-    try ui.bindShortcut("f5", "ide.build", .app, null);
+    try ui.bindShortcut("f5", "ide.run", .app, null);
+    try ui.bindShortcut("mod+b", "ide.build", .app, null);
     try ui.bindShortcut("mod+shift+t", "ide.test", .app, null);
     try ui.bindShortcut("mod+s", "file.save", .app, null);
     try ui.bindShortcut("mod+shift+f", "project.search", .app, null);

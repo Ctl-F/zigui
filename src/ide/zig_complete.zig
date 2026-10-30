@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const Completion = @import("../widgets/completion.zig");
+const hover_mod = @import("../widgets/hover.zig");
 const CodeEditor = @import("../widgets/code_editor.zig").CodeEditor;
 const syntax = @import("../editor/syntax.zig");
 const zig_index = @import("zig_index.zig");
@@ -189,6 +190,96 @@ pub const ZigCompleter = struct {
         return self.cached;
     }
 
+    pub fn hoverProvider(self: *ZigCompleter) hover_mod.HoverProvider {
+        return hover_mod.HoverProvider.bind(self, hover);
+    }
+
+    pub fn signatureProvider(self: *ZigCompleter) hover_mod.SigProvider {
+        return hover_mod.SigProvider.bind(self, signature);
+    }
+
+    fn builtinNamed(name: []const u8) ?Builtin {
+        for (builtins) |b| if (std.mem.eql(u8, b.name, name)) return b;
+        return null;
+    }
+
+    /// What the declaration under the pointer is: its signature and doc comment.
+    pub fn hover(self: *ZigCompleter, req: *const hover_mod.HoverRequest, out: *hover_mod.Lines) void {
+        const lang = req.editor.language() orelse return;
+        if (lang != &syntax.zig) return;
+        if (req.word.len > 0 and req.word[0] == '@') {
+            const b = builtinNamed(req.word) orelse return;
+            var buf: [200]u8 = undefined;
+            out.add(std.fmt.bufPrint(&buf, "{s}{s}", .{ b.name, b.detail }) catch b.name);
+            return;
+        }
+        const file = self.bufferFor(req.editor) orelse return;
+        var segs: [9][]const u8 = undefined;
+        var n: usize = 0;
+        if (req.line_before.len > 0 and req.line_before[req.line_before.len - 1] == '.') {
+            var tmp: [8][]const u8 = undefined;
+            const path = dottedPath(req.line_before, &tmp) orelse return;
+            for (path) |p| {
+                segs[n] = p;
+                n += 1;
+            }
+        }
+        segs[n] = req.word;
+        n += 1;
+        const m = self.index.lookup(file, segs[0..n]) orelse return;
+        var buf: [320]u8 = undefined;
+        const head = switch (m.kind) {
+            .function => std.fmt.bufPrint(&buf, "fn {s}{s}", .{ m.name, m.detail }),
+            .constant => if (m.detail.len > 0) std.fmt.bufPrint(&buf, "const {s}: {s}", .{ m.name, m.detail }) else std.fmt.bufPrint(&buf, "const {s}", .{m.name}),
+            .variable => if (m.detail.len > 0) std.fmt.bufPrint(&buf, "var {s}: {s}", .{ m.name, m.detail }) else std.fmt.bufPrint(&buf, "var {s}", .{m.name}),
+            .type => std.fmt.bufPrint(&buf, "type {s}", .{m.name}),
+            .namespace => std.fmt.bufPrint(&buf, "module {s}", .{m.name}),
+            .field, .enum_value => if (m.detail.len > 0) std.fmt.bufPrint(&buf, "{s}: {s}", .{ m.name, m.detail }) else std.fmt.bufPrint(&buf, "{s}", .{m.name}),
+        } catch m.name;
+        out.add(head);
+        var it = std.mem.splitScalar(u8, m.doc, '\n');
+        var first = true;
+        while (it.next()) |line| {
+            const t = std.mem.trim(u8, line, " \t\r");
+            const body = if (std.mem.startsWith(u8, t, "///")) std.mem.trimStart(u8, t[3..], " ") else t;
+            if (first and body.len > 0) out.add("");
+            first = false;
+            if (body.len > 0) out.add(body);
+        }
+    }
+
+    /// The parameter list of the function being called.
+    pub fn signature(self: *ZigCompleter, req: *const hover_mod.SigRequest, out: *hover_mod.SigSink) void {
+        const lang = req.editor.language() orelse return;
+        if (lang != &syntax.zig) return;
+        var name: []const u8 = undefined;
+        var detail: []const u8 = undefined;
+        if (req.callee.len > 0 and req.callee[0] == '@') {
+            const b = builtinNamed(req.callee) orelse return;
+            name = b.name;
+            detail = b.detail;
+        } else {
+            const file = self.bufferFor(req.editor) orelse return;
+            var segs: [8][]const u8 = undefined;
+            var n: usize = 0;
+            var it = std.mem.splitScalar(u8, req.callee, '.');
+            while (it.next()) |seg| {
+                if (seg.len == 0 or n == segs.len) return;
+                segs[n] = seg;
+                n += 1;
+            }
+            const m = self.index.lookup(file, segs[0..n]) orelse return;
+            if (m.kind != .function) return;
+            name = m.name;
+            detail = m.detail;
+        }
+        var buf: [400]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "{s}{s}", .{ name, detail }) catch return;
+        var ranges: [24][2]usize = undefined;
+        const count = paramRanges(text, name.len, &ranges);
+        out.set(text, ranges[0..count]);
+    }
+
     pub fn complete(self: *ZigCompleter, req: *const Completion.Request, sink: *Completion.Sink) void {
         const lang = req.editor.language() orelse return;
         if (lang != &syntax.zig) return;
@@ -214,6 +305,48 @@ pub const ZigCompleter = struct {
         for (primitives) |p| sink.add(.{ .label = p, .tag = "type" });
     }
 };
+
+/// Byte ranges of the parameters in `text`, whose parameter list opens at
+/// `open` (the `(`): `{ "(a: u8, b: u8)", ... }` gives `a: u8` and `b: u8`.
+fn paramRanges(text: []const u8, open: usize, out: *[24][2]usize) usize {
+    if (open >= text.len or text[open] != '(') return 0;
+    var n: usize = 0;
+    var depth: usize = 0;
+    var start = open + 1;
+    var i = open;
+    while (i < text.len) : (i += 1) {
+        switch (text[i]) {
+            '(', '[', '{' => depth += 1,
+            ')', ']', '}' => {
+                depth -= 1;
+                if (depth == 0) {
+                    if (i > start and n < out.len) {
+                        out[n] = trimRange(text, start, i);
+                        n += 1;
+                    }
+                    return n;
+                }
+            },
+            ',' => if (depth == 1) {
+                if (n < out.len) {
+                    out[n] = trimRange(text, start, i);
+                    n += 1;
+                }
+                start = i + 1;
+            },
+            else => {},
+        }
+    }
+    return n;
+}
+
+fn trimRange(text: []const u8, a: usize, b: usize) [2]usize {
+    var s = a;
+    var e = b;
+    while (s < e and text[s] == ' ') s += 1;
+    while (e > s and text[e - 1] == ' ') e -= 1;
+    return .{ s, e };
+}
 
 /// The names in `a.b.c.` (the text before the last dot, already stripped of the
 /// word being typed): `{"a","b","c"}`; null if it is not a plain dotted path.
@@ -338,4 +471,15 @@ test "typing std.mem. in a Zig file lists the library's names; other files are l
     r.ui.textInput("\nstd.mem.");
     try r.frame();
     try testing.expect(!labelsHave(r, "eql"));
+}
+
+test "parameter ranges split at the top level only" {
+    var r: [24][2]usize = undefined;
+    const t = "eql(comptime T: type, a: []const T, f: fn (u8, u8) bool) bool";
+    const n = paramRanges(t, 3, &r);
+    try testing.expectEqual(@as(usize, 3), n);
+    try testing.expectEqualStrings("comptime T: type", t[r[0][0]..r[0][1]]);
+    try testing.expectEqualStrings("a: []const T", t[r[1][0]..r[1][1]]);
+    try testing.expectEqualStrings("f: fn (u8, u8) bool", t[r[2][0]..r[2][1]]);
+    try testing.expectEqual(@as(usize, 0), paramRanges("none()", 4, &r));
 }

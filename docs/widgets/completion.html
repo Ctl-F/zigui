@@ -24,7 +24,7 @@ try comp.attach(editor);                              // for each editor
 <h2>Ranking</h2>
 <p>Exact prefix first, then prefix ignoring case, then letters in order (<code>gtl</code> finds <code>getTotalLength</code>); ties go to the shorter label, then alphabetical. Duplicates collapse and at most 200 rows are shown.</p>
 <h2>Editor hooks it uses</h2>
-<p><code>CodeEditor</code> options <code>on_key</code> (called before the editor handles a key; <code>ev.markHandled()</code> keeps the editor from acting on it) and <code>on_edit</code> (after each edit, so a tool can watch without taking <code>on_change</code> from the host), plus <code>replaceRange(start, end, text)</code>, <code>language()</code>, <code>caretRect()</code>. Attaching a <code>Completion</code> sets <code>on_key</code> and <code>on_edit</code> on the editor.</p>
+<p><code>CodeEditor</code> hook lists (<code>addKeyHook</code>, <code>addEditHook</code>, <code>removeHooks</code>; see the <a href="code-editor.html">editor page</a>), plus <code>replaceRange(start, end, text)</code>, <code>language()</code> and <code>caretRect()</code>. Attaching a <code>Completion</code> adds one key hook and one edit hook; <a href="hover.html">hover and signature help</a> add their own beside it.</p>
 <h2>Zig, offline</h2>
 <p>The IDE's <code>ide.zig_complete.ZigCompleter</code> is a provider that reads the standard library and your files with <code>std.zig.Ast</code>; see <a href="../ide.html">the IDE page</a>.</p>
 </main><script src="../nav.js"></script></body></html>
