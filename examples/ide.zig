@@ -46,6 +46,9 @@ const App = struct {
     fn openAt(self: *App, path: []const u8, line: u32, col: u32) void {
         // Compiler output carries paths relative to where the build ran (the
         // project root) or absolute ones.
+        
+        std.debug.print("Path Requested: {s}@{},{}\n", .{ path, line, col });
+        
         const rel = self.project.relPath(path) orelse path;
         _ = self.docs.open(rel, line, col) catch |err| {
             var buf: [200]u8 = undefined;

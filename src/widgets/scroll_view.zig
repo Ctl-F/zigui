@@ -542,3 +542,20 @@ test "content_columns lays the content out as a grid" {
     try r.frame();
     try testing.expectEqual(r.ui.tree.get(bs[0].node).?.rect.x, r.ui.tree.get(bs[1].node).?.rect.x);
 }
+
+test "rows scrolled out of view are not painted, so long lists fit a small draw list" {
+    const Label = @import("label.zig").Label;
+    const r = try @import("../core/test_rig.zig").Rig.init();
+    defer r.deinit();
+    const sv = try r.ui.add(ScrollView, r.ui.tree.root, .{ .style = .{ .width = Length.px(300), .height = Length.px(120) }, .content_style = .{ .direction = .column } });
+    var buf: [48]u8 = undefined;
+    for (0..3000) |i| _ = try r.ui.add(Label, sv.contentNode(), .{ .text = std.fmt.bufPrint(&buf, "result line {d}: some matching text here", .{i}) catch "x" });
+    // 3000 rows of ~40 glyphs would need 120000 glyph slots; the rig's list has 8192.
+    try r.frame();
+    try testing.expect(r.list.glyph_len < 2000);
+    try testing.expect(r.list.glyph_len > 0);
+    // Scrolling far down shows other rows, still within the budget.
+    r.ui.wheel(50, 50, 0, -400);
+    try r.frame();
+    try testing.expect(r.list.glyph_len < 2000 and r.list.glyph_len > 0);
+}

@@ -86,7 +86,7 @@ pub const SearchPanel = struct {
         const case_btn = try ui.add(Button, row, .{ .text = "Aa", .variant = .flat, .style = .{ .padding = pad }, .on_click = .bind(self, onToggle) });
         const word_btn = try ui.add(Button, row, .{ .text = "W", .variant = .flat, .style = .{ .padding = pad }, .on_click = .bind(self, onToggle) });
         _ = try ui.add(Button, row, .{ .text = "Search", .variant = .flat, .style = .{ .padding = pad }, .on_click = .bind(self, onSubmit) });
-        const status = try ui.add(Label, node, .{ .text = "" });
+        const status = try ui.add(Label, node, .{ .text = "", .style = .{ .shrink = 0 } });
         const results = try ui.add(TreeView, node, .{
             .style = .{ .grow = 1 },
             .label = "Search results",

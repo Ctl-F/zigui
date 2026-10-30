@@ -25,14 +25,14 @@ pub const Error = @import("paint_ctx.zig").Error;
 /// Rebuild `list` from `tree`, with no caching. Resets the list first.
 pub fn build(tree: *Tree, list: *DrawList) Error!void {
     list.reset();
-    try paintNode(tree, tree.root, 0, 0, list, null);
+    try paintNode(tree, tree.root, 0, 0, list, null, null);
 }
 
 /// Like `build`, replaying clean repaint-boundary subtrees from `cache`.
 pub fn buildCached(tree: *Tree, list: *DrawList, cache: *Cache) Error!void {
     list.reset();
     cache.beginFrame(tree);
-    try paintNode(tree, tree.root, 0, 0, list, cache);
+    try paintNode(tree, tree.root, 0, 0, list, cache, null);
 }
 
 const Command = draw_list.Command;
@@ -230,11 +230,25 @@ fn record(cache: *Cache, entry: *Cache.Entry, list: *const DrawList, c0: usize, 
     entry.valid = true;
 }
 
-fn paintNode(tree: *Tree, h: Handle, ox: f32, oy: f32, list: *DrawList, cache: ?*Cache) Error!void {
+/// How far outside a clipping ancestor a node may be and still be painted
+/// (shadows and focus rings are drawn a little beyond a node's rectangle).
+const cull_margin: f32 = 32;
+
+/// Draw `h` and its subtree. `clip` is the innermost clipping ancestor's
+/// rectangle (window coordinates) within the recording being made, or null:
+/// a node entirely outside it cannot be seen and is skipped, so a scroll view
+/// holding thousands of rows paints only the ones in view. (Absolutely
+/// positioned nodes are never skipped, as they can sit anywhere.)
+fn paintNode(tree: *Tree, h: Handle, ox: f32, oy: f32, list: *DrawList, cache: ?*Cache, clip: ?Rect) Error!void {
     const node = tree.get(h) orelse return;
     if (node.flags.hidden) return;
 
     const abs: Rect = .{ .x = ox + node.rect.x, .y = oy + node.rect.y, .w = node.rect.w, .h = node.rect.h };
+    if (clip) |c| {
+        if (node.style.position != .absolute and
+            (abs.x > c.x + c.w + cull_margin or abs.x + abs.w < c.x - cull_margin or
+            abs.y > c.y + c.h + cull_margin or abs.y + abs.h < c.y - cull_margin)) return;
+    }
 
     // A repaint boundary: replay the recording while nothing inside changed.
     if (cache) |c| {
@@ -250,7 +264,8 @@ fn paintNode(tree: *Tree, h: Handle, ox: f32, oy: f32, list: *DrawList, cache: ?
             }
             const c0 = list.len;
             const g0 = list.glyph_len;
-            try paintSubtree(tree, h, node, abs, list, cache);
+            // A recording is replayed elsewhere, so it must not depend on the clip around it.
+            try paintSubtree(tree, h, node, abs, list, cache, null);
             // (Painting may have added entries for nested boundaries, so look up again.)
             const gop = try c.entries.getOrPut(c.gpa, k);
             if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -260,22 +275,31 @@ fn paintNode(tree: *Tree, h: Handle, ox: f32, oy: f32, list: *DrawList, cache: ?
             return;
         }
     }
-    try paintSubtree(tree, h, node, abs, list, cache);
+    try paintSubtree(tree, h, node, abs, list, cache, clip);
 }
 
-fn paintSubtree(tree: *Tree, h: Handle, node: *@import("tree.zig").Node, abs: Rect, list: *DrawList, cache: ?*Cache) Error!void {
+fn intersect(a: Rect, b: Rect) Rect {
+    const x0 = @max(a.x, b.x);
+    const y0 = @max(a.y, b.y);
+    const x1 = @min(a.x + a.w, b.x + b.w);
+    const y1 = @min(a.y + a.h, b.y + b.h);
+    return .{ .x = x0, .y = y0, .w = @max(x1 - x0, 0), .h = @max(y1 - y0, 0) };
+}
+
+fn paintSubtree(tree: *Tree, h: Handle, node: *@import("tree.zig").Node, abs: Rect, list: *DrawList, cache: ?*Cache, clip: ?Rect) Error!void {
     var pc: PaintCtx = .{ .list = list, .rect = abs };
     try pc.box(node.visual);
 
-    const clip = node.flags.clip_children;
-    if (clip) try list.pushClip(abs);
+    const clip_on = node.flags.clip_children;
+    if (clip_on) try list.pushClip(abs);
     // The painter draws the node's own commands; it may recolor the text.
     if (node.paint_hook) |hook| try hook.run(hook.ctx, &pc);
     if (node.text) |block| try paintText(block, node.style.padding, &pc);
     var it = tree.children(h);
-    while (it.next()) |c| try paintNode(tree, c, abs.x - node.scroll_x, abs.y - node.scroll_y, list, cache);
+    const child_clip: ?Rect = if (clip_on) (if (clip) |c| intersect(c, abs) else abs) else clip;
+    while (it.next()) |c| try paintNode(tree, c, abs.x - node.scroll_x, abs.y - node.scroll_y, list, cache, child_clip);
     if (node.overlay_hook) |hook| try hook.run(hook.ctx, &pc);
-    if (clip) _ = try list.popClip();
+    if (clip_on) _ = try list.popClip();
 }
 
 /// Draw a node's text block in its content box: vertically centered, aligned

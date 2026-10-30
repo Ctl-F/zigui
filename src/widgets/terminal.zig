@@ -370,6 +370,16 @@ pub const Terminal = struct {
         }
     }
 
+    /// The cursor cell in window coordinates (the platform places IME popups there
+    /// and, because this is non-null while a terminal has focus, turns on text input).
+    pub fn caretRect(self: *Terminal) ?Rect {
+        const abs = self.ui.tree.absoluteRect(self.node) orelse return null;
+        const cur = self.screen.cursor;
+        const cw = if (self.cell_w > 0) self.cell_w else 8;
+        const lh = if (self.line_h > 0) self.line_h else 16;
+        return .{ .x = abs.x + 4 + @as(f32, @floatFromInt(cur.col)) * cw, .y = abs.y + @as(f32, @floatFromInt(cur.row)) * lh, .w = cw, .h = lh };
+    }
+
     // ---- lines and selection ----
 
     fn totalLines(self: *const Terminal) usize {
@@ -882,4 +892,14 @@ test "history scrolls with the wheel and Shift+PageUp, stays put as output arriv
     const word = (try t.selectedText(testing.allocator)).?;
     defer testing.allocator.free(word);
     try testing.expect(std.mem.startsWith(u8, word, "line"));
+}
+
+test "a focused terminal makes the platform turn text input on" {
+    const r = try Rig.init();
+    defer r.deinit();
+    const t = try r.ui.add(Terminal, r.ui.tree.root, .{ .style = .{ .grow = 1 } });
+    try r.frame();
+    try testing.expect(r.ui.textInputRect() == null); // not focused: no text input wanted
+    r.ui.setFocus(t.node);
+    try testing.expect(r.ui.textInputRect() != null);
 }

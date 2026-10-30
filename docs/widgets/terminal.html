@@ -16,6 +16,7 @@
     .on_resize = .bind(&amp;session, Session.resized),  // fn (*Session, cols: u16, rows: u16) void
 });
 term.feed(bytes_the_program_printed);</code></pre>
+<p>A focused terminal asks the platform for text input (<code>Ui.textInputRect</code> returns its cursor cell), so typed characters and IME composition arrive; the window loop must start text input when that is non-null, as every example does.</p>
 <p>The widget works out its size in character cells from its node and the mono font, and calls <code>on_resize</code> when it changes (and once when first laid out). <code>feed</code> shows output and sends answers to the program's queries (cursor position, device attributes) through <code>on_write</code>. <code>title()</code> is the program's window title; <code>out.title_changed</code> says it was set. Options: <code>scrollback</code> (lines of history, default 5000), <code>size</code>, <code>pass_function_keys</code>. Other methods: <code>paste(text)</code>, <code>scrollBy(lines)</code>, <code>selectedText(gpa)</code>, <code>clear()</code>.</p>
 <h2>Input</h2>
 <table>

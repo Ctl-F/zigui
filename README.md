@@ -446,6 +446,12 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   answer for Zig from `std.zig.Ast` alone (std found via `zig env`), no language
   server; types of values are not inferred, which is where an LSP will add to it.
   The test rig moved to `core/test_rig.zig` so framework tests can share it.
+- Painting skips nodes outside the innermost clipping ancestor (never absolute
+  ones, and never across a repaint-boundary recording), and `Ui` turns a full
+  draw list into a partial frame plus `draw_overflow` and one warning instead of
+  an error (a 5000-hit project search crashed the app with `GlyphBufferFull`).
+  `Ui.textInputRect` includes a focused `Terminal` (without it SDL never delivered
+  typed characters to the terminal).
 - Terminal (plan step 6): `terminal/vt.zig` (UI-free emulator: UTF-8 and wide
   characters, CSI/SGR, scroll regions, alternate screen, scrollback ring, queries
   answered), `widgets/terminal.zig` (draws a Screen, encodes keys, selection,

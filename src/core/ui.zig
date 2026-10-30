@@ -123,6 +123,8 @@ pub const Ui = struct {
     /// The open popup (completion list or tooltip), if any (see `showPopup`).
     popup: ?*popup_mod.Popup = null,
     popup_closed: std.ArrayListUnmanaged(*popup_mod.Popup) = .empty,
+    /// The last frame did not fit the draw list and was drawn partially (see `renderFrame`).
+    draw_overflow: bool = false,
     /// The open tooltip or signature hint, if any (separate from `popup`, so a
     /// suggestion list and a hint can show together).
     tip: ?*popup_mod.Popup = null,
@@ -428,6 +430,11 @@ pub const Ui = struct {
             while (it.next()) |e| {
                 if (Handle.eql(e.ptr.node, h) and e.ptr.props.enabled) return e.ptr.caretRect();
             }
+        }
+        // A terminal takes typed text too: the platform must be told text input is wanted.
+        var tit = self.terminals.iterator();
+        while (tit.next()) |e| {
+            if (Handle.eql(e.ptr.node, h)) return e.ptr.caretRect();
         }
         return null;
     }
@@ -862,10 +869,30 @@ pub const Ui = struct {
         return !root.dirty.isClean();
     }
 
+    /// Record the frame's draw commands. More to draw than the list holds is not an
+    /// error: what fit is kept (the list reserves room to close its clips) and
+    /// `draw_overflow` is set, with one warning in the log.
+    fn paintFrame(self: *Ui, list: *DrawList) !void {
+        var fits = true;
+        paint.buildCached(&self.tree, list, &self.paint_cache) catch |err| switch (err) {
+            // More to draw than the draw list holds: show what fit instead of failing the
+            // frame (the list keeps room to close its clips). `draw_overflow` tells the app.
+            error.DrawListFull, error.GlyphBufferFull => {
+                while (list.popClip() catch false) {}
+                while (list.popOpacity() catch false) {}
+                if (!self.draw_overflow) std.log.warn("ui: the draw list is full ({s}); the frame is drawn partially. Allocate a larger DrawList.", .{@errorName(err)});
+                self.draw_overflow = true;
+                fits = false;
+            },
+            else => return err,
+        };
+        if (fits) self.draw_overflow = false;
+    }
+
     /// Lay out for a window of `size` (logical pixels) and rebuild `list`.
     pub fn layoutAndPaint(self: *Ui, size: geometry.Size, list: *DrawList) !void {
         try self.layoutPhase(size);
-        try paint.buildCached(&self.tree, list, &self.paint_cache);
+        try self.paintFrame(list);
     }
 
     fn layoutPhase(self: *Ui, size: geometry.Size) !void {
@@ -909,7 +936,7 @@ pub const Ui = struct {
         const t_start = self.nowNs();
         try self.layoutPhase(logical);
         const t_layout = self.nowNs();
-        try paint.buildCached(&self.tree, list, &self.paint_cache);
+        try self.paintFrame(list);
         const t_build = self.nowNs();
         if (self.show_stats) {
             self.stats.drawOverlay(list, logical.w) catch {};
@@ -4030,4 +4057,21 @@ test "folded lines are skipped by the arrow keys, painted as one row, and reopen
     ui.key(.enter, .{}, true, false);
     try t.h.frame();
     try std.testing.expect(ed.isFolded(9));
+}
+
+test "a frame that does not fit the draw list is drawn partially instead of failing" {
+    const sw = @import("../render/software_backend.zig");
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    ui.tree.get(ui.tree.root).?.style = .{ .direction = .column };
+    var buf: [40]u8 = undefined;
+    for (0..400) |i| _ = try ui.add(Label, ui.tree.root, .{ .text = std.fmt.bufPrint(&buf, "row number {d} with some text", .{i}) catch "x" });
+    var sb = try sw.SoftwareBackend.init(std.testing.allocator, null);
+    defer sb.deinit();
+    ui.update();
+    try ui.renderFrame(sb.backend(), &t.h.list, .{ .pixel_w = 300, .pixel_h = 200 });
+    try std.testing.expect(ui.draw_overflow);
+    try std.testing.expect(t.h.list.isBalanced());
+    try std.testing.expect(t.h.list.len > 0);
 }

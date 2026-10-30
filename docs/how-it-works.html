@@ -31,7 +31,7 @@ try ui.tree.appendChild(parent, panel);</code></pre>
 <li><code>ui.endFrame()</code> clears per-frame state.</li>
 </ol>
 <p>Dirtiness is tracked per category (layout, paint, text, children...). A change that cannot affect layout (a color) repaints without relayout. Nodes flagged <code>relayout_boundary</code> stop layout dirtiness from climbing past them; <code>repaint_boundary</code> nodes cache their painted subtree.</p>
-<div class="note">There is no allocation on the frame path: the draw list storage is allocated once at startup. If you see a "draw list full" error, give <code>DrawList.init</code> bigger buffers.</div>
+<div class="note">There is no allocation on the frame path: the draw list storage is allocated once at startup. Painting skips nodes that lie entirely outside a clipping ancestor (so a scroll view holding thousands of rows paints only the visible ones), and a frame that still does not fit the list is drawn partially rather than failing: <code>ui.draw_overflow</code> is set and one warning is logged. If you see that warning, give <code>DrawList.init</code> bigger buffers.</div>
 
 <h2>Ownership</h2>
 <ul>
