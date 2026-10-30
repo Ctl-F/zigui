@@ -10,7 +10,7 @@ went through), and `spec-drift-notes.md` (where the code differs from the design
 doc, and what to do next).
 
 
-![IDE Screenshot]("IDEScreenshot.png")
+![IDE Screenshot](IDEScreenshot.png)
 
 ## Status
 
