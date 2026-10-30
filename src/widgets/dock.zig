@@ -46,6 +46,27 @@ pub const Side = enum { left, right, top, bottom };
 
 pub const State = enum { hidden, docked, floating };
 
+/// Asked when the user closes a panel (the tab's x, or "Close" in its menu).
+/// Return true if the host took care of it (hid it, destroyed it later, or
+/// refused); return false to let the dock hide the panel. Do not destroy the
+/// panel from inside the hook; queue it and do it from your loop.
+pub const CloseHook = struct {
+    ctx: ?*anyopaque = null,
+    call: *const fn (ctx: ?*anyopaque, panel: *Panel) bool,
+
+    pub fn bind(ctx: anytype, comptime f: anytype) CloseHook {
+        const Ptr = @TypeOf(ctx);
+        return .{
+            .ctx = @ptrCast(ctx),
+            .call = &struct {
+                fn thunk(c: ?*anyopaque, panel: *Panel) bool {
+                    return f(@as(Ptr, @ptrCast(@alignCast(c.?))), panel);
+                }
+            }.thunk,
+        };
+    }
+};
+
 const accent = Color.rgb(64, 140, 255);
 const float_bg = Color.rgb(0x2b, 0x2d, 0x31);
 const float_border = Color.rgb(0x4a, 0x4d, 0x52);
@@ -95,7 +116,7 @@ const Node = struct {
     fn onClose(self: *Node, _: *event.Event) void {
         const t = self.tabs orelse return;
         const i = t.out.closed_index;
-        if (i < self.panels.items.len) self.dock.closePanel(self.panels.items[i]);
+        if (i < self.panels.items.len) self.dock.requestClose(self.panels.items[i]);
     }
 
     fn onBarPointer(self: *Node, ev: *event.Event) void {
@@ -204,6 +225,8 @@ pub const Dock = struct {
     seen_titles: []const u8 = "",
     /// Set while `contentNodeAt` or title syncing is adding panels.
     syncing: bool = false,
+    /// Consulted when the user closes a panel (see `CloseHook`).
+    close_hook: ?CloseHook = null,
 
     pub const Props = struct {
         /// For documents: the panels' titles, one per line. Each child of a
@@ -402,7 +425,14 @@ pub const Dock = struct {
     pub fn dockTab(self: *Dock, panel: *Panel, near: ?*Panel) !void {
         self.takeOut(panel);
         var g: ?*Node = null;
-        if (near) |n| g = n.group;
+        if (near) |n| {
+            g = n.group;
+            if (g == null) {
+                if (n.last_group) |lg| {
+                    if (self.isLive(lg)) g = lg;
+                }
+            }
+        }
         if (g == null) g = self.firstGroup();
         if (g == null) {
             const n = try self.newNode();
@@ -451,6 +481,24 @@ pub const Dock = struct {
         const i = std.mem.indexOfScalar(*Panel, g.panels.items, panel) orelse return;
         g.active = i;
         if (g.tabs) |t| t.setActive(i);
+    }
+
+    /// What the user's close gesture does: ask `close_hook`, else hide the panel.
+    pub fn requestClose(self: *Dock, panel: *Panel) void {
+        if (self.close_hook) |h| {
+            if (h.call(h.ctx, panel)) return;
+        }
+        self.closePanel(panel);
+    }
+
+    /// Rename a panel (its tab updates without rebuilding the dock).
+    pub fn setTitle(self: *Dock, panel: *Panel, title: []const u8) !void {
+        const t = try self.gpa.dupe(u8, title);
+        self.gpa.free(panel.title);
+        panel.title = t;
+        const g = panel.group orelse return;
+        const i = std.mem.indexOfScalar(*Panel, g.panels.items, panel) orelse return;
+        if (g.tabs) |tabs| try tabs.setTitle(i, t);
     }
 
     /// Hide `panel` (its contents stay alive; `showPanel` brings it back).
@@ -1014,7 +1062,7 @@ pub const Dock = struct {
                 };
                 self.floatPanel(p, r) catch {};
             },
-            else => self.closePanel(p),
+            else => self.requestClose(p),
         }
     }
 };
@@ -1277,4 +1325,36 @@ test "the tab context menu floats and closes panels; destroyPanel frees everythi
     try r.settle();
     try testing.expectEqual(@as(usize, 0), d.floats.items.len);
     try testing.expectEqual(@as(usize, 1), d.panels.items.len);
+}
+
+test "requestClose asks the hook; setTitle renames the tab; dockTab falls back to the last group" {
+    var ui = try Ui.init(testing.allocator);
+    defer ui.deinit();
+    const d = try ui.add(Dock, ui.tree.root, .{});
+    const a = try d.addPanel("A");
+    const b = try d.addPanel("B");
+    try d.dockTab(a, null);
+    try d.dockTab(b, a);
+    const Ctx = struct {
+        seen: ?*Panel = null,
+        take: bool = true,
+        fn hook(self: *@This(), p: *Panel) bool {
+            self.seen = p;
+            return self.take;
+        }
+    };
+    var ctx: Ctx = .{};
+    d.close_hook = .bind(&ctx, Ctx.hook);
+    d.requestClose(b);
+    try testing.expect(ctx.seen == b);
+    try testing.expectEqual(State.docked, b.state);
+    ctx.take = false;
+    d.requestClose(b);
+    try testing.expectEqual(State.hidden, b.state);
+    try d.setTitle(a, "A *");
+    try testing.expectEqualStrings("A *", a.group.?.tabs.?.title(0));
+    // `a` is closed too; docking `b` near the hidden `a` goes to a's last group (or a fresh one).
+    d.closePanel(a);
+    try d.dockTab(b, a);
+    try testing.expectEqual(State.docked, b.state);
 }

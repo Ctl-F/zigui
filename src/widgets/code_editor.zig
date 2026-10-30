@@ -115,6 +115,8 @@ pub const CodeEditor = struct {
     blink_at: u64 = 0,
     /// Set by input handling: repaint, and scroll the caret into view.
     repaint: bool = true,
+    /// With `want_visible`: put the caret line in the middle of the view if it is off screen.
+    center_caret: bool = false,
     want_visible: bool = false,
     last_version: u64 = 0,
 
@@ -594,9 +596,17 @@ pub const CodeEditor = struct {
         self.revealCaret();
         if (self.metrics()) |m| {
             const geo = self.geometry(m);
-            if (self.want_visible) {
+            // Wait for the first layout (an unsized view would scroll to the wrong place).
+            if (self.want_visible and geo.view_h >= m.line_h) {
+                const was = self.scroll_y;
                 self.ensureCaretVisible(m, geo);
+                if (self.center_caret and self.scroll_y != was) {
+                    const line = self.editor.doc.lineOfOffset(self.editor.primaryHead());
+                    const top = @as(f32, @floatFromInt(self.rowOfLine(line))) * m.line_h;
+                    self.scroll_y = @max(0, top - (geo.view_h - m.line_h) / 2);
+                }
                 self.want_visible = false;
+                self.center_caret = false;
             }
             if (self.follow) self.scroll_y = self.maxScrollY(m, geo);
             self.scroll_y = std.math.clamp(self.scroll_y, 0, self.maxScrollY(m, geo));
@@ -912,6 +922,19 @@ pub const CodeEditor = struct {
         self.editor.setCaret(start, false);
         self.editor.setCaret(end, true);
         self.want_visible = true;
+        self.repaint = true;
+    }
+
+    /// Put the caret at 1-based `line` and `col` (a byte column, clamped to the
+    /// line) and scroll it into view; unfolds nothing.
+    pub fn goTo(self: *CodeEditor, line: usize, col: usize) void {
+        const doc = &self.editor.doc;
+        const ln = @min(if (line == 0) 0 else line - 1, doc.lineCount() -| 1);
+        const start = doc.lineStart(ln);
+        const at = @min(start + (if (col == 0) 0 else col - 1), doc.lineEnd(ln));
+        self.editor.setCaret(at, false);
+        self.want_visible = true;
+        self.center_caret = true;
         self.repaint = true;
     }
 

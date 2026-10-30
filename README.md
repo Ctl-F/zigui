@@ -38,6 +38,7 @@ zig build dedit                # a minimal demo editor window
 zig build paint                # paint program on a canvas with an offscreen surface
 zig build shaders              # recompile GLSL to SPIR-V (needs glslc; the .spv files are committed)
 zig build builder              # the UI builder, editing ./ui.zon (or zig-out/bin/builder FILE)
+zig build ide                  # the IDE on the current folder (or zig-out/bin/ide DIR)
 ```
 
 `zig build test` prints `ui_check` warnings and a "failed command" line from the
@@ -425,6 +426,16 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   parser and the Output panel (a read-only `CodeEditor` that follows the end,
   line tints as decorations, double-click to open a diagnostic). The workbench
   docks it and binds F5 / Ctrl+Shift+T.
+- Projects (plan step 3): `ide.Project` (root directory, excluded folders,
+  sorted listings, file IO), `ide.search_project.Searcher` (worker-thread walk,
+  skips binaries and files over 4 MiB, 5000-hit cap, cancelable), `FilesPanel`
+  (lazy `TreeView`), `SearchPanel` (results grouped by file), and `Documents`
+  (one `CodeEditor` + `FindBar` dock panel per file; files up to 16 MiB are read
+  into memory and editable, bigger ones are mapped read-only because writing a
+  mapped file back would fault). The dock gained `close_hook`/`requestClose`
+  (the host may refuse or defer a close), `setTitle`, and `dockTab` falls back to
+  a hidden panel's last group. `CodeEditor.goTo(line, col)` centers off-screen
+  carets and waits for the first layout. `examples/ide.zig` ties it together.
 - Workbench (`zig build workbench`): a code editor on the ZON text beside the
   builder, synced both ways; parse errors go to the status line. Examples build
   ReleaseSafe by default (`-Dexample_optimize`) because the software rasterizer
