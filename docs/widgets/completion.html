@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Completion - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>Completion</h1>
+<p>A suggestion list that follows typing in a <a href="code-editor.html">CodeEditor</a>, shown in a focus-less <a href="popup.html">popup</a>. It asks <b>providers</b> for candidates and ranks them against the word before the caret.</p>
+<pre><code>const comp = try zigui.completion.Completion.create(&amp;ui);
+defer comp.destroy();
+try comp.addProvider(.bind(&amp;mine, Mine.complete));   // optional
+try comp.attach(editor);                              // for each editor
+// before destroying an editor: comp.detach(editor);</code></pre>
+<h2>What the user sees</h2>
+<table>
+<tr><th>Do this</th><th>Result</th></tr>
+<tr><td>Type an identifier (two letters), or <code>.</code></td><td>The list opens below the word.</td></tr>
+<tr><td>Ctrl+Space</td><td>Opens the list even for an empty word.</td></tr>
+<tr><td>Keep typing / Backspace</td><td>The list narrows (it closes when nothing matches or the caret leaves the word).</td></tr>
+<tr><td>Up, Down, PageUp, PageDown</td><td>Move the selection (wraps).</td></tr>
+<tr><td>Enter or Tab, or a click on a row</td><td>Replaces the word with the item's text and puts the caret after it, as one undo step.</td></tr>
+<tr><td>Escape, Left/Right/Home/End, a click in the text, or leaving the editor</td><td>Closes the list.</td></tr>
+</table>
+<h2>Providers</h2>
+<p>A provider is <code>fn (ctx, *const Request, *Sink) void</code> (<code>Provider.bind(&amp;x, X.complete)</code>). It is called on every keystroke while a list is possible, so it must be quick (look things up; do not scan files). <code>Request</code> has <code>editor</code>, <code>prefix</code> (the word before the caret), <code>word_start</code> (byte offset), <code>line_before</code> (the line's text before the word), <code>explicit</code> (Ctrl+Space) and <code>afterDot()</code>. <code>Sink.add(.{ .label, .insert, .detail, .tag })</code> copies its strings; <code>insert</code> defaults to the label.</p>
+<p>The built-in <code>words</code> source (on by default; <code>comp.words = false</code> to turn off) offers identifiers already in the buffer (files over 1 MiB are skipped), so every language gets something with no setup. A provider that works in the background (a language server) calls <code>comp.offer(editor, word_start, items)</code> when its answer arrives; it is ignored if the caret has left that word.</p>
+<h2>Ranking</h2>
+<p>Exact prefix first, then prefix ignoring case, then letters in order (<code>gtl</code> finds <code>getTotalLength</code>); ties go to the shorter label, then alphabetical. Duplicates collapse and at most 200 rows are shown.</p>
+<h2>Editor hooks it uses</h2>
+<p><code>CodeEditor</code> options <code>on_key</code> (called before the editor handles a key; <code>ev.markHandled()</code> keeps the editor from acting on it) and <code>on_edit</code> (after each edit, so a tool can watch without taking <code>on_change</code> from the host), plus <code>replaceRange(start, end, text)</code>, <code>language()</code>, <code>caretRect()</code>. Attaching a <code>Completion</code> sets <code>on_key</code> and <code>on_edit</code> on the editor.</p>
+<h2>Zig, offline</h2>
+<p>The IDE's <code>ide.zig_complete.ZigCompleter</code> is a provider that reads the standard library and your files with <code>std.zig.Ast</code>; see <a href="../ide.html">the IDE page</a>.</p>
+</main><script src="../nav.js"></script></body></html>

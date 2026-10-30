@@ -10,6 +10,8 @@ pub const files_panel = @import("ide/files_panel.zig");
 pub const FilesPanel = files_panel.FilesPanel;
 pub const search_panel = @import("ide/search_panel.zig");
 pub const SearchPanel = search_panel.SearchPanel;
+pub const zig_index = @import("ide/zig_index.zig");
+pub const zig_complete = @import("ide/zig_complete.zig");
 pub const documents = @import("ide/documents.zig");
 pub const Documents = documents.Documents;
 pub const output_panel = @import("ide/output_panel.zig");
@@ -22,6 +24,8 @@ test {
     _ = search_project;
     _ = files_panel;
     _ = documents;
+    _ = zig_index;
+    _ = zig_complete;
     _ = search_panel;
     _ = output_panel;
 }

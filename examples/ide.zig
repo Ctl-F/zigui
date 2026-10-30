@@ -215,8 +215,19 @@ pub fn main(init: std.process.Init) !void {
     _ = try ui.add(zigui.Label, welcome.content, .{ .text = "Double-click a file to open it. Ctrl+S saves, Ctrl+Shift+F searches the project, F5 builds." });
     try dock.dockTab(welcome, null);
 
+    // Suggestions that work with no language server: words in the file, plus
+    // Zig names and the standard library read from source (std.zig.Ast).
+    const std_dir = ide.zig_complete.locateStdDir(gpa, io);
+    defer if (std_dir) |d| gpa.free(d);
+    if (std_dir == null) std.log.warn("could not run `zig env`; standard library completion is off", .{});
+    const zig_completer = try ide.zig_complete.ZigCompleter.create(gpa, io, std_dir);
+    defer zig_completer.destroy();
+    const completion = try zigui.completion.Completion.create(&ui);
+    defer completion.destroy();
+    try completion.addProvider(zig_completer.provider());
     app.docs = try ide.Documents.create(&ui, dock, &project, io, .{ .anchor = welcome });
     defer app.docs.destroy();
+    app.docs.enableCompletion(completion, zig_completer);
 
     const files_panel = try dock.addPanel("Files");
     app.files_panel = files_panel;

@@ -21,6 +21,8 @@
       ["widgets/text-area.html", "TextArea"],
       ["widgets/code-editor.html", "CodeEditor"],
       ["widgets/find-bar.html", "FindBar"],
+      ["widgets/popup.html", "Popup"],
+      ["widgets/completion.html", "Completion"],
       ["widgets/canvas.html", "Canvas"],
       ["widgets/scroll-view.html", "ScrollView"],
       ["widgets/split-view.html", "SplitView"],

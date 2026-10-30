@@ -62,6 +62,7 @@ const ScrollView = scroll_mod.ScrollView;
 const SplitView = split_mod.SplitView;
 const TreeView = @import("../widgets/tree_view.zig").TreeView;
 const menu_mod = @import("../widgets/menu.zig");
+const popup_mod = @import("../widgets/popup.zig");
 const Select = @import("../widgets/select.zig").Select;
 const TabPanel = @import("../widgets/tab_panel.zig").TabPanel;
 const Dock = @import("../widgets/dock.zig").Dock;
@@ -113,6 +114,9 @@ pub const Ui = struct {
     menu: ?*menu_mod.Menu = null,
     /// Closed menus waiting to be freed at the next `update`.
     menu_closed: std.ArrayListUnmanaged(*menu_mod.Menu) = .empty,
+    /// The open popup (completion list or tooltip), if any (see `showPopup`).
+    popup: ?*popup_mod.Popup = null,
+    popup_closed: std.ArrayListUnmanaged(*popup_mod.Popup) = .empty,
     /// The widget whose press just closed a menu; it must not reopen it on the click.
     menu_suppress: Handle = Handle.invalid,
     /// Recorded draw commands of repaint-boundary subtrees (see `paint.Cache`).
@@ -212,8 +216,11 @@ pub const Ui = struct {
 
     pub fn deinit(self: *Ui) void {
         if (self.menu) |m| m.close();
+        if (self.popup) |p| p.close();
         for (self.menu_closed.items) |m| m.destroyClosed();
         self.menu_closed.deinit(self.gpa);
+        for (self.popup_closed.items) |p| p.destroyClosed();
+        self.popup_closed.deinit(self.gpa);
         inline for (.{ &self.buttons, &self.labels, &self.fields, &self.editors, &self.canvases, &self.scrollers, &self.splitters, &self.tree_views, &self.selects, &self.tab_panels, &self.docks, &self.menu_bars, &self.text_areas, &self.spacers, &self.find_bars }) |pool| {
             var it = pool.iterator();
             while (it.next()) |e| e.ptr.deinit();
@@ -507,6 +514,9 @@ pub const Ui = struct {
             if (self.menu) |m| {
                 if (!m.contains(x, y)) m.dismissByPress(x, y);
             }
+            if (self.popup) |p| {
+                if (p.kind == .list and !p.contains(x, y)) p.close();
+            }
         }
         self.input.pointerButtonEx(&self.tree, x, y, btn, down, clicks);
         self.endHandler(t0, "pointer_button");
@@ -521,6 +531,45 @@ pub const Ui = struct {
     /// Close the open menu without picking anything.
     pub fn closeMenu(self: *Ui) void {
         if (self.menu) |m| m.close();
+    }
+
+    /// Show a focus-less popup list of `rows` beside `opts.anchor` (see
+    /// `widgets/popup.zig`). Replaces any popup that is open.
+    pub fn showPopup(self: *Ui, rows: []const popup_mod.Row, opts: popup_mod.Options) !void {
+        try popup_mod.Popup.open(self, rows, opts);
+    }
+
+    /// Show a tooltip with `text` (one label per line) beside `anchor`.
+    pub fn showTip(self: *Ui, text: []const u8, anchor: geometry.Rect) !void {
+        var lines: std.ArrayListUnmanaged(popup_mod.Row) = .empty;
+        defer lines.deinit(self.gpa);
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |l| {
+            if (lines.items.len == 24) break;
+            try lines.append(self.gpa, .{ .label = l });
+        }
+        try popup_mod.Popup.open(self, lines.items, .{ .anchor = anchor, .kind = .tip });
+    }
+
+    pub fn hidePopup(self: *Ui) void {
+        if (self.popup) |p| p.close();
+    }
+
+    pub fn popupOpen(self: *const Ui) bool {
+        return self.popup != null;
+    }
+
+    /// Move the popup list's selection by `delta` rows (wraps).
+    pub fn popupMove(self: *Ui, delta: i32) void {
+        if (self.popup) |p| p.move(delta);
+    }
+
+    /// Pick the selected row of an open list; false if there is none.
+    pub fn popupPick(self: *Ui) bool {
+        const p = self.popup orelse return false;
+        if (p.kind != .list or p.entries.len == 0) return false;
+        p.pickSelected();
+        return true;
     }
 
     pub fn menuOpen(self: *const Ui) bool {
@@ -871,7 +920,10 @@ pub const Ui = struct {
         self.checkPinned();
         for (self.menu_closed.items) |m| m.destroyClosed();
         self.menu_closed.clearRetainingCapacity();
+        for (self.popup_closed.items) |m| m.destroyClosed();
+        self.popup_closed.clearRetainingCapacity();
         if (self.menu) |m| m.update();
+        if (self.popup) |p| p.update();
         // Container widgets that create and destroy child widgets do it first,
         // so what they destroy is reclaimed below and what they create is
         // prepared and updated like the rest.

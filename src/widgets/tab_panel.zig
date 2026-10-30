@@ -295,6 +295,7 @@ pub const TabPanel = struct {
         }
         try self.ui.replaceText(&self.props.titles, joined.items);
         self.bar_dirty = true;
+        self.ui.tree.markDirty(self.node, .{ .layout = true, .paint = true });
     }
 
     fn titleList(self: *TabPanel, a: std.mem.Allocator) ![][]const u8 {

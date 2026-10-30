@@ -159,6 +159,11 @@ pub const CodeEditor = struct {
         self.glyphs.deinit(self.ui.gpa);
     }
 
+    /// The syntax highlighting language, if one is set.
+    pub fn language(self: *const CodeEditor) ?*const syntax.Language {
+        return if (self.highlighter) |h| h.lang else null;
+    }
+
     /// Choose the syntax highlighting language (null for none).
     pub fn setLanguage(self: *CodeEditor, lang: ?*const syntax.Language) !void {
         if (lang) |l| {
@@ -272,6 +277,8 @@ pub const CodeEditor = struct {
         folding: bool = false,
         on_change: ?event.Callback = null,
         on_find: ?event.Callback = null,
+        on_key: ?event.Callback = null,
+        on_edit: ?event.Callback = null,
         colors: ?EditorColors = null,
         painter: ?Painter = null,
     };
@@ -308,6 +315,8 @@ pub const CodeEditor = struct {
             .auto_indent = o.auto_indent,
             .on_change = o.on_change,
             .on_find = o.on_find,
+            .on_key = o.on_key,
+            .on_edit = o.on_edit,
             .folding = o.folding,
             .colors = o.colors,
             .painter = o.painter,
@@ -533,6 +542,17 @@ pub const CodeEditor = struct {
         self.out.change_count +%= 1;
         self.touch(true);
         if (self.props.on_change) |cb| cb.invoke(ev);
+        if (self.props.on_edit) |cb| cb.invoke(ev);
+    }
+
+    /// Replace [start, end) with `text` and put the caret after it, as one
+    /// edit (a completion, a refactor). Counts as a user edit.
+    pub fn replaceRange(self: *CodeEditor, start: usize, end: usize, text: []const u8) void {
+        if (self.props.read_only) return;
+        self.selectRange(start, end);
+        const changed = self.editor.typeText(text, self.ui.now_ms) catch false;
+        var ev: event.Event = .{ .kind = .key_down, .target = self.node, .current = self.node };
+        self.afterEdit(&ev, changed);
     }
 
     fn maxScrollY(self: *CodeEditor, m: Metrics, geo: Geo) f32 {
@@ -1330,6 +1350,10 @@ pub const CodeEditor = struct {
     fn key(self: *CodeEditor, ev: *event.Event) void {
         const props = &self.props;
         if (!props.enabled) return;
+        if (props.on_key) |cb| {
+            cb.invoke(ev);
+            if (ev.handled) return;
+        }
         const ed = &self.editor;
         const now = self.ui.now_ms;
         const shift = ev.mods.shift;
@@ -1489,6 +1513,13 @@ pub const CodeEditor = struct {
         /// Ctrl+F / Ctrl+H pressed in the editor: the host shows its find bar
         /// (the callback's `ev.key` is `.f` for find and `.h` for replace).
         on_find: ?event.Callback = null,
+        /// Called with each key press before the editor handles it. A callback
+        /// that calls `ev.markHandled()` keeps the editor from acting on the key
+        /// (a completion list takes Up, Down and Enter this way).
+        on_key: ?event.Callback = null,
+        /// Called after each edit, like `on_change`, for a tool that watches the
+        /// text (completion) while the host keeps `on_change` for itself.
+        on_edit: ?event.Callback = null,
         /// Overrides the theme's editor colors for this editor.
         colors: ?EditorColors = null,
         /// Overrides the theme's painter for this editor (use `setPainter`).

@@ -237,7 +237,7 @@ pub const SearchPanel = struct {
 // ---- tests -----------------------------------------------------------------
 
 const testing = std.testing;
-const Rig = @import("test_rig.zig").Rig;
+const Rig = @import("../core/test_rig.zig").Rig;
 
 const Got = struct {
     buf: [64]u8 = undefined,

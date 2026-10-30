@@ -436,6 +436,16 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   (the host may refuse or defer a close), `setTitle`, and `dockTab` falls back to
   a hidden panel's last group. `CodeEditor.goTo(line, col)` centers off-screen
   carets and waits for the first layout. `examples/ide.zig` ties it together.
+- Popup and completion (plan step 4): `widgets/popup.zig` is a focus-less overlay
+  (`Ui.showPopup/showTip/popupMove/popupPick/hidePopup`, one at a time; lists
+  close on an outside press, tooltips ignore the pointer). `widgets/completion.zig`
+  watches attached `CodeEditor`s through the new `on_key`/`on_edit` hooks, asks
+  `Provider`s for candidates (a built-in buffer-words source works for every
+  language), ranks them (prefix, case-insensitive prefix, subsequence) and inserts
+  with `CodeEditor.replaceRange`. `ide/zig_index.zig` + `ide/zig_complete.zig`
+  answer for Zig from `std.zig.Ast` alone (std found via `zig env`), no language
+  server; types of values are not inferred, which is where an LSP will add to it.
+  The test rig moved to `core/test_rig.zig` so framework tests can share it.
 - Workbench (`zig build workbench`): a code editor on the ZON text beside the
   builder, synced both ways; parse errors go to the status line. Examples build
   ReleaseSafe by default (`-Dexample_optimize`) because the software rasterizer

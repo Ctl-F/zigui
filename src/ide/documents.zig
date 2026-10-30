@@ -27,6 +27,8 @@ const code_editor = @import("../widgets/code_editor.zig");
 const CodeEditor = code_editor.CodeEditor;
 const FindBar = @import("../widgets/find_bar.zig").FindBar;
 const syntax = @import("../editor/syntax.zig");
+const Completion = @import("../widgets/completion.zig").Completion;
+const ZigCompleter = @import("zig_complete.zig").ZigCompleter;
 const project_mod = @import("project.zig");
 const Project = project_mod.Project;
 
@@ -65,6 +67,9 @@ pub const Documents = struct {
     anchor: ?*Panel,
     docs: std.ArrayListUnmanaged(*Doc) = .empty,
     last_opened: ?*Doc = null,
+    /// Suggestions for every editor opened from now on (see `enableCompletion`).
+    completion: ?*Completion = null,
+    zig: ?*ZigCompleter = null,
     /// The latest thing worth telling the user (a failed save, a refused close).
     message: [200]u8 = undefined,
     message_len: usize = 0,
@@ -81,12 +86,26 @@ pub const Documents = struct {
             if (h.ctx == @as(?*anyopaque, @ptrCast(self))) self.dock.close_hook = null;
         }
         for (self.docs.items) |d| {
+            self.releaseEditor(d.editor);
             self.dock.destroyPanel(d.panel);
             self.gpa.free(d.path);
             self.gpa.destroy(d);
         }
         self.docs.deinit(self.gpa);
         self.gpa.destroy(self);
+    }
+
+    /// Give every editor opened from now on a suggestion list. `zig` (optional)
+    /// is told where each file lives so relative imports resolve. Both must
+    /// outlive the documents.
+    pub fn enableCompletion(self: *Documents, completion: *Completion, zig: ?*ZigCompleter) void {
+        self.completion = completion;
+        self.zig = zig;
+    }
+
+    fn releaseEditor(self: *Documents, ed: *CodeEditor) void {
+        if (self.completion) |c| c.detach(ed);
+        if (self.zig) |z| z.forget(ed);
     }
 
     pub fn statusText(self: *const Documents) []const u8 {
@@ -150,6 +169,14 @@ pub const Documents = struct {
             .read_only = read_only,
         });
         find_bar.attach(ed);
+        if (self.completion) |c| {
+            try c.attach(ed);
+            if (self.zig) |z| {
+                const abs = try self.project.absPath(self.gpa, path);
+                defer self.gpa.free(abs);
+                try z.setDir(ed, std.fs.path.dirname(abs) orelse self.project.root);
+            }
+        }
         if (bytes) |b| {
             try ed.loadText(b, true);
             bytes = null;
@@ -251,6 +278,7 @@ pub const Documents = struct {
             if (d.closing) {
                 if (self.last_opened == d) self.last_opened = null;
                 _ = self.docs.orderedRemove(i);
+                self.releaseEditor(d.editor);
                 self.dock.destroyPanel(d.panel);
                 self.gpa.free(d.path);
                 self.gpa.destroy(d);
@@ -282,7 +310,7 @@ pub const Documents = struct {
 // ---- tests -----------------------------------------------------------------
 
 const testing = std.testing;
-const Rig = @import("test_rig.zig").Rig;
+const Rig = @import("../core/test_rig.zig").Rig;
 
 test "open, edit, save, and close documents" {
     var tmp = testing.tmpDir(.{ .iterate = true });

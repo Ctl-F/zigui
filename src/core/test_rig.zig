@@ -1,8 +1,8 @@
 //! A Ui with test fonts for the IDE panels' tests.
 
 const std = @import("std");
-const Ui = @import("../core/ui.zig").Ui;
-const draw_list = @import("../core/draw_list.zig");
+const Ui = @import("ui.zig").Ui;
+const draw_list = @import("draw_list.zig");
 const font = @import("../text/font.zig");
 
 pub const Rig = struct {

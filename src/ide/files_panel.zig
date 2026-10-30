@@ -160,7 +160,7 @@ pub const FilesPanel = struct {
 // ---- tests -----------------------------------------------------------------
 
 const testing = std.testing;
-const Rig = @import("test_rig.zig").Rig;
+const Rig = @import("../core/test_rig.zig").Rig;
 
 const Opened = struct {
     buf: [128]u8 = undefined,

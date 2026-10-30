@@ -32,6 +32,13 @@ out.poll();</code></pre>
 </table>
 <h2>The IDE app</h2>
 <p><code>zig build ide</code> (or <code>zig-out/bin/ide DIR</code>) opens a folder: Files and Search tabs on the left, a Welcome tab and source tabs in the middle, the Output panel below, all in one dock so any of them can be dragged. Shortcuts: <b>Ctrl+S</b> save, <b>Ctrl+F</b> / <b>Ctrl+H</b> find and replace in the file, <b>Ctrl+Shift+F</b> find in project, <b>F5</b> save all and <code>zig build</code>, <b>Ctrl+Shift+T</b> <code>zig build test</code>. Double-clicking an error in Output opens the file at that line. Headless checks use <code>ZIGUI_SCRIPT</code> with <code>open PATH[:LINE]</code>, <code>search TEXT</code>, <code>sleep MS</code>, <code>click</code>, <code>type</code> and <code>key</code>.</p>
+<h2>Zig without a language server</h2>
+<p>Two UI-free pieces read Zig with <code>std.zig.Ast</code> only, so completion works offline and with no configuration:</p>
+<ul>
+<li><code>ide.zig_index.Index</code> (<code>init(gpa, io, std_dir)</code>): <code>parseBuffer(text, dir)</code> parses the file being edited; <code>membersOf(file, &amp;.{"std","mem"}, &amp;out)</code> lists the names a path is followed by (<code>Member{name, kind, detail}</code> with kinds fn, const, var, mod, type, field, enum); <code>topLevel(file, &amp;out)</code> lists a file's own names. It follows <code>@import</code>s (std, relative <code>.zig</code> files), aliases (<code>const m = std.mem;</code>), and containers declared in the file, and lists only <code>pub</code> names of other files. It does not infer types, so <code>value.</code> is not resolved (that is for a language server). Library files are parsed when first needed and cached.</li>
+<li><code>ide.zig_complete.ZigCompleter</code>: a <a href="widgets/completion.html">Completion</a> provider over the index. After <code>name.</code> it lists members; after <code>@</code> the builtin functions with signatures; otherwise the file's top-level names, keywords and primitive types. It answers only for editors whose language is Zig. <code>locateStdDir(gpa, io)</code> asks <code>zig env</code> for the library path (null if <code>zig</code> is not on PATH), and <code>setDir(editor, dir)</code> tells it where a file lives so relative imports resolve.</li>
+</ul>
+<p>In the app: <code>documents.enableCompletion(completion, zig_completer)</code> attaches the suggestion list to every editor it opens. Language servers will add to these answers, not replace them.</p>
 <h2>What is planned</h2>
-<p>A completion popup with offline Zig standard-library indexing, language-server support on top of that, a terminal, and event-to-handler wiring with refactors: see <code>NOTES/ide-plan.md</code>.</p>
+<p>Language-server support on top of the offline completion, a terminal, and event-to-handler wiring with refactors: see <code>NOTES/ide-plan.md</code>.</p>
 </main><script src="nav.js"></script></body></html>
