@@ -180,11 +180,33 @@ pub const Hover = struct {
         var sink: Lines = .{ .arena = a, .list = &lines };
         for (self.providers[0..self.provider_n]) |p| p.hover(p.ctx, &req, &sink);
         if (lines.items.len == 0) return;
-        const text = std.mem.join(a, "\n", lines.items) catch return;
+        self.show(ed, w, lines.items);
+    }
+
+    fn show(self: *Hover, ed: *CodeEditor, w: CodeEditor.WordRange, lines: []const []const u8) void {
+        const a = self.arena.allocator();
+        const text = std.mem.join(a, "\n", lines) catch return;
         var anchor = ed.rectOfOffset(w.start) orelse return;
         if (ed.rectOfOffset(w.end)) |e| anchor.w = @max(e.x - anchor.x, 1);
         self.ui.showTip(text, anchor) catch return;
         self.showing = true;
+    }
+
+    /// A late answer (from a language server) for the word that starts at
+    /// `word_start` in `ed`: shown if the pointer still rests on that word and
+    /// nothing else is showing. `text` is split into lines and wrapped.
+    pub fn offer(self: *Hover, ed: *CodeEditor, word_start: usize, text: []const u8) void {
+        const w = self.word orelse return;
+        if (self.editor != ed or w.start != word_start or self.showing or self.timer != null) return;
+        if (self.ui.popupOpen() or self.ui.tipOpen()) return;
+        _ = self.arena.reset(.retain_capacity);
+        const a = self.arena.allocator();
+        var lines: std.ArrayListUnmanaged([]const u8) = .empty;
+        var sink: Lines = .{ .arena = a, .list = &lines };
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |l| sink.add(l);
+        if (lines.items.len == 0) return;
+        self.show(ed, w, lines.items);
     }
 };
 
@@ -205,6 +227,13 @@ pub const SigSink = struct {
     text: []const u8 = "",
     params: []const [2]usize = &.{},
     set_flag: bool = false,
+    /// The provider will answer later through `SignatureHelp.offer`.
+    later: bool = false,
+
+    /// Say the answer will come later (`SignatureHelp.offer`); a hint already showing stays until then.
+    pub fn deferToOffer(self: *SigSink) void {
+        self.later = true;
+    }
 
     /// `text` is the whole signature (`@Vector(len: comptime_int, Element: type) type`);
     /// `params` are the byte ranges of each parameter within it.
@@ -379,11 +408,34 @@ pub const SignatureHelp = struct {
             p.signature(p.ctx, &req, &sink);
             if (sink.set_flag) break;
         }
-        if (!sink.set_flag) return self.hide();
+        if (!sink.set_flag) {
+            // A provider may answer later through `offer`: leave a shown hint alone.
+            if (!sink.later) self.hide();
+            return;
+        }
+        self.show(ed, head, sink.text, sink.params, call.active);
+    }
+
+    /// A late answer (from a language server) for a call to `callee` that the
+    /// caret is still inside: shown as if a provider had answered at once.
+    pub fn offer(self: *SignatureHelp, ed: *CodeEditor, callee: []const u8, text: []const u8, params: []const [2]usize, active: usize) void {
+        const core = ed.core();
+        const doc = &core.doc;
+        const head = core.primaryHead();
+        const before = doc.range(head -| 4000, head) catch return;
+        const call = enclosingCall(before) orelse return;
+        if (!std.mem.eql(u8, call.callee, callee)) return;
+        _ = self.arena.reset(.retain_capacity);
+        const a = self.arena.allocator();
+        self.show(ed, head, a.dupe(u8, text) catch return, a.dupe([2]usize, params) catch return, active);
+    }
+
+    fn show(self: *SignatureHelp, ed: *CodeEditor, head: usize, text: []const u8, params: []const [2]usize, active: usize) void {
+        const doc = &ed.core().doc;
         var ms: usize = 0;
         var me: usize = 0;
-        if (sink.params.len > 0) {
-            const p = sink.params[@min(call.active, sink.params.len - 1)];
+        if (params.len > 0) {
+            const p = params[@min(active, params.len - 1)];
             ms = p[0];
             me = p[1];
         }
@@ -391,7 +443,7 @@ pub const SignatureHelp = struct {
         const line_start = doc.lineStart(doc.lineOfOffset(head));
         const left = ed.rectOfOffset(line_start) orelse caret;
         const anchor: @TypeOf(caret) = .{ .x = left.x, .y = caret.y, .w = 1, .h = caret.h };
-        self.ui.showTipOpts(sink.text, anchor, .{ .above = true, .mark_start = ms, .mark_end = me }) catch return self.hide();
+        self.ui.showTipOpts(text, anchor, .{ .above = true, .mark_start = ms, .mark_end = me }) catch return self.hide();
         self.showing = true;
         self.editor = ed;
     }

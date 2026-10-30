@@ -41,5 +41,5 @@ out.poll();</code></pre>
 <p><code>ZigCompleter</code> is also the provider for <a href="widgets/hover.html">hover</a> (a declaration's signature and <code>///</code> doc comment, or a builtin's signature) and <a href="widgets/hover.html">signature help</a> (the parameter list of the function being called, so typing <code>@Vector(</code> keeps showing <code>len</code> and <code>Element</code>). <code>Index.lookup(file, path)</code> finds one declaration (<code>Member.doc</code> holds its raw doc comment).</p>
 <p>In the app: <code>documents.enableCompletion(completion, zig_completer)</code> attaches the suggestion list to every editor it opens, and <code>documents.enableHints(hover, signature)</code> the hover and signature help. Language servers will add to these answers, not replace them.</p>
 <h2>What is planned</h2>
-<p>Language-server support on top of the offline completion, a terminal, and event-to-handler wiring with refactors: see <code>NOTES/ide-plan.md</code>.</p>
+<p>Language servers are described on <a href="lsp.html">their own page</a>; still planned: a terminal, and event-to-handler wiring with refactors: see <code>NOTES/ide-plan.md</code>.</p>
 </main><script src="nav.js"></script></body></html>

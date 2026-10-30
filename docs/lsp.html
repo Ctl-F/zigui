@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Language servers - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Language servers</h1>
+<p>The IDE can talk to a language server (zls for Zig, or any server that speaks the Language Server Protocol over stdio) <b>on top of</b> the offline completion in <a href="ide.html">the IDE page</a>: nothing here is required. If the server is not installed or exits, the editor keeps working and the status line says so.</p>
+<h2>What it adds</h2>
+<table>
+<tr><th>Feature</th><th>How it shows</th></tr>
+<tr><td>Diagnostics</td><td>Wavy underlines (red for errors, amber for warnings, blue for hints) under the reported ranges; hovering one shows its message.</td></tr>
+<tr><td>Completion</td><td>The server's items join the suggestion list a moment after the offline ones (<a href="widgets/completion.html"><code>Completion.offer</code></a>).</td></tr>
+<tr><td>Hover</td><td>The server's text appears in the hover tooltip if nothing else is showing (<code>Hover.offer</code>).</td></tr>
+<tr><td>Parameter hints</td><td>The server's signature, with the active parameter emphasized (<code>SignatureHelp.offer</code>).</td></tr>
+<tr><td>Go to definition</td><td><b>F12</b> opens the definition of the name at the caret (any file).</td></tr>
+</table>
+<h2>In the IDE app</h2>
+<p><code>zig build ide</code> starts <code>zls</code> from <code>PATH</code> when the first Zig file opens, or the program in <code>ZIGUI_ZLS=/path/to/zls</code>. Edits are sent as the whole text 120 ms after typing stops, and always before a request that depends on them.</p>
+<h2>Using it in your own program</h2>
+<pre><code>const lsp = try zigui.ide.lsp_assist.Assist.create(&amp;ui, io, project_root);
+defer lsp.destroy();                       // create it before the Documents; destroy it after
+try lsp.addServer(&amp;zigui.syntax.zig, "zig", &amp;.{"zls"});    // language, language id, command line
+lsp.wake = sdl.wake;
+lsp.completion = completion; lsp.hover = hover; lsp.signature = signature;
+lsp.on_open = .bind(&amp;app, App.openAt);   // go to definition: absolute path, 1-based line and column
+try completion.addProvider(lsp.completionProvider());
+try hover.addProvider(lsp.hoverProvider());
+try signature.addProvider(lsp.signatureProvider());
+documents.enableLsp(lsp);                  // attaches/detaches editors, reports saves
+
+// every loop iteration
+lsp.poll();
+// status line: lsp.statusText(), lsp.diagnosticCounts(editor), lsp.gotoDefinition(editor)</code></pre>
+<p>Without <code>Documents</code>, call <code>lsp.attach(editor, abs_path)</code> when a file opens, <code>lsp.saved(editor)</code> after saving and <code>lsp.detach(editor)</code> before the editor goes away.</p>
+<h2>The pieces</h2>
+<ul>
+<li><code>ide/lsp/jsonrpc.zig</code>: <code>Content-Length</code> framing (<code>frame</code>, <code>Reader</code> that copes with messages split or batched).</li>
+<li><code>ide/lsp/client.zig</code>: <code>Client</code> over any byte transport: the initialize handshake (requesting UTF-8 positions; UTF-16 is converted), queued sends until ready, request ids with callbacks and <code>cancel</code>, answers to the requests servers make (configuration, capability registration, progress), <code>didOpen</code>/<code>didChange</code> (full text)/<code>didSave</code>/<code>didClose</code>, diagnostics hook. Also <code>fileUri</code>, <code>pathFromUri</code>, <code>characterOf</code>, <code>byteColOf</code>. UI-free and testable without a process.</li>
+<li><code>ide/lsp/results.zig</code>: readers for completion, hover, signature help, locations and diagnostics, accepting every shape the protocol allows.</li>
+<li><code>ide/lsp_assist.zig</code>: <code>Assist</code>, the glue to editors and the process (<code>platform/process.zig</code> with a stdin pipe).</li>
+</ul>
+<h2>Limits (first iteration)</h2>
+<p>One server per language, started lazily and never restarted after it exits; no incremental sync, rename, code actions, formatting or workspace symbols yet; a server's snippet completions are turned off (plain text only).</p>
+</main><script src="nav.js"></script></body></html>

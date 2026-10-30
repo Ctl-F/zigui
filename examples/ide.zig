@@ -33,6 +33,7 @@ const App = struct {
     search: *ide.SearchPanel = undefined,
     output: *ide.OutputPanel = undefined,
     status: *zigui.Label = undefined,
+    lsp: *ide.lsp_assist.Assist = undefined,
     files_panel: *zigui.dock.Panel = undefined,
     search_panel: *zigui.dock.Panel = undefined,
 
@@ -65,6 +66,8 @@ const App = struct {
         const name = ev.text;
         if (std.mem.eql(u8, name, "ide.build")) self.runBuild("") else if (std.mem.eql(u8, name, "ide.run")) self.runBuild("run") else if (std.mem.eql(u8, name, "ide.test")) self.runBuild("test") else if (std.mem.eql(u8, name, "file.save")) {
             _ = self.docs.saveActive();
+        } else if (std.mem.eql(u8, name, "editor.definition")) {
+            if (self.docs.active()) |d| self.lsp.gotoDefinition(d.editor);
         } else if (std.mem.eql(u8, name, "project.search")) {
             self.dock.showPanel(self.search_panel) catch {};
             self.dock.activatePanel(self.search_panel);
@@ -76,7 +79,9 @@ const App = struct {
         self.output.poll();
         self.search.poll();
         self.docs.poll();
-        const msg = self.docs.statusText();
+        self.lsp.poll();
+        const doc_msg = self.docs.statusText();
+        const msg = if (doc_msg.len > 0) doc_msg else self.lsp.statusText();
         if (!std.mem.eql(u8, msg, self.status.props.text.bytes)) self.status.setText(msg) catch {};
     }
 };
@@ -238,10 +243,27 @@ pub fn main(init: std.process.Init) !void {
     const signature = try zigui.hover.SignatureHelp.create(&ui);
     defer signature.destroy();
     try signature.addProvider(zig_completer.signatureProvider());
+    // A language server, if one is installed (ZIGUI_ZLS=/path/to/zls, else `zls` on PATH).
+    // It adds diagnostics, completions, hover, parameter hints and go to definition
+    // to the offline ones; without it everything above still works.
+    const lsp = try ide.lsp_assist.Assist.create(&ui, io, project.root);
+    defer lsp.destroy();
+    app.lsp = lsp;
+    lsp.wake = sdl.wake;
+    lsp.completion = completion;
+    lsp.hover = hover;
+    lsp.signature = signature;
+    lsp.on_open = ide.output_panel.OpenHook.bind(&app, App.openAt);
+    try lsp.addServer(&zigui.syntax.zig, "zig", &.{init.environ_map.get("ZIGUI_ZLS") orelse "zls"});
+    try completion.addProvider(lsp.completionProvider());
+    try hover.addProvider(lsp.hoverProvider());
+    try signature.addProvider(lsp.signatureProvider());
     app.docs = try ide.Documents.create(&ui, dock, &project, io, .{ .anchor = welcome });
     defer app.docs.destroy();
     app.docs.enableCompletion(completion, zig_completer);
     app.docs.enableHints(hover, signature);
+
+    app.docs.enableLsp(lsp);
 
     const files_panel = try dock.addPanel("Files");
     app.files_panel = files_panel;
@@ -267,12 +289,14 @@ pub fn main(init: std.process.Init) !void {
         .{ "ide.test", "Run tests" },
         .{ "file.save", "Save" },
         .{ "project.search", "Find in project" },
+        .{ "editor.definition", "Go to definition" },
     }) |c| _ = try ui.registerCommand(c[0], .{ .title = c[1], .run = zigui.event.Callback.bind(&app, App.onCommand) });
     try ui.bindShortcut("f5", "ide.run", .app, null);
     try ui.bindShortcut("mod+b", "ide.build", .app, null);
     try ui.bindShortcut("mod+shift+t", "ide.test", .app, null);
     try ui.bindShortcut("mod+s", "file.save", .app, null);
     try ui.bindShortcut("mod+shift+f", "project.search", .app, null);
+    try ui.bindShortcut("f12", "editor.definition", .app, null);
 
     const commands = try gpa.alloc(zigui.draw_list.Command, 32768);
     defer gpa.free(commands);

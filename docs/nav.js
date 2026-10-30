@@ -42,6 +42,7 @@
     ]],
     ["IDE", [
       ["ide.html", "IDE pieces"],
+      ["lsp.html", "Language servers"],
     ]],
     ["Project", [
       ["maintaining.html", "Maintaining these docs"],

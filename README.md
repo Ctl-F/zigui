@@ -446,6 +446,15 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   answer for Zig from `std.zig.Ast` alone (std found via `zig env`), no language
   server; types of values are not inferred, which is where an LSP will add to it.
   The test rig moved to `core/test_rig.zig` so framework tests can share it.
+- Language servers (plan step 5): `ide/lsp/jsonrpc.zig` (framing), `lsp/client.zig`
+  (transport-agnostic client: handshake, request ids and cancel, server requests,
+  full-text sync, UTF-8/UTF-16 positions), `lsp/results.zig` (tolerant readers),
+  `ide/lsp_assist.zig` (process + editors: squiggles, late completions via
+  `Completion.offer`, `Hover.offer`, `SignatureHelp.offer`, go to definition on
+  F12). Offline answers always come first and stay; a missing or crashed server
+  only changes the status line. Tested with a scripted wire and, by hand, with
+  zls 0.16. Gotcha found: `.{}` serializes as `[]` with `std.json`, so empty JSON
+  objects need a field.
 - Editor fixes: the wheel no longer snaps back to the caret (an IME's empty
   composition report, sent whenever the text-input area moves, was counted as an
   edit that scrolls to the caret); the scrollbar thumb drags. The Zig index

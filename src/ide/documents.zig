@@ -29,6 +29,7 @@ const FindBar = @import("../widgets/find_bar.zig").FindBar;
 const syntax = @import("../editor/syntax.zig");
 const Completion = @import("../widgets/completion.zig").Completion;
 const hover_mod = @import("../widgets/hover.zig");
+const Assist = @import("lsp_assist.zig").Assist;
 const ZigCompleter = @import("zig_complete.zig").ZigCompleter;
 const project_mod = @import("project.zig");
 const Project = project_mod.Project;
@@ -71,6 +72,7 @@ pub const Documents = struct {
     /// Suggestions for every editor opened from now on (see `enableCompletion`).
     completion: ?*Completion = null,
     zig: ?*ZigCompleter = null,
+    lsp: ?*Assist = null,
     hover: ?*hover_mod.Hover = null,
     signature: ?*hover_mod.SignatureHelp = null,
     /// The latest thing worth telling the user (a failed save, a refused close).
@@ -113,7 +115,14 @@ pub const Documents = struct {
         self.signature = signature;
     }
 
+    /// Tell a language server (see `lsp_assist.zig`) about every file opened,
+    /// edited, saved and closed from now on. It must outlive the documents.
+    pub fn enableLsp(self: *Documents, lsp: *Assist) void {
+        self.lsp = lsp;
+    }
+
     fn releaseEditor(self: *Documents, ed: *CodeEditor) void {
+        if (self.lsp) |l| l.detach(ed);
         if (self.hover) |h| h.detach(ed);
         if (self.signature) |g| g.detach(ed);
         if (self.completion) |c| c.detach(ed);
@@ -210,6 +219,13 @@ pub const Documents = struct {
         }
         try self.dock.dockTab(panel, near);
         self.last_opened = doc;
+        if (self.lsp) |l| {
+            const abs = self.project.absPath(self.gpa, path) catch null;
+            if (abs) |a| {
+                defer self.gpa.free(a);
+                l.attach(ed, a) catch {};
+            }
+        }
         return doc;
     }
 
@@ -240,6 +256,7 @@ pub const Documents = struct {
             return false;
         };
         doc.editor.markSaved();
+        if (self.lsp) |l| l.saved(doc.editor);
         doc.warned = false;
         self.say("saved {s}", .{doc.path});
         return true;
