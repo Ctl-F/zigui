@@ -446,6 +446,10 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   answer for Zig from `std.zig.Ast` alone (std found via `zig env`), no language
   server; types of values are not inferred, which is where an LSP will add to it.
   The test rig moved to `core/test_rig.zig` so framework tests can share it.
+- Restart (`ide/relaunch.zig`, Ctrl+Alt+F6 / Ctrl+Alt+F5 in the IDE app): spawn
+  a detached copy of the executable (path with the " (deleted)" marker stripped)
+  with the folder and `--open` files, then leave the loop. Scripted runs only log
+  the command, since the child would inherit the script and restart forever.
 - Painting skips nodes outside the innermost clipping ancestor (never absolute
   ones, and never across a repaint-boundary recording), and `Ui` turns a full
   draw list into a partial frame plus `draw_overflow` and one warning instead of

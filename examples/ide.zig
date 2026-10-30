@@ -6,7 +6,8 @@
 //!       zig-out/bin/ide path/to/project
 //!
 //! Double-click a file in Files to open it; Ctrl+S saves; Ctrl+F finds in the
-//! file, Ctrl+Shift+F finds in the project; F5 runs `zig build run`, Ctrl+B `zig build`, Ctrl+` opens the terminal, and Ctrl+Shift+T
+//! file, Ctrl+Shift+F finds in the project; F5 runs `zig build run`, Ctrl+B `zig build`, Ctrl+Alt+F6 restarts the IDE (a fresh copy of the executable on the
+//! same folder and files), Ctrl+Alt+F5 builds and restarts if the build succeeds, Ctrl+` opens the terminal, and Ctrl+Shift+T
 //! `zig build test` (double-click an error in Output to jump to it).
 //!
 //! Env (headless checks, with SDL_VIDEODRIVER=dummy):
@@ -35,6 +36,13 @@ const App = struct {
     status: *zigui.Label = undefined,
     lsp: *ide.lsp_assist.Assist = undefined,
     terminal: *ide.TerminalPanel = undefined,
+    /// Leave the main loop (set when a new instance has been started).
+    quit: bool = false,
+    /// Scripted (headless) runs only log what a restart would start: the new
+    /// instance would inherit the script and restart again.
+    dry_restart: bool = false,
+    /// A build was started to be followed by a restart if it succeeds.
+    restart_after_build: bool = false,
     terminal_panel: *zigui.dock.Panel = undefined,
     files_panel: *zigui.dock.Panel = undefined,
     search_panel: *zigui.dock.Panel = undefined,
@@ -46,9 +54,7 @@ const App = struct {
     fn openAt(self: *App, path: []const u8, line: u32, col: u32) void {
         // Compiler output carries paths relative to where the build ran (the
         // project root) or absolute ones.
-        
-        std.debug.print("Path Requested: {s}@{},{}\n", .{ path, line, col });
-        
+                
         const rel = self.project.relPath(path) orelse path;
         _ = self.docs.open(rel, line, col) catch |err| {
             var buf: [200]u8 = undefined;
@@ -67,9 +73,42 @@ const App = struct {
         };
     }
 
+    /// Start a new copy of this program on the same folder and files, then quit.
+    fn restartNow(self: *App) void {
+        _ = self.docs.saveAll();
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var files: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (self.docs.docs.items) |d| files.append(a, d.path) catch {};
+        const exe = std.process.executablePathAlloc(self.io, a) catch |err| {
+            self.setStatus("cannot restart: no executable path ({s})", .{@errorName(err)});
+            return;
+        };
+        const cmd = ide.relaunch.argv(a, exe, self.project.root, files.items) catch return;
+        if (self.dry_restart) {
+            std.log.info("restart: would start {s} {s} (+{d} more arguments)", .{ cmd[0], cmd[1], cmd.len - 2 });
+            self.quit = true;
+            return;
+        }
+        ide.relaunch.spawnDetached(self.io, cmd) catch |err| {
+            self.setStatus("cannot restart: could not start {s} ({s})", .{ cmd[0], @errorName(err) });
+            return;
+        };
+        self.quit = true;
+    }
+
+    fn setStatus(self: *App, comptime fmt: []const u8, args: anytype) void {
+        var buf: [240]u8 = undefined;
+        self.status.setText(std.fmt.bufPrint(&buf, fmt, args) catch "") catch {};
+    }
+
     fn onCommand(self: *App, ev: *zigui.Event) void {
         const name = ev.text;
-        if (std.mem.eql(u8, name, "ide.build")) self.runBuild("") else if (std.mem.eql(u8, name, "ide.run")) self.runBuild("run") else if (std.mem.eql(u8, name, "ide.test")) self.runBuild("test") else if (std.mem.eql(u8, name, "file.save")) {
+        if (std.mem.eql(u8, name, "ide.restart")) self.restartNow() else if (std.mem.eql(u8, name, "ide.build_restart")) {
+            self.runBuild("");
+            self.restart_after_build = self.output.running;
+        } else if (std.mem.eql(u8, name, "ide.build")) self.runBuild("") else if (std.mem.eql(u8, name, "ide.run")) self.runBuild("run") else if (std.mem.eql(u8, name, "ide.test")) self.runBuild("test") else if (std.mem.eql(u8, name, "file.save")) {
             _ = self.docs.saveActive();
         } else if (std.mem.eql(u8, name, "view.terminal")) {
             self.dock.showPanel(self.terminal_panel) catch {};
@@ -86,6 +125,10 @@ const App = struct {
 
     fn poll(self: *App) void {
         self.output.poll();
+        if (self.restart_after_build and !self.output.running) {
+            self.restart_after_build = false;
+            if (self.output.exit_code == 0) self.restartNow() else self.setStatus("build failed: not restarting", .{});
+        }
         self.search.poll();
         self.docs.poll();
         self.lsp.poll();
@@ -132,6 +175,8 @@ fn runCommand(app: *App, ui: *Ui, cmd: []const u8) void {
                 mods.ctrl = true;
             } else if (std.mem.eql(u8, p, "shift")) {
                 mods.shift = true;
+            } else if (std.mem.eql(u8, p, "alt")) {
+                mods.alt = true;
             } else last = p;
         }
         const k = zigui.keys.parseKey(last) orelse .unknown;
@@ -183,6 +228,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const dir_arg: []const u8 = if (args.len > 1) args[1] else ".";
 
+    const reopen = try ide.relaunch.openFilesFrom(init.arena.allocator(), if (args.len > 2) args[2..] else &.{});
     var project = ide.Project.open(gpa, io, dir_arg) catch |err| {
         std.log.err("could not open project folder {s}: {s}", .{ dir_arg, @errorName(err) });
         return err;
@@ -192,7 +238,7 @@ pub fn main(init: std.process.Init) !void {
     try sdl.init();
     defer sdl.quit();
     var title_buf: [256]u8 = undefined;
-    const title: [:0]const u8 = std.fmt.bufPrintSentinel(&title_buf, "zigui ide - {s}", .{project.name}, 0) catch "zigui ide";
+    const title: [:0]const u8 = std.fmt.bufPrintSentinel(&title_buf, "zigui ide * - {s}", .{project.name}, 0) catch "zigui ide";
     var window = sdl.Window.create(title, 1500, 860) catch |err| {
         std.log.err("could not create window: {s} ({s})", .{ @errorName(err), sdl.lastError() });
         return err;
@@ -222,7 +268,8 @@ pub fn main(init: std.process.Init) !void {
     }
     ui.clipboard = .{ .get = clipGet, .set = clipSet };
 
-    var app: App = .{ .gpa = gpa, .io = io, .ui = &ui, .project = &project, .dock = undefined };
+    const scripted = init.environ_map.get("ZIGUI_SCREENSHOT") != null;
+    var app: App = .{ .dry_restart = scripted, .gpa = gpa, .io = io, .ui = &ui, .project = &project, .dock = undefined };
 
     ui.tree.get(ui.tree.root).?.style = .{ .direction = .column };
     ui.tree.get(ui.tree.root).?.visual = .{ .background = zigui.Color.rgb(24, 25, 29) };
@@ -304,6 +351,8 @@ pub fn main(init: std.process.Init) !void {
     inline for (.{
         .{ "ide.build", "Build" },
         .{ "ide.run", "Run" },
+        .{ "ide.restart", "Restart the IDE" },
+        .{ "ide.build_restart", "Build and restart the IDE" },
         .{ "ide.test", "Run tests" },
         .{ "file.save", "Save" },
         .{ "project.search", "Find in project" },
@@ -312,11 +361,15 @@ pub fn main(init: std.process.Init) !void {
     }) |c| _ = try ui.registerCommand(c[0], .{ .title = c[1], .run = zigui.event.Callback.bind(&app, App.onCommand) });
     try ui.bindShortcut("f5", "ide.run", .app, null);
     try ui.bindShortcut("mod+b", "ide.build", .app, null);
+    try ui.bindShortcut("ctrl+alt+f6", "ide.restart", .app, null);
+    try ui.bindShortcut("ctrl+shift+f5", "ide.build_restart", .app, null);
     try ui.bindShortcut("mod+shift+t", "ide.test", .app, null);
     try ui.bindShortcut("mod+s", "file.save", .app, null);
     try ui.bindShortcut("mod+shift+f", "project.search", .app, null);
     try ui.bindShortcut("f12", "editor.definition", .app, null);
     try ui.bindShortcut("mod+`", "view.terminal", .app, null);
+
+    for (reopen) |rel| _ = app.docs.open(rel, 0, 0) catch {};
 
     const commands = try gpa.alloc(zigui.draw_list.Command, 32768);
     defer gpa.free(commands);
@@ -335,7 +388,7 @@ pub fn main(init: std.process.Init) !void {
     var script = std.mem.tokenizeScalar(u8, init.environ_map.get("ZIGUI_SCRIPT") orelse "", ';');
     var text_input_on = false;
     var running = true;
-    while (running) {
+    while (running and !app.quit) {
         _ = ui.tick(sdl.ticks());
         app.poll();
         ui.update();
