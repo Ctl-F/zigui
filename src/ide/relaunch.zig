@@ -19,6 +19,26 @@ pub fn cleanPath(path: []const u8) []const u8 {
     return if (std.mem.endsWith(u8, path, marker)) path[0 .. path.len - marker.len] else path;
 }
 
+/// The executable to start for `running` (the path of the running one).
+///
+/// A program started with `zig build <step>` runs from the build cache
+/// (`<root>/.zig-cache/o/<hash>/name`), and rebuilding puts the new build in
+/// `<root>/zig-out/bin/name` while that cached copy stays as it was: restarting
+/// from the running path would start the old build. So when the running
+/// executable is in a cache directory, the installed one beside the same build
+/// root is preferred if it exists. Otherwise the cleaned running path is used.
+pub fn resolveExe(a: std.mem.Allocator, io: std.Io, running: []const u8) ![]const u8 {
+    const exe = cleanPath(running);
+    const markers = [_][]const u8{ "/.zig-cache/o/", "/zig-cache/o/" };
+    for (markers) |m| {
+        const at = std.mem.lastIndexOf(u8, exe, m) orelse continue;
+        const candidate = try std.fs.path.join(a, &.{ exe[0..at], "zig-out", "bin", std.fs.path.basename(exe) });
+        std.Io.Dir.cwd().access(io, candidate, .{}) catch continue;
+        return candidate;
+    }
+    return exe;
+}
+
 /// The command line for the new instance: the executable, the project folder,
 /// and `--open <file>` for each file to reopen. Allocated from `a`.
 pub fn argv(a: std.mem.Allocator, exe: []const u8, project_root: []const u8, open_files: []const []const u8) ![]const []const u8 {
@@ -73,6 +93,29 @@ test "the command line for the new instance, and the marker on a replaced execut
     try testing.expectEqual(@as(usize, 2), files.len);
     try testing.expectEqualStrings("src/a.zig", files[0]);
     try testing.expectEqualStrings("/home/me/ide", cleanPath("/home/me/ide"));
+}
+
+test "a program run from the build cache restarts into the installed build" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try tmp.dir.createDirPath(testing.io, ".zig-cache/o/abc123");
+    try tmp.dir.createDirPath(testing.io, "zig-out/bin");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".zig-cache/o/abc123/ide", .data = "old" });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPathFile(testing.io, ".", &buf);
+    const root = buf[0..n];
+    const cached = try std.fs.path.join(a, &.{ root, ".zig-cache/o/abc123/ide" });
+    // Nothing installed yet: keep the running one.
+    try testing.expectEqualStrings(cached, try resolveExe(a, testing.io, cached));
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "zig-out/bin/ide", .data = "new" });
+    const want = try std.fs.path.join(a, &.{ root, "zig-out/bin/ide" });
+    try testing.expectEqualStrings(want, try resolveExe(a, testing.io, cached));
+    // A path outside any cache is used as is (minus the replaced-executable marker).
+    const installed = try std.fmt.allocPrint(a, "{s} (deleted)", .{want});
+    try testing.expectEqualStrings(want, try resolveExe(a, testing.io, installed));
 }
 
 test "a detached process starts" {

@@ -6,8 +6,8 @@
 //!       zig-out/bin/ide path/to/project
 //!
 //! Double-click a file in Files to open it; Ctrl+S saves; Ctrl+F finds in the
-//! file, Ctrl+Shift+F finds in the project; F5 runs `zig build run`, Ctrl+B `zig build`, Ctrl+Alt+F6 restarts the IDE (a fresh copy of the executable on the
-//! same folder and files), Ctrl+Alt+F5 builds and restarts if the build succeeds, Ctrl+` opens the terminal, and Ctrl+Shift+T
+//! file, Ctrl+Shift+F finds in the project; F5 runs `zig build run`, Ctrl+B `zig build`, Ctrl+Shift+F6 restarts the IDE (a fresh copy of the executable on the
+//! same folder and files), Ctrl+Shift+F5 builds and restarts if the build succeeds, Ctrl+` opens the terminal, and Ctrl+Shift+T
 //! `zig build test` (double-click an error in Output to jump to it).
 //!
 //! Env (headless checks, with SDL_VIDEODRIVER=dummy):
@@ -85,7 +85,8 @@ const App = struct {
             self.setStatus("cannot restart: no executable path ({s})", .{@errorName(err)});
             return;
         };
-        const cmd = ide.relaunch.argv(a, exe, self.project.root, files.items) catch return;
+        const target = ide.relaunch.resolveExe(a, self.io, exe) catch exe;
+        const cmd = ide.relaunch.argv(a, target, self.project.root, files.items) catch return;
         if (self.dry_restart) {
             std.log.info("restart: would start {s} {s} (+{d} more arguments)", .{ cmd[0], cmd[1], cmd.len - 2 });
             self.quit = true;
@@ -100,7 +101,9 @@ const App = struct {
 
     fn setStatus(self: *App, comptime fmt: []const u8, args: anytype) void {
         var buf: [240]u8 = undefined;
-        self.status.setText(std.fmt.bufPrint(&buf, fmt, args) catch "") catch {};
+        const text = std.fmt.bufPrint(&buf, fmt, args) catch "";
+        std.log.warn("{s}", .{text});
+        self.status.setText(text) catch {};
     }
 
     fn onCommand(self: *App, ev: *zigui.Event) void {
@@ -361,7 +364,7 @@ pub fn main(init: std.process.Init) !void {
     }) |c| _ = try ui.registerCommand(c[0], .{ .title = c[1], .run = zigui.event.Callback.bind(&app, App.onCommand) });
     try ui.bindShortcut("f5", "ide.run", .app, null);
     try ui.bindShortcut("mod+b", "ide.build", .app, null);
-    try ui.bindShortcut("ctrl+alt+f6", "ide.restart", .app, null);
+    try ui.bindShortcut("ctrl+shift+f6", "ide.restart", .app, null);
     try ui.bindShortcut("ctrl+shift+f5", "ide.build_restart", .app, null);
     try ui.bindShortcut("mod+shift+t", "ide.test", .app, null);
     try ui.bindShortcut("mod+s", "file.save", .app, null);
