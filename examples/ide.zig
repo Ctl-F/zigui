@@ -241,7 +241,7 @@ pub fn main(init: std.process.Init) !void {
     try sdl.init();
     defer sdl.quit();
     var title_buf: [256]u8 = undefined;
-    const title: [:0]const u8 = std.fmt.bufPrintSentinel(&title_buf, "zigui ide * - {s}", .{project.name}, 0) catch "zigui ide";
+    const title: [:0]const u8 = std.fmt.bufPrintSentinel(&title_buf, "zigui ide - {s}", .{project.name}, 0) catch "zigui ide";
     var window = sdl.Window.create(title, 1500, 860) catch |err| {
         std.log.err("could not create window: {s} ({s})", .{ @errorName(err), sdl.lastError() });
         return err;
@@ -276,6 +276,16 @@ pub fn main(init: std.process.Init) !void {
 
     ui.tree.get(ui.tree.root).?.style = .{ .direction = .column };
     ui.tree.get(ui.tree.root).?.visual = .{ .background = zigui.Color.rgb(24, 25, 29) };
+    
+    
+    // Add Menu Bar
+    const bar = try zigui.MenuBar.create(&ui, ui.tree.root, .{});
+    defer bar.destroy();
+    
+    try bar.addMenu("File", &.{
+        .{ .label = "Save", .command = "file.save" },
+    }, null);
+    
     const dock = try zigui.Dock.create(&ui, ui.tree.root, .{ .style = .{ .grow = 1 } });
     app.dock = dock;
     app.status = try ui.add(zigui.Label, ui.tree.root, .{ .style = .{ .padding = zigui.style.Edges.xy(8, 3), .shrink = 0 } });
@@ -361,7 +371,13 @@ pub fn main(init: std.process.Init) !void {
         .{ "project.search", "Find in project" },
         .{ "editor.definition", "Go to definition" },
         .{ "view.terminal", "Terminal" },
-    }) |c| _ = try ui.registerCommand(c[0], .{ .title = c[1], .run = zigui.event.Callback.bind(&app, App.onCommand) });
+    }) |c| {
+        _ = try ui.registerCommand(c[0], .{ 
+            .title = c[1], 
+            .run = zigui.event.Callback.bind(&app, App.onCommand),
+        });
+    }
+    
     try ui.bindShortcut("f5", "ide.run", .app, null);
     try ui.bindShortcut("mod+b", "ide.build", .app, null);
     try ui.bindShortcut("ctrl+shift+f6", "ide.restart", .app, null);

@@ -9,6 +9,9 @@ in `NOTES/`: `CLAUDE.md` (rules), `zig-first-refactor.md` (the plan this tree ju
 went through), and `spec-drift-notes.md` (where the code differs from the design
 doc, and what to do next).
 
+
+![IDE Screenshot]("IDEScreenshot.png")
+
 ## Status
 
 Working and tested: node tree, flex layout, events and focus, text (shaping,
