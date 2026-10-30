@@ -85,6 +85,65 @@ pub const SaveHook = struct {
     call: *const fn (ctx: ?*anyopaque, text: []const u8) void,
 };
 
+/// One thing the Events tab can offer for an event: an existing handler.
+pub const HandlerChoice = struct {
+    /// Yours, handed back to `choose`.
+    id: u32,
+    /// The action name to store in the document.
+    action: []const u8,
+    /// What the menu shows (`App.onSave`).
+    label: []const u8,
+};
+
+/// Where a `HandlerProvider` puts its candidates (strings are copied).
+pub const HandlerList = struct {
+    arena: Allocator,
+    items: *std.ArrayListUnmanaged(HandlerChoice),
+
+    pub fn add(self: *HandlerList, id: u32, action: []const u8, label: []const u8) void {
+        const a = self.arena.dupe(u8, action) catch return;
+        const l = self.arena.dupe(u8, label) catch return;
+        self.items.append(self.arena, .{ .id = id, .action = a, .label = l }) catch {};
+    }
+};
+
+/// What turns an event into a call, supplied by the environment around the
+/// builder (the IDE): the handlers that fit an event, making one usable,
+/// creating a new one, and showing one's source. Without it the Events tab is
+/// a plain text field for the action name.
+pub const HandlerProvider = struct {
+    ctx: ?*anyopaque = null,
+    /// Handlers that suit event `event_name` of a `widget_type` widget.
+    list: *const fn (ctx: ?*anyopaque, widget_type: []const u8, event_name: []const u8, out: *HandlerList) void,
+    /// Use candidate `id`; returns the action name to store (null: failed).
+    choose: *const fn (ctx: ?*anyopaque, id: u32) ?[]const u8,
+    /// Create a new handler for a node called `node_id`; returns its action name.
+    create: *const fn (ctx: ?*anyopaque, node_id: []const u8, widget_type: []const u8, event_name: []const u8) ?[]const u8,
+    /// Show the source of the handler for `action`; false if there is none.
+    reveal: *const fn (ctx: ?*anyopaque, action: []const u8) bool,
+
+    /// `HandlerProvider.bind(&service, Service)`: `Service` has methods `list`,
+    /// `choose`, `create` and `reveal` taking `*Service` first.
+    pub fn bind(ctx: anytype, comptime T: type) HandlerProvider {
+        const Ptr = @TypeOf(ctx);
+        const G = struct {
+            fn list(c: ?*anyopaque, w: []const u8, e: []const u8, out: *HandlerList) void {
+                T.list(@as(Ptr, @ptrCast(@alignCast(c.?))), w, e, out);
+            }
+            fn choose(c: ?*anyopaque, id: u32) ?[]const u8 {
+                return T.choose(@as(Ptr, @ptrCast(@alignCast(c.?))), id);
+            }
+            fn create(c: ?*anyopaque, n: []const u8, w: []const u8, e: []const u8) ?[]const u8 {
+                return T.create(@as(Ptr, @ptrCast(@alignCast(c.?))), n, w, e);
+            }
+            fn reveal(c: ?*anyopaque, a: []const u8) bool {
+                return T.reveal(@as(Ptr, @ptrCast(@alignCast(c.?))), a);
+            }
+        };
+        return .{ .ctx = @ptrCast(ctx), .list = G.list, .choose = G.choose, .create = G.create, .reveal = G.reveal };
+    }
+};
+
 pub const Options = struct {
     save: ?SaveHook = null,
     /// Named callbacks the preview binds events to; unknown names are ignored.
@@ -100,6 +159,14 @@ pub const Options = struct {
     /// dock, which the builder moves under its own toolbar, instead of making
     /// one. Call `Builder.arrange` to dock them in the default layout.
     dock: ?*Dock = null,
+    /// Live inside a host's dock instead of owning the window: no menu bar, no
+    /// frame around the dock (`parent` of `create` only anchors the builder's
+    /// overlay); the toolbar becomes a "Designer" panel. Needs `dock`. Call
+    /// `arrangeIn` to place the panels; panel-scoped shortcuts apply wherever
+    /// focus is inside one of the builder's panels.
+    embedded: bool = false,
+    /// The Events tab's handler picker (see `HandlerProvider`).
+    handlers: ?HandlerProvider = null,
 };
 
 const panel_bg = Color.rgb(34, 36, 41);
@@ -222,6 +289,12 @@ pub const Builder = struct {
     id_field: ?*TextField = null,
     text_field: ?*TextField = null,
     event_fields: std.ArrayListUnmanaged(*TextField) = .empty,
+    /// The Events tab's menu: choices from the provider, and the event it is for.
+    choice_arena: std.heap.ArenaAllocator = undefined,
+    choices: []const HandlerChoice = &.{},
+    choice_event: usize = 0,
+    /// Embedded: the toolbar's panel.
+    tools_panel: ?*dock_mod.Panel = null,
     layout_fields: [layout_field_count]?*TextField = @splat(null),
 
     built_version: u32 = 0,
@@ -275,6 +348,7 @@ pub const Builder = struct {
             .opts = opts,
             .editor = edit.Editor.init(ui.gpa, initial),
             .selected = initial.root.uid,
+            .choice_arena = std.heap.ArenaAllocator.init(ui.gpa),
         };
         // The caller keeps ownership of `doc` if creation fails.
         errdefer {
@@ -312,9 +386,11 @@ pub const Builder = struct {
         if (!self.owns_dock) {
             // The dock is the caller's: take our panels out of it first.
             for ([_]*dock_mod.Panel{ self.toolbox_panel, self.outline_panel, self.preview_panel, self.inspector_panel }) |p| self.dock.destroyPanel(p);
+            if (self.tools_panel) |p| self.dock.destroyPanel(p);
         }
         _ = self.ui.tree.destroySubtree(self.root);
         self.event_fields.deinit(self.gpa);
+        self.choice_arena.deinit();
         self.outline_expanded.deinit(self.gpa);
         self.outline_items.deinit(self.gpa);
         self.extra.deinit(self.gpa);
@@ -383,6 +459,29 @@ pub const Builder = struct {
     /// Dock the four panels in the default layout (toolbox over outline on the
     /// left, preview in the middle, inspector on the right). Done for you when
     /// the builder made its own dock.
+    /// Dock the panels in a host's dock: the preview as a tab of `center` (a panel
+    /// in the middle group; null: a group of its own), the inspector, outline and
+    /// toolbox in a column on the right, and the toolbar above the preview.
+    pub fn arrangeIn(self: *Builder, center: ?*dock_mod.Panel) !void {
+        const d = self.dock;
+        try d.dockTab(self.preview_panel, center);
+        try d.dockRoot(self.inspector_panel, .right, self.opts.inspector_width);
+        try d.dockSplit(self.outline_panel, self.inspector_panel, .top, palette_height + 240);
+        try d.dockSplit(self.toolbox_panel, self.outline_panel, .top, palette_height);
+        if (self.tools_panel) |tp| try d.dockSplit(tp, self.preview_panel, .top, 104);
+    }
+
+    /// Show or hide all of the builder's panels (embedded: when a UI document is or is not being designed).
+    pub fn setPanelsVisible(self: *Builder, visible: bool) void {
+        const all = [_]?*dock_mod.Panel{ self.tools_panel, self.toolbox_panel, self.outline_panel, self.preview_panel, self.inspector_panel };
+        for (all) |maybe| {
+            const p = maybe orelse continue;
+            if (visible) {
+                if (p.state == .hidden) self.dock.showPanel(p) catch {};
+            } else if (p.state != .hidden) self.dock.closePanel(p);
+        }
+    }
+
     pub fn arrange(self: *Builder) !void {
         const d = self.dock;
         try d.dockTab(self.preview_panel, null);
@@ -411,18 +510,9 @@ pub const Builder = struct {
         self.buttons[@intFromEnum(cmd)] = b;
     }
 
-    fn buildChrome(self: *Builder, parent: Handle) !void {
+    /// The Undo/Redo/... buttons and the frame size presets.
+    fn buildToolbar(self: *Builder, bar: Handle) !void {
         const ui = self.ui;
-        self.root = try self.node(parent, .{ .direction = .column, .gap = Length.px(8), .padding = Edges.all(8), .grow = 1 });
-        errdefer _ = ui.tree.destroySubtree(self.root);
-        ui.tree.get(self.root).?.role = .panel;
-
-        self.menu_bar = try MenuBar.create(ui, self.root, .{});
-        errdefer {
-            self.menu_bar.?.destroy();
-            self.menu_bar = null;
-        }
-        const bar = try self.node(self.root, .{ .direction = .row, .gap = Length.px(4), .align_items = .center });
         const order = [_]struct { []const u8, Command }{
             .{ "Undo", .undo },   .{ "Redo", .redo },       .{ "Dup", .duplicate }, .{ "Wrap", .wrap },    .{ "Unwrap", .unwrap },
             .{ "In", .indent },   .{ "Out", .outdent },     .{ "Up", .up },         .{ "Down", .down },    .{ "Delete", .delete },
@@ -437,13 +527,36 @@ pub const Builder = struct {
             b.props.on_click = event.Callback.bind(self, onFramePreset);
             ui.tree.get(b.node).?.user_data = @ptrFromInt(i + 1);
         }
+    }
+
+    fn buildChrome(self: *Builder, parent: Handle) !void {
+        const ui = self.ui;
+        if (self.opts.embedded) {
+            // A zero-size anchor at the window's origin: the inline editors position against it.
+            self.root = try self.node(parent, .{ .position = .absolute, .inset = .{ .left = Length.px(0), .top = Length.px(0) } });
+            errdefer _ = ui.tree.destroySubtree(self.root);
+        } else {
+            self.root = try self.node(parent, .{ .direction = .column, .gap = Length.px(8), .padding = Edges.all(8), .grow = 1 });
+            errdefer _ = ui.tree.destroySubtree(self.root);
+            ui.tree.get(self.root).?.role = .panel;
+
+            self.menu_bar = try MenuBar.create(ui, self.root, .{});
+            errdefer {
+                self.menu_bar.?.destroy();
+                self.menu_bar = null;
+            }
+            const bar = try self.node(self.root, .{ .direction = .row, .gap = Length.px(4), .align_items = .center });
+            try self.buildToolbar(bar);
+        }
 
         // The regions are dock panels: Toolbox, Outline, Preview and Inspector.
         // (`arrange` docks them side by side; the user can rearrange them.)
         if (self.opts.dock) |d| {
             self.dock = d;
-            try ui.tree.appendChild(self.root, d.node);
-            ui.tree.get(d.node).?.style.grow = 1;
+            if (!self.opts.embedded) {
+                try ui.tree.appendChild(self.root, d.node);
+                ui.tree.get(d.node).?.style.grow = 1;
+            }
         } else {
             self.dock = try Dock.create(ui, self.root, .{ .style = .{ .grow = 1 } });
             self.owns_dock = true;
@@ -453,6 +566,15 @@ pub const Builder = struct {
         self.outline_panel = try dock.addPanel("Outline");
         self.preview_panel = try dock.addPanel("Preview");
         self.inspector_panel = try dock.addPanel("Inspector");
+        if (self.opts.embedded) {
+            const tp = try dock.addPanel("Designer");
+            self.tools_panel = tp;
+            self.skin(tp.content, .{ .direction = .column, .gap = Length.px(4), .padding = Edges.all(6), .grow = 1 }, panel_bg);
+            // The status line goes above the toolbar: a wrapping row's height is only its first line's.
+            self.status = try ui.add(Label, tp.content, .{ .style = .{ .shrink = 0 } });
+            const bar = try self.node(tp.content, .{ .direction = .row, .gap = Length.px(4), .align_items = .center, .wrap = true, .shrink = 0 });
+            try self.buildToolbar(bar);
+        }
 
         self.palette = self.toolbox_panel.content;
         self.skin(self.palette, .{ .direction = .column, .gap = Length.px(2), .padding = Edges.all(8), .grow = 1 }, panel_bg);
@@ -509,7 +631,7 @@ pub const Builder = struct {
         try self.inspector_dock.dockTab(self.section_panels[0], null);
         for (self.section_panels[1..]) |sp| try self.inspector_dock.dockTab(sp, self.section_panels[0]);
         self.inspector_dock.activatePanel(self.section_panels[0]);
-        self.status = try ui.add(Label, self.root, .{});
+        if (self.tools_panel == null) self.status = try ui.add(Label, self.root, .{});
 
         _ = try ui.add(Label, self.palette, .{ .text = "Add (click or drag)", .size = 15 });
         // The buttons scroll when the toolbox is made small.
@@ -580,7 +702,14 @@ pub const Builder = struct {
         // Panel scope: they work while focus is anywhere in this builder and
         // leave other windows' keys alone.
         for (shortcut_table) |s| {
-            self.ui.bindShortcut(s[0], self.command_names[@intFromEnum(s[1])], .panel, self.root) catch |e| {
+            if (self.opts.embedded) {
+                // The panels are not under `root`: bind to each of them.
+                for ([_]*dock_mod.Panel{ self.toolbox_panel, self.outline_panel, self.preview_panel, self.inspector_panel }) |p| {
+                    self.ui.bindShortcut(s[0], self.command_names[@intFromEnum(s[1])], .panel, p.content) catch |e| {
+                        std.log.warn("builder: cannot bind {s}: {s}", .{ s[0], @errorName(e) });
+                    };
+                }
+            } else self.ui.bindShortcut(s[0], self.command_names[@intFromEnum(s[1])], .panel, self.root) catch |e| {
                 std.log.warn("builder: cannot bind {s}: {s}", .{ s[0], @errorName(e) });
             };
         }
@@ -1145,7 +1274,7 @@ pub const Builder = struct {
                     _ = try ui.add(Label, self.content(), .{ .text = "This widget has no events." });
                     return;
                 }
-                for (info.events) |ev_name| {
+                for (info.events, 0..) |ev_name, event_index| {
                     var name_buf: [48]u8 = undefined;
                     const label = std.fmt.bufPrint(&name_buf, "on {s}", .{ev_name}) catch ev_name;
                     const row = try self.fieldRow(label);
@@ -1160,6 +1289,12 @@ pub const Builder = struct {
                         .on_change = event.Callback.bind(self, onEventEdit),
                     });
                     try self.event_fields.append(self.gpa, tf);
+                    if (self.opts.handlers != null) {
+                        const pick = try ui.add(Button, row, .{ .text = "...", .variant = .flat, .style = tool_button_style, .on_click = event.Callback.bind(self, onHandlerMenu) });
+                        ui.tree.get(pick.node).?.user_data = @ptrFromInt(event_index + 1);
+                        const go = try ui.add(Button, row, .{ .text = "Go", .variant = .flat, .style = tool_button_style, .on_click = event.Callback.bind(self, onHandlerGo) });
+                        ui.tree.get(go.node).?.user_data = @ptrFromInt(event_index + 1);
+                    }
                 }
             },
         }
@@ -2010,6 +2145,72 @@ pub const Builder = struct {
         const before = self.editor.version;
         self.editor.setId(self.selected, f.text()) catch |e| return self.updateStatus(e);
         self.markInspectorEdit(before);
+    }
+
+    /// The "..." button of an event row: a menu of handlers that fit, "New
+    /// handler..." and "No handler".
+    fn onHandlerMenu(self: *Builder, ev: *event.Event) void {
+        const prov = self.opts.handlers orelse return;
+        const tag = self.tagOf(ev.current);
+        if (tag == 0) return;
+        const n = self.selectedNode();
+        const info = (self.live(n) orelse return).info orelse return;
+        const i = tag - 1;
+        if (i >= info.events.len) return;
+        _ = self.choice_arena.reset(.retain_capacity);
+        const a = self.choice_arena.allocator();
+        var list: std.ArrayListUnmanaged(HandlerChoice) = .empty;
+        var out: HandlerList = .{ .arena = a, .items = &list };
+        prov.list(prov.ctx, n.type_name, info.events[i], &out);
+        self.choices = list.items;
+        self.choice_event = i;
+        var current: []const u8 = "";
+        for (n.on) |b| if (std.mem.eql(u8, b.event, info.events[i])) {
+            current = b.action;
+        };
+        const items = a.alloc(menu_mod.Item, list.items.len + 2) catch return;
+        for (list.items, 0..) |c, k| items[k] = .{ .label = c.label, .checked = std.mem.eql(u8, c.action, current) };
+        items[list.items.len] = .{ .label = "New handler..." };
+        items[list.items.len + 1] = .{ .label = "No handler", .enabled = current.len > 0 };
+        const rect = self.ui.tree.absoluteRect(ev.current) orelse return;
+        self.ui.openMenu(items, rect.x, rect.bottom(), .{ .on_pick = menu_mod.PickHook.bind(self, onHandlerPicked), .anchor = rect, .owner = ev.current, .min_width = 200 }) catch |e| self.updateStatus(e);
+    }
+
+    fn onHandlerPicked(self: *Builder, index: usize) void {
+        const prov = self.opts.handlers orelse return;
+        const n = self.selectedNode();
+        const info = (self.live(n) orelse return).info orelse return;
+        const i = self.choice_event;
+        if (i >= info.events.len or i >= self.event_fields.items.len) return;
+        var action: []const u8 = "";
+        if (index < self.choices.len) {
+            action = prov.choose(prov.ctx, self.choices[index].id) orelse return self.updateStatusText("Could not use that handler");
+        } else if (index == self.choices.len) {
+            action = prov.create(prov.ctx, n.id, n.type_name, info.events[i]) orelse return self.updateStatusText("Could not create a handler");
+        }
+        self.setEventAction(i, action);
+    }
+
+    /// Bind (or with "" unbind) event `i` of the selected node and show it in the field.
+    fn setEventAction(self: *Builder, i: usize, action: []const u8) void {
+        const n = self.selectedNode();
+        const info = (self.live(n) orelse return).info orelse return;
+        const before = self.editor.version;
+        self.editor.setEvent(n.uid, info.events[i], action) catch |e| return self.updateStatus(e);
+        self.building = true;
+        self.event_fields.items[i].setText(action) catch {};
+        self.building = false;
+        self.markInspectorEdit(before);
+    }
+
+    /// The "Go" button of an event row: show the handler's source.
+    fn onHandlerGo(self: *Builder, ev: *event.Event) void {
+        const prov = self.opts.handlers orelse return;
+        const tag = self.tagOf(ev.current);
+        if (tag == 0 or tag - 1 >= self.event_fields.items.len) return;
+        const action = self.event_fields.items[tag - 1].text();
+        if (action.len == 0) return self.updateStatusText("This event has no handler");
+        if (!prov.reveal(prov.ctx, action)) self.updateStatusText("No handler is known by that name");
     }
 
     fn onEventEdit(self: *Builder, _: *event.Event) void {
@@ -3578,4 +3779,98 @@ test "the inspector's sections are dock tabs that can be stacked, and all stay u
     try testing.expect(layout.state == .hidden);
     try b.inspector_dock.showPanel(layout);
     try testing.expect(layout.state == .docked);
+}
+
+const FakeHandlers = struct {
+    created: u32 = 0,
+    revealed: [32]u8 = undefined,
+    revealed_len: usize = 0,
+    last_node: [32]u8 = undefined,
+    last_node_len: usize = 0,
+
+    pub fn list(self: *FakeHandlers, widget_type: []const u8, event_name: []const u8, out: *HandlerList) void {
+        _ = self;
+        if (std.mem.eql(u8, widget_type, "button") and std.mem.eql(u8, event_name, "click")) {
+            out.add(7, "save", "App.onSave");
+            out.add(8, "quit", "App.onQuit");
+        }
+    }
+    pub fn choose(self: *FakeHandlers, id: u32) ?[]const u8 {
+        _ = self;
+        return if (id == 7) "save" else "quit";
+    }
+    pub fn create(self: *FakeHandlers, node_id: []const u8, widget_type: []const u8, event_name: []const u8) ?[]const u8 {
+        _ = widget_type;
+        _ = event_name;
+        self.created += 1;
+        @memcpy(self.last_node[0..node_id.len], node_id);
+        self.last_node_len = node_id.len;
+        return "okClick";
+    }
+    pub fn reveal(self: *FakeHandlers, action: []const u8) bool {
+        @memcpy(self.revealed[0..action.len], action);
+        self.revealed_len = action.len;
+        return true;
+    }
+};
+
+fn eventsButton(b: *Builder, text: []const u8) *Button {
+    var stack: [64]Handle = undefined;
+    var n: usize = 0;
+    stack[n] = b.section_scrolls[@intFromEnum(Tab.events)].contentNode();
+    n += 1;
+    while (n > 0) {
+        n -= 1;
+        const node = b.ui.tree.get(stack[n]) orelse continue;
+        if (node.widget_type == ui_mod.typeTag(Button)) {
+            const btn: *Button = @ptrCast(@alignCast(node.widget.?));
+            if (std.mem.eql(u8, btn.props.text.bytes, text)) return btn;
+        }
+        var c = node.first_child;
+        while (b.ui.tree.get(c)) |cn| : (c = cn.next) {
+            if (n < stack.len) {
+                stack[n] = c;
+                n += 1;
+            }
+        }
+    }
+    @panic("no such button in the Events tab");
+}
+
+test "the Events tab offers handlers from the provider: choose, create, go to, clear" {
+    var fake: FakeHandlers = .{};
+    const d = try doc_mod.parseDoc(testing.allocator, ".{ .root = .{ .type = \"box\", .children = .{ .{ .type = \"button\", .id = \"ok\", .props = .{ .text = \"OK\" } } } } }", null, null);
+    const r = try Rig.init(d, .{ .handlers = HandlerProvider.bind(&fake, FakeHandlers) });
+    defer r.deinit();
+    const b = r.b;
+    const ok = byId(b, "ok");
+    b.select(ok.uid);
+    b.setTab(.events);
+    try r.frame();
+    try testing.expectEqual(@as(usize, 1), b.event_fields.items.len);
+
+    // "..." opens a menu: the two handlers, "New handler...", "No handler".
+    clickButton(eventsButton(b, "..."));
+    try testing.expect(r.ui.menuOpen());
+    try testing.expectEqual(@as(usize, 2), b.choices.len);
+    try testing.expectEqualStrings("App.onQuit", b.choices[1].label);
+    r.ui.closeMenu();
+
+    // Choosing one binds it and shows it in the field.
+    b.onHandlerPicked(0);
+    try testing.expectEqualStrings("save", ok.on[0].action);
+    try testing.expectEqualStrings("save", b.event_fields.items[0].text());
+    // Creating gets a name from the provider, with the node's id as the base.
+    b.onHandlerPicked(2);
+    try testing.expectEqual(@as(u32, 1), fake.created);
+    try testing.expectEqualStrings("ok", fake.last_node[0..fake.last_node_len]);
+    try testing.expectEqualStrings("okClick", ok.on[0].action);
+    // "Go" asks the provider to show the source.
+    clickButton(eventsButton(b, "Go"));
+    try testing.expectEqualStrings("okClick", fake.revealed[0..fake.revealed_len]);
+    // "No handler" clears it, and undo brings it back.
+    b.onHandlerPicked(3);
+    try testing.expectEqual(@as(usize, 0), ok.on.len);
+    b.undo();
+    try testing.expectEqualStrings("okClick", byId(b, "ok").on[0].action);
 }

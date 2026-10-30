@@ -449,6 +449,19 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   answer for Zig from `std.zig.Ast` alone (std found via `zig env`), no language
   server; types of values are not inferred, which is where an LSP will add to it.
   The test rig moved to `core/test_rig.zig` so framework tests can share it.
+- UI designer in the IDE and event wiring (plan step 7): `Builder` gained
+  `Options.embedded` (panels live in the host's dock, toolbar as a "Designer"
+  panel, shortcuts bound per panel, `arrangeIn`, `setPanelsVisible`) and
+  `Options.handlers` (a `HandlerProvider`: list/choose/create/reveal) which adds
+  "..." and "Go" to each Events row. `ide/handlers.zig` (UI-free, tested on temp
+  projects) discovers handlers with `std.zig.Ast`, keeps `.zigide/actions.zon`,
+  generates `ui_actions.zig` (`Contexts` + `register`), plans creation, `pub`-ing
+  and renames as lists of file edits, and applies them through open editor
+  buffers when there are any. `ide/designer.zig` syncs a `.ui.zon` text tab and
+  the builder both ways; `ide/prompt.zig` is the one-line question bar (two-step
+  rename confirmation). Rename finds references by name (declaration, member
+  accesses in its file, `Container.name` elsewhere), not by type; moving a
+  handler is not done yet. The IDE app got a full menu bar of commands.
 - Restart (`ide/relaunch.zig`; `resolveExe` prefers `zig-out/bin/<name>` over a copy run from `.zig-cache/o/...`, which a rebuild leaves stale, Ctrl+Shift+F6 / Ctrl+Shift+F5 in the IDE app): spawn
   a detached copy of the executable (path with the " (deleted)" marker stripped)
   with the folder and `--open` files, then leave the loop. Scripted runs only log

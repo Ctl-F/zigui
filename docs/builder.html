@@ -56,6 +56,22 @@ const text = try builder.toZon(gpa); // current document as ZON; free it
 try builder.loadDocument(new_doc);   // swap the document</code></pre>
 <p><code>examples/workbench.zig</code> shows a complete embedding with a text pane.</p>
 
+<h3>Inside a host's dock (embedded)</h3>
+<p>With <code>.embedded = true</code> and <code>.dock = host_dock</code> the builder adds no menu bar and does not take over the window: its panels (<b>Designer</b> with the toolbar and status line, <b>Toolbox</b>, <b>Outline</b>, <b>Preview</b>, <b>Inspector</b>) are created in your dock. <code>builder.arrangeIn(center)</code> docks them (preview as a tab of <code>center</code>, inspector, outline and toolbox in a column on the right, the toolbar above the preview), and <code>builder.setPanelsVisible(bool)</code> hides or shows all of them. Shortcuts (Ctrl+Z, Ctrl+D, Delete, ...) are bound to each panel, so they work while focus is inside the builder and nowhere else. This is how the <a href="designer.html">IDE's designer</a> uses it.</p>
+
+<h3>Connecting events to handlers (<code>HandlerProvider</code>)</h3>
+<p>By default an event row in the Events tab is a text field for the action name. Give the builder a <code>HandlerProvider</code> and each row also gets <b>...</b> and <b>Go</b> buttons:</p>
+<pre><code>const Provider = struct {
+    pub fn list(self: *Provider, widget_type: []const u8, event_name: []const u8, out: *HandlerList) void {
+        out.add(id, "save", "App.onSave");           // id (yours), action name to store, menu text
+    }
+    pub fn choose(self: *Provider, id: u32) ?[]const u8 { ... }       // use candidate id; returns the action name
+    pub fn create(self: *Provider, node_id: []const u8, widget_type: []const u8, event_name: []const u8) ?[]const u8 { ... }
+    pub fn reveal(self: *Provider, action: []const u8) bool { ... }   // show its source
+};
+.handlers = HandlerProvider.bind(&amp;provider, Provider),</code></pre>
+<p><b>...</b> opens a menu of the candidates (the current one checked), <b>New handler...</b> and <b>No handler</b>; choosing sets the event on the node as an undoable edit. <b>Go</b> calls <code>reveal</code> with the field's action name. <code>list</code> runs every time the menu opens, so a provider can rescan its sources.</p>
+
 <h2>Limits</h2>
 <p>No zoom, no live text editing on the preview, no drag from the preview onto the inspector.</p>
 </main><script src="nav.js"></script></body></html>

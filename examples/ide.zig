@@ -36,6 +36,20 @@ const App = struct {
     status: *zigui.Label = undefined,
     lsp: *ide.lsp_assist.Assist = undefined,
     terminal: *ide.TerminalPanel = undefined,
+    designer: *ide.designer.Designer = undefined,
+    prompt: *ide.prompt.Prompt = undefined,
+    welcome_panel: *zigui.dock.Panel = undefined,
+    output_panel: *zigui.dock.Panel = undefined,
+    /// An edit command (Undo, Copy...) is forwarding itself as a key press; the
+    /// shortcut for it must not run it again if nothing used the key.
+    forwarding: bool = false,
+    /// Quit was asked while files had unsaved changes: asking again discards them.
+    quit_armed: bool = false,
+    /// Renaming a handler: what was found, and the new name once confirmed.
+    rename_scan: ?ide.handlers.Scan = null,
+    rename_index: usize = 0,
+    rename_pending: [96]u8 = undefined,
+    rename_pending_len: usize = 0,
     /// Leave the main loop (set when a new instance has been started).
     quit: bool = false,
     /// Scripted (headless) runs only log what a restart would start: the new
@@ -48,6 +62,10 @@ const App = struct {
     search_panel: *zigui.dock.Panel = undefined,
 
     fn openFile(self: *App, path: []const u8) void {
+        if (ide.designer.isUiDocument(path)) {
+            self.designer.open(path) catch |err| self.setStatus("could not open {s} in the designer: {s}", .{ path, @errorName(err) });
+            return;
+        }
         self.openAt(path, 0, 0);
     }
 
@@ -106,24 +124,188 @@ const App = struct {
         self.status.setText(text) catch {};
     }
 
+    /// Make panel `p` visible and bring it forward.
+    fn showPanel(self: *App, p: *zigui.dock.Panel) void {
+        self.dock.showPanel(p) catch {};
+        self.dock.activatePanel(p);
+    }
+
+    /// Edit commands act on whatever has focus by pressing the key it would
+    /// have used (so they work in editors, text fields and the designer alike).
+    fn forward(self: *App, key: zigui.keys.Key, mods: zigui.keys.Mods) void {
+        if (self.forwarding) return;
+        self.forwarding = true;
+        defer self.forwarding = false;
+        self.ui.key(key, mods, true, false);
+        self.ui.key(key, mods, false, false);
+    }
+
+    fn focusInTerminal(self: *App) bool {
+        return self.ui.focused() != null and self.ui.focused().?.eql(self.terminal.term.node);
+    }
+
+    fn editCommand(self: *App, name: []const u8) void {
+        const K = zigui.keys.Key;
+        // A terminal copies and pastes with Ctrl+Shift (Ctrl+C is an interrupt there).
+        if (self.focusInTerminal()) {
+            if (std.mem.eql(u8, name, "edit.copy")) return self.forward(K.c, .{ .ctrl = true, .shift = true });
+            if (std.mem.eql(u8, name, "edit.paste")) return self.forward(K.v, .{ .ctrl = true, .shift = true });
+            return;
+        }
+        if (std.mem.eql(u8, name, "edit.undo")) self.forward(K.z, .{ .ctrl = true }) else if (std.mem.eql(u8, name, "edit.redo")) self.forward(K.z, .{ .ctrl = true, .shift = true }) else if (std.mem.eql(u8, name, "edit.cut")) self.forward(K.x, .{ .ctrl = true }) else if (std.mem.eql(u8, name, "edit.copy")) self.forward(K.c, .{ .ctrl = true }) else if (std.mem.eql(u8, name, "edit.paste")) self.forward(K.v, .{ .ctrl = true }) else if (std.mem.eql(u8, name, "edit.select_all")) self.forward(K.a, .{ .ctrl = true }) else if (std.mem.eql(u8, name, "edit.find")) self.forward(K.f, .{ .ctrl = true }) else if (std.mem.eql(u8, name, "edit.replace")) self.forward(K.h, .{ .ctrl = true });
+    }
+
     fn onCommand(self: *App, ev: *zigui.Event) void {
         const name = ev.text;
-        if (std.mem.eql(u8, name, "ide.restart")) self.restartNow() else if (std.mem.eql(u8, name, "ide.build_restart")) {
+        const eq = std.mem.eql;
+        if (std.mem.startsWith(u8, name, "edit.")) return self.editCommand(name);
+        if (!eq(u8, name, "file.quit")) self.quit_armed = false;
+        if (eq(u8, name, "ide.restart")) {
+            self.restartNow();
+        } else if (eq(u8, name, "ide.build_restart")) {
             self.runBuild("");
             self.restart_after_build = self.output.running;
-        } else if (std.mem.eql(u8, name, "ide.build")) self.runBuild("") else if (std.mem.eql(u8, name, "ide.run")) self.runBuild("run") else if (std.mem.eql(u8, name, "ide.test")) self.runBuild("test") else if (std.mem.eql(u8, name, "file.save")) {
+        } else if (eq(u8, name, "ide.build")) {
+            self.runBuild("");
+        } else if (eq(u8, name, "ide.run")) {
+            self.runBuild("run");
+        } else if (eq(u8, name, "ide.test")) {
+            self.runBuild("test");
+        } else if (eq(u8, name, "file.save")) {
             _ = self.docs.saveActive();
-        } else if (std.mem.eql(u8, name, "view.terminal")) {
-            self.dock.showPanel(self.terminal_panel) catch {};
-            self.dock.activatePanel(self.terminal_panel);
+        } else if (eq(u8, name, "file.save_all")) {
+            _ = self.docs.saveAll();
+        } else if (eq(u8, name, "file.close")) {
+            if (self.docs.active()) |d| self.dock.requestClose(d.panel);
+        } else if (eq(u8, name, "file.new_ui")) {
+            self.prompt.ask("New UI document (a path ending in .ui.zon):", "ui/untitled.ui.zon", .bind(self, onNewUiName));
+        } else if (eq(u8, name, "file.design")) {
+            const d = self.docs.active() orelse return self.setStatus("open a .zon document to design it", .{});
+            if (!std.mem.endsWith(u8, d.path, ".zon")) return self.setStatus("{s} is not a .zon document", .{d.path});
+            self.designer.attach(d) catch |err| self.setStatus("cannot design {s}: {s}", .{ d.path, @errorName(err) });
+        } else if (eq(u8, name, "file.refresh")) {
+            self.files.reload() catch {};
+        } else if (eq(u8, name, "file.quit")) {
+            if (self.docs.anyDirty() and !self.quit_armed) {
+                self.quit_armed = true;
+                self.setStatus("unsaved changes: Save All first, or choose Quit again to discard them", .{});
+            } else self.quit = true;
+        } else if (eq(u8, name, "view.files")) {
+            self.showPanel(self.files_panel);
+        } else if (eq(u8, name, "view.search")) {
+            self.showPanel(self.search_panel);
+        } else if (eq(u8, name, "view.output")) {
+            self.showPanel(self.output_panel);
+        } else if (eq(u8, name, "view.terminal")) {
+            self.showPanel(self.terminal_panel);
             self.terminal.focus();
-        } else if (std.mem.eql(u8, name, "editor.definition")) {
+        } else if (eq(u8, name, "view.welcome")) {
+            self.showPanel(self.welcome_panel);
+        } else if (eq(u8, name, "view.designer")) {
+            if (self.designer.builder) |b| b.setPanelsVisible(true) else self.setStatus("open a .ui.zon document first (File > New UI Document)", .{});
+        } else if (eq(u8, name, "editor.definition")) {
             if (self.docs.active()) |d| self.lsp.gotoDefinition(d.editor);
-        } else if (std.mem.eql(u8, name, "project.search")) {
-            self.dock.showPanel(self.search_panel) catch {};
-            self.dock.activatePanel(self.search_panel);
+        } else if (eq(u8, name, "project.search")) {
+            self.showPanel(self.search_panel);
             self.ui.setFocus(self.search.field.node);
+        } else if (eq(u8, name, "refactor.rename_handler")) {
+            self.beginRename();
+        } else if (eq(u8, name, "refactor.regenerate")) {
+            self.designer.service.commit() catch |err| return self.setStatus("could not regenerate {s}: {s}", .{ ide.handlers.binding_file, @errorName(err) });
+            self.setStatus("regenerated {s}", .{ide.handlers.binding_file});
         }
+    }
+
+    // ---- UI documents ----
+
+    fn onNewUiName(self: *App, text: []const u8) void {
+        var name = std.mem.trim(u8, text, " \t");
+        if (name.len == 0) return;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (!std.mem.endsWith(u8, name, ".ui.zon")) name = std.fmt.bufPrint(&buf, "{s}.ui.zon", .{name}) catch return;
+        if (self.project.readFile(self.gpa, name, 16)) |existing| {
+            self.gpa.free(existing);
+            return self.setStatus("{s} already exists", .{name});
+        } else |_| {}
+        if (std.fs.path.dirname(name)) |dir| self.project.dir.createDirPath(self.io, dir) catch {};
+        var doc = zigui.uidoc.Doc.init(self.gpa) catch return;
+        defer doc.deinit();
+        const zon = doc.toZon(self.gpa) catch return;
+        defer self.gpa.free(zon);
+        self.project.writeFile(name, zon) catch |err| return self.setStatus("could not create {s}: {s}", .{ name, @errorName(err) });
+        self.files.reload() catch {};
+        self.designer.open(name) catch |err| self.setStatus("could not open {s}: {s}", .{ name, @errorName(err) });
+    }
+
+    // ---- renaming a handler ----
+
+    /// The identifier around byte offset `at` of `text`.
+    fn wordAt(text: []const u8, at: usize) []const u8 {
+        var s = @min(at, text.len);
+        var e = s;
+        while (s > 0 and (std.ascii.isAlphanumeric(text[s - 1]) or text[s - 1] == '_')) s -= 1;
+        while (e < text.len and (std.ascii.isAlphanumeric(text[e]) or text[e] == '_')) e += 1;
+        return text[s..e];
+    }
+
+    fn beginRename(self: *App) void {
+        const d = self.docs.active() orelse return self.setStatus("open the file with the handler and put the caret on its name", .{});
+        const core = d.editor.core();
+        const head = core.primaryHead();
+        const text = d.editor.textAlloc(self.gpa) catch return;
+        defer self.gpa.free(text);
+        const word = wordAt(text, head);
+        if (word.len == 0) return self.setStatus("put the caret on the handler's name", .{});
+        if (self.rename_scan) |*old| old.deinit();
+        self.rename_scan = ide.handlers.scan(self.gpa, self.project) catch null;
+        const sc = &(self.rename_scan orelse return);
+        var found: ?usize = null;
+        for (sc.handlers, 0..) |h, i| {
+            if (std.mem.eql(u8, h.file, d.path) and std.mem.eql(u8, h.name, word)) found = i;
+        }
+        const i = found orelse return self.setStatus("{s} is not an event handler (a method taking *Event)", .{word});
+        self.rename_index = i;
+        self.rename_pending_len = 0;
+        var buf: [160]u8 = undefined;
+        self.prompt.ask(std.fmt.bufPrint(&buf, "Rename handler {s} to:", .{word}) catch "Rename handler to:", word, .bind(self, onRenameAnswer));
+    }
+
+    /// First Enter: say what would change. Enter again with the same name: do it.
+    fn onRenameAnswer(self: *App, answer: []const u8) void {
+        const sc = &(self.rename_scan orelse return);
+        const h = sc.handlers[self.rename_index];
+        const new_name = std.mem.trim(u8, answer, " \t");
+        if (new_name.len == 0 or std.mem.eql(u8, new_name, h.name)) return;
+        if (!ide.handlers.isIdentifier(new_name)) return self.setStatus("{s} is not a valid name", .{new_name});
+        const confirmed = self.rename_pending_len == new_name.len and std.mem.eql(u8, self.rename_pending[0..new_name.len], new_name);
+        if (confirmed) {
+            self.rename_pending_len = 0;
+            self.designer.service.rename(h, new_name) catch |err| return self.setStatus("rename failed: {s}", .{@errorName(err)});
+            self.setStatus("renamed {s} to {s}; references and {s} updated", .{ h.name, new_name, ide.handlers.binding_file });
+            return;
+        }
+        var refs: std.ArrayListUnmanaged(ide.handlers.Reference) = .empty;
+        defer {
+            for (refs.items) |r| {
+                self.gpa.free(r.file);
+                self.gpa.free(r.text);
+            }
+            refs.deinit(self.gpa);
+        }
+        var plan = ide.handlers.planRename(self.gpa, self.project, h, new_name, &refs) catch |err| return self.setStatus("cannot rename: {s}", .{@errorName(err)});
+        plan.deinit();
+        var files: usize = 0;
+        var last: []const u8 = "";
+        for (refs.items) |r| {
+            if (!std.mem.eql(u8, r.file, last)) files += 1;
+            last = r.file;
+        }
+        if (new_name.len > self.rename_pending.len) return;
+        @memcpy(self.rename_pending[0..new_name.len], new_name);
+        self.rename_pending_len = new_name.len;
+        var buf: [200]u8 = undefined;
+        self.prompt.setTitle(std.fmt.bufPrint(&buf, "{s} -> {s}: {d} places in {d} files. Enter again to apply:", .{ h.name, new_name, refs.items.len, files }) catch "Enter again to apply:");
+        self.prompt.keepOpen();
     }
 
     fn poll(self: *App) void {
@@ -136,8 +318,9 @@ const App = struct {
         self.docs.poll();
         self.lsp.poll();
         self.terminal.poll();
+        self.designer.poll();
         const doc_msg = self.docs.statusText();
-        const msg = if (doc_msg.len > 0) doc_msg else self.lsp.statusText();
+        const msg = if (doc_msg.len > 0) doc_msg else if (self.designer.problemText().len > 0) self.designer.problemText() else self.lsp.statusText();
         if (!std.mem.eql(u8, msg, self.status.props.text.bytes)) self.status.setText(msg) catch {};
     }
 };
@@ -154,15 +337,32 @@ fn runCommand(app: *App, ui: *Ui, cmd: []const u8) void {
     const verb = cmd[0..sp];
     const rest = cmd[sp + 1 ..];
     if (std.mem.eql(u8, verb, "open")) {
+        // path[:line[:col]]
         var path = rest;
         var line: u32 = 0;
-        if (std.mem.lastIndexOfScalar(u8, rest, ':')) |c| {
-            if (std.fmt.parseInt(u32, rest[c + 1 ..], 10)) |l| {
-                path = rest[0..c];
-                line = l;
-            } else |_| {}
+        var col: u32 = 1;
+        var nums: [2]u32 = undefined;
+        var n: usize = 0;
+        while (n < 2) {
+            const c = std.mem.lastIndexOfScalar(u8, path, ':') orelse break;
+            const v = std.fmt.parseInt(u32, path[c + 1 ..], 10) catch break;
+            nums[n] = v;
+            n += 1;
+            path = path[0..c];
         }
-        app.openAt(path, line, 1);
+        if (n == 1) line = nums[0];
+        if (n == 2) {
+            line = nums[1];
+            col = nums[0];
+        }
+        app.openAt(path, line, col);
+    } else if (std.mem.eql(u8, verb, "cmd")) {
+        _ = ui.invokeCommand(rest);
+    } else if (std.mem.eql(u8, verb, "ask")) {
+        // Answer the prompt bar: type the text and press Enter.
+        ui.textInput(rest);
+        ui.key(.enter, .{}, true, false);
+        ui.key(.enter, .{}, false, false);
     } else if (std.mem.eql(u8, verb, "search")) {
         app.dock.activatePanel(app.search_panel);
         app.search.setQuery(rest);
@@ -273,6 +473,7 @@ pub fn main(init: std.process.Init) !void {
 
     const scripted = init.environ_map.get("ZIGUI_SCREENSHOT") != null;
     var app: App = .{ .dry_restart = scripted, .gpa = gpa, .io = io, .ui = &ui, .project = &project, .dock = undefined };
+    defer if (app.rename_scan) |*sc| sc.deinit();
 
     ui.tree.get(ui.tree.root).?.style = .{ .direction = .column };
     ui.tree.get(ui.tree.root).?.visual = .{ .background = zigui.Color.rgb(24, 25, 29) };
@@ -282,19 +483,23 @@ pub fn main(init: std.process.Init) !void {
     const bar = try zigui.MenuBar.create(&ui, ui.tree.root, .{});
     defer bar.destroy();
     
-    try bar.addMenu("File", &.{
-        .{ .label = "Save", .command = "file.save" },
-    }, null);
-    
     const dock = try zigui.Dock.create(&ui, ui.tree.root, .{ .style = .{ .grow = 1 } });
     app.dock = dock;
+    app.prompt = try ide.prompt.Prompt.create(&ui, ui.tree.root);
+    defer app.prompt.destroy();
     app.status = try ui.add(zigui.Label, ui.tree.root, .{ .style = .{ .padding = zigui.style.Edges.xy(8, 3), .shrink = 0 } });
 
     // Center: a welcome tab that documents open beside.
     const welcome = try dock.addPanel("Welcome");
+    app.welcome_panel = welcome;
     ui.tree.get(welcome.content).?.style = .{ .direction = .column, .grow = 1, .padding = zigui.style.Edges.all(16), .gap = zigui.Length.px(8) };
     _ = try ui.add(zigui.Label, welcome.content, .{ .text = project.name, .size = 20 });
-    _ = try ui.add(zigui.Label, welcome.content, .{ .text = "Double-click a file to open it. Ctrl+S saves, Ctrl+Shift+F searches the project, F5 runs, Ctrl+B builds." });
+    _ = try ui.add(zigui.Label, welcome.content, .{ .text = "Double-click a file to open it; a .ui.zon file opens in the UI designer (File > New UI Document to start one)." });
+    for ([_][]const u8{
+        "Ctrl+S save   Ctrl+Shift+S save all   Ctrl+W close   Ctrl+F find   Ctrl+H replace   Ctrl+Shift+F find in project",
+        "F5 run   Ctrl+B build   Ctrl+Shift+T test   Ctrl+Shift+F5 build and restart   Ctrl+Shift+F6 restart the IDE",
+        "F12 go to definition   Ctrl+Space suggestions   Ctrl+` terminal   F2 rename handler",
+    }) |line| _ = try ui.add(zigui.Label, welcome.content, .{ .text = line, .font = .mono });
     try dock.dockTab(welcome, null);
 
     // Suggestions that work with no language server: words in the file, plus
@@ -334,6 +539,8 @@ pub fn main(init: std.process.Init) !void {
     app.docs.enableHints(hover, signature);
 
     app.docs.enableLsp(lsp);
+    app.designer = try ide.designer.Designer.create(&ui, dock, app.docs, &project, io, .{ .center = welcome });
+    defer app.designer.destroy();
 
     const files_panel = try dock.addPanel("Files");
     app.files_panel = files_panel;
@@ -351,6 +558,7 @@ pub fn main(init: std.process.Init) !void {
     const output_panel = try dock.addPanel("Output");
     app.output = try ide.OutputPanel.create(&ui, output_panel.content, .{ .style = .{ .grow = 1 }, .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt) });
     defer app.output.destroy();
+    app.output_panel = output_panel;
     try dock.dockRoot(output_panel, .bottom, 220);
 
     // The terminal shares the bottom group with Output.
@@ -361,32 +569,121 @@ pub fn main(init: std.process.Init) !void {
     try dock.dockTab(terminal_panel, output_panel);
     dock.activatePanel(output_panel);
 
+    // Commands (menus and shortcuts refer to them by name).
     inline for (.{
+        .{ "file.new_ui", "New UI Document..." },
+        .{ "file.design", "Design This Document" },
+        .{ "file.save", "Save" },
+        .{ "file.save_all", "Save All" },
+        .{ "file.close", "Close Document" },
+        .{ "file.refresh", "Refresh Files" },
+        .{ "file.quit", "Quit" },
+        .{ "edit.undo", "Undo" },
+        .{ "edit.redo", "Redo" },
+        .{ "edit.cut", "Cut" },
+        .{ "edit.copy", "Copy" },
+        .{ "edit.paste", "Paste" },
+        .{ "edit.select_all", "Select All" },
+        .{ "edit.find", "Find..." },
+        .{ "edit.replace", "Replace..." },
+        .{ "project.search", "Find in Project..." },
+        .{ "editor.definition", "Go to Definition" },
+        .{ "refactor.rename_handler", "Rename Event Handler..." },
+        .{ "refactor.regenerate", "Regenerate ui_actions.zig" },
+        .{ "view.files", "Files" },
+        .{ "view.search", "Search" },
+        .{ "view.output", "Output" },
+        .{ "view.terminal", "Terminal" },
+        .{ "view.designer", "UI Designer Panels" },
+        .{ "view.welcome", "Welcome and Shortcuts" },
         .{ "ide.build", "Build" },
         .{ "ide.run", "Run" },
+        .{ "ide.test", "Run Tests" },
+        .{ "ide.build_restart", "Build and Restart the IDE" },
         .{ "ide.restart", "Restart the IDE" },
-        .{ "ide.build_restart", "Build and restart the IDE" },
-        .{ "ide.test", "Run tests" },
-        .{ "file.save", "Save" },
-        .{ "project.search", "Find in project" },
-        .{ "editor.definition", "Go to definition" },
-        .{ "view.terminal", "Terminal" },
     }) |c| {
-        _ = try ui.registerCommand(c[0], .{ 
-            .title = c[1], 
+        _ = try ui.registerCommand(c[0], .{
+            .title = c[1],
             .run = zigui.event.Callback.bind(&app, App.onCommand),
         });
     }
-    
-    try ui.bindShortcut("f5", "ide.run", .app, null);
-    try ui.bindShortcut("mod+b", "ide.build", .app, null);
-    try ui.bindShortcut("ctrl+shift+f6", "ide.restart", .app, null);
-    try ui.bindShortcut("ctrl+shift+f5", "ide.build_restart", .app, null);
-    try ui.bindShortcut("mod+shift+t", "ide.test", .app, null);
-    try ui.bindShortcut("mod+s", "file.save", .app, null);
-    try ui.bindShortcut("mod+shift+f", "project.search", .app, null);
-    try ui.bindShortcut("f12", "editor.definition", .app, null);
-    try ui.bindShortcut("mod+`", "view.terminal", .app, null);
+
+    inline for (.{
+        .{ "f5", "ide.run" },
+        .{ "mod+b", "ide.build" },
+        .{ "ctrl+shift+f6", "ide.restart" },
+        .{ "ctrl+shift+f5", "ide.build_restart" },
+        .{ "mod+shift+t", "ide.test" },
+        .{ "mod+s", "file.save" },
+        .{ "mod+shift+s", "file.save_all" },
+        .{ "mod+w", "file.close" },
+        .{ "mod+z", "edit.undo" },
+        .{ "mod+shift+z", "edit.redo" },
+        .{ "mod+x", "edit.cut" },
+        .{ "mod+c", "edit.copy" },
+        .{ "mod+v", "edit.paste" },
+        .{ "mod+a", "edit.select_all" },
+        .{ "mod+f", "edit.find" },
+        .{ "mod+h", "edit.replace" },
+        .{ "mod+shift+f", "project.search" },
+        .{ "f12", "editor.definition" },
+        .{ "f2", "refactor.rename_handler" },
+        .{ "mod+`", "view.terminal" },
+    }) |b| {
+        ui.bindShortcut(b[0], b[1], .app, null) catch |err| std.log.warn("cannot bind {s}: {s}", .{ b[0], @errorName(err) });
+    }
+
+    // The menu bar.
+    try bar.addMenu("File", &.{
+        .{ .label = "New UI Document...", .command = "file.new_ui" },
+        .{ .label = "Design This Document", .command = "file.design" },
+        .{ .separator = true },
+        .{ .label = "Save", .command = "file.save" },
+        .{ .label = "Save All", .command = "file.save_all" },
+        .{ .label = "Close Document", .command = "file.close" },
+        .{ .separator = true },
+        .{ .label = "Refresh Files", .command = "file.refresh" },
+        .{ .separator = true },
+        .{ .label = "Build and Restart the IDE", .command = "ide.build_restart" },
+        .{ .label = "Restart the IDE", .command = "ide.restart" },
+        .{ .label = "Quit", .command = "file.quit" },
+    }, null);
+    try bar.addMenu("Edit", &.{
+        .{ .label = "Undo", .command = "edit.undo" },
+        .{ .label = "Redo", .command = "edit.redo" },
+        .{ .separator = true },
+        .{ .label = "Cut", .command = "edit.cut" },
+        .{ .label = "Copy", .command = "edit.copy" },
+        .{ .label = "Paste", .command = "edit.paste" },
+        .{ .label = "Select All", .command = "edit.select_all" },
+        .{ .separator = true },
+        .{ .label = "Find...", .command = "edit.find" },
+        .{ .label = "Replace...", .command = "edit.replace" },
+        .{ .label = "Find in Project...", .command = "project.search" },
+        .{ .separator = true },
+        .{ .label = "Go to Definition", .command = "editor.definition" },
+    }, null);
+    try bar.addMenu("Refactor", &.{
+        .{ .label = "Rename Event Handler...", .command = "refactor.rename_handler" },
+        .{ .label = "Regenerate ui_actions.zig", .command = "refactor.regenerate" },
+    }, null);
+    try bar.addMenu("View", &.{
+        .{ .label = "Files", .command = "view.files" },
+        .{ .label = "Search", .command = "view.search" },
+        .{ .label = "Output", .command = "view.output" },
+        .{ .label = "Terminal", .command = "view.terminal" },
+        .{ .separator = true },
+        .{ .label = "UI Designer Panels", .command = "view.designer" },
+        .{ .separator = true },
+        .{ .label = "Welcome and Shortcuts", .command = "view.welcome" },
+    }, null);
+    try bar.addMenu("Build", &.{
+        .{ .label = "Build", .command = "ide.build" },
+        .{ .label = "Run", .command = "ide.run" },
+        .{ .label = "Run Tests", .command = "ide.test" },
+        .{ .separator = true },
+        .{ .label = "Build and Restart the IDE", .command = "ide.build_restart" },
+    }, null);
 
     for (reopen) |rel| _ = app.docs.open(rel, 0, 0) catch {};
 

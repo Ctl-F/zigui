@@ -47,6 +47,7 @@ const Style = @import("../core/style.zig").Style;
 const Node = @import("../core/tree.zig").Node;
 const label = @import("label.zig");
 const Editor = @import("../editor/editor.zig").Editor;
+const editor_mod = @import("../editor/editor.zig");
 const Selection = @import("../editor/selection.zig").Selection;
 const syntax = @import("../editor/syntax.zig");
 const Highlighter = @import("../editor/highlighter.zig").Highlighter;
@@ -593,6 +594,23 @@ pub const CodeEditor = struct {
         for (self.edit_hooks) |h| {
             if (h) |cb| cb.invoke(ev);
         }
+    }
+
+    /// Replace several ranges at once, as one undo step: `edits` must not overlap
+    /// (any order). The selection keeps pointing at the same text. Used by
+    /// refactors that change a file the user has open.
+    pub fn applyEdits(self: *CodeEditor, edits: []const editor_mod.Edit) !void {
+        if (self.props.read_only or edits.len == 0) return;
+        const sorted = try self.ui.gpa.dupe(editor_mod.Edit, edits);
+        defer self.ui.gpa.free(sorted);
+        std.mem.sort(editor_mod.Edit, sorted, {}, struct {
+            fn less(_: void, x: editor_mod.Edit, y: editor_mod.Edit) bool {
+                return x.start < y.start;
+            }
+        }.less);
+        const changed = try self.editor.replaceRanges(self.ui.now_ms, sorted);
+        var ev: event.Event = .{ .kind = .key_down, .target = self.node, .current = self.node };
+        self.afterEdit(&ev, changed);
     }
 
     /// Replace [start, end) with `text` and put the caret after it, as one

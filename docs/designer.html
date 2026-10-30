@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>UI designer and event handlers - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>UI designer and event handlers (in the IDE)</h1>
+<p>In the IDE a <code>.ui.zon</code> file is both a text document and a visual design, and the Events tab connects each event to a function in your project: pick an existing handler, create a new one, jump to its source, and rename it later with its references updated.</p>
+
+<h2>Opening and creating UI documents</h2>
+<ul>
+<li><b>File &gt; New UI Document...</b> asks for a path (default <code>ui/untitled.ui.zon</code>), writes an empty document and opens it.</li>
+<li>Double-click a <code>.ui.zon</code> file in Files, or use <b>File &gt; Design This Document</b> on any open <code>.zon</code> tab.</li>
+<li>The text opens as a normal editor tab; the builder's panels (<b>Designer</b> toolbar, <b>Toolbox</b>, <b>Outline</b>, <b>Preview</b>, <b>Inspector</b>) are docked beside it: the preview tabs with the text, the rest in a column on the right. They are ordinary dock panels, so rearrange or float them; <b>View &gt; UI Designer Panels</b> brings them back, and closing the document's text tab hides them.</li>
+</ul>
+<h2>Two views, one file</h2>
+<p>Visual edits rewrite the text (one undo step in the text editor, and the tab shows the modified bullet); typing in the text re-reads the document whenever it parses. When it does not, the status line says why (<code>ui/main.ui.zon: line 4:9: ...</code>) and the design keeps its last good state. <b>Save</b> (Ctrl+S, the designer's Save button) saves the file. Undo in the design (Ctrl+Z with focus in a designer panel) and in the text are separate histories. Edit &gt; Undo/Redo/Cut/Copy/Paste act on whatever has focus.</p>
+
+<h2>Events and handlers</h2>
+<p>A document stores an <i>action name</i> per event (<code>.on = .{ .click = "okClick" }</code>); the program turns names into calls. The IDE owns that mapping:</p>
+<table>
+<tr><th>Piece</th><th>What it is</th></tr>
+<tr><td>Your handlers</td><td>Ordinary methods you write and keep where you like: <code>pub fn onOk(self: *App, ev: *zigui.event.Event) void</code> in a struct, or <code>fn (ev: *Event) void</code> anywhere. <code>Event</code> may be spelled <code>zigui.event.Event</code>, <code>zigui.Event</code> or plain <code>Event</code>.</td></tr>
+<tr><td><code>.zigide/actions.zon</code></td><td>The manifest: action name &rarr; struct, function and file, plus the default struct for new handlers. Keep it in version control.</td></tr>
+<tr><td><code>ui_actions.zig</code> (project root)</td><td><b>Generated, do not edit.</b> <code>pub const Contexts</code> has one pointer per struct that has bound methods, and <code>register(actions, gpa, contexts)</code> puts every action into a <code>zigui.uiload.Actions</code>.</td></tr>
+</table>
+<pre><code>// in your program
+const ui_actions = @import("ui_actions.zig");
+var actions: zigui.uiload.Actions = .{};
+defer actions.deinit(gpa);
+try ui_actions.register(&amp;actions, gpa, .{ .app = &amp;app });          // one field per struct, snake_case
+const inst = try zigui.uiload.instantiate(&amp;ui, parent, &amp;doc, .{ .actions = &amp;actions });</code></pre>
+<h3>The Events tab</h3>
+<p>Select a widget, open the <b>Events</b> section of the inspector. Each event has a text field (type an action name by hand if you like) and two buttons:</p>
+<ul>
+<li><b>...</b> lists every handler in the project (<code>App.onSave</code>, ...). Choosing one binds the event to it; if the function or its struct is not <code>pub</code> the IDE makes it so (the generated file imports it from another file), and the action is named after the function unless a binding already exists.</li>
+<li><b>...</b> &gt; <b>New handler...</b> adds a stub method to the project's default struct (the one that already has the most handlers, remembered in the manifest; if there is none, a new <code>ui_handlers.zig</code> with <code>pub const Handlers = struct {...}</code> is created) and opens it at the new function. The action is named from the widget's id and the event (<code>okButton</code> + click = <code>okButtonClick</code>, function <code>onOkButtonClick</code>; a number is added if the name is taken). If your file has no <code>zigui</code> import, one is added at the top.</li>
+<li><b>...</b> &gt; <b>No handler</b> clears the event (undoable). <b>Go</b> opens the bound handler's source.</li>
+</ul>
+<p>Edits to a file that is open in an editor go into its buffer (so they are undoable there) and the file is saved so the disk, the manifest and <code>ui_actions.zig</code> agree; other files are rewritten on disk.</p>
+<h3>Renaming a handler</h3>
+<p>Put the caret on a handler's name and choose <b>Refactor &gt; Rename Event Handler...</b> (F2). A bar asks for the new name; <b>Enter</b> shows what it would change (<i>onReset -&gt; onClear: 5 places in 2 files</i>) and <b>Enter again</b> applies it. It changes the declaration, member accesses in its own file, and <code>Struct.name</code> in files that mention the struct, then updates the manifest and regenerates <code>ui_actions.zig</code>. The <i>action name</i> is unchanged, so UI documents need no edits. References are found by name, not by type: <code>value.onReset(...)</code> through a variable in another file is not touched (the preview count tells you how many it will change; review the diff). Moving a handler to another struct or file is planned. <b>Refactor &gt; Regenerate ui_actions.zig</b> rewrites the generated file from the manifest.</p>
+
+<h2>The pieces (for tools)</h2>
+<ul>
+<li><code>ide.handlers</code> (UI-free): <code>scan</code> (discover handlers and structs with <code>std.zig.Ast</code>), <code>Manifest</code>, <code>generateBindings</code>, <code>planCreate</code>, <code>planBind</code>, <code>planRename</code> (a list of <code>FileEdit</code>s), and <code>Handlers</code> which applies plans through an optional open-buffer hook, updates the manifest and regenerates the binding file.</li>
+<li><code>ide.designer.Designer</code>: the document sync, the builder lifecycle and the <a href="builder.html">HandlerProvider</a> implementation.</li>
+<li><code>ide.prompt.Prompt</code>: the one-line question bar (<code>ask(title, initial, hook)</code>, <code>setTitle</code>, <code>keepOpen</code>).</li>
+</ul>
+</main><script src="nav.js"></script></body></html>

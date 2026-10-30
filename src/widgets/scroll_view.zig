@@ -186,7 +186,7 @@ pub const ScrollView = struct {
         const lim = self.limits();
         if (lim.y <= 0) return null;
         const content = view.h + lim.y;
-        const h = std.math.clamp(view.h * view.h / content, min_thumb, view.h);
+        const h = std.math.clamp(view.h * view.h / content, @min(min_thumb, view.h), view.h);
         const n = self.ui.tree.get(self.node).?;
         const t = if (lim.y > 0) n.scroll_y / lim.y else 0;
         return .{ .x = view.w - bar_w - bar_margin, .y = t * (view.h - h), .w = bar_w, .h = h };
@@ -197,7 +197,7 @@ pub const ScrollView = struct {
         const lim = self.limits();
         if (lim.x <= 0) return null;
         const content = view.w + lim.x;
-        const w = std.math.clamp(view.w * view.w / content, min_thumb, view.w);
+        const w = std.math.clamp(view.w * view.w / content, @min(min_thumb, view.w), view.w);
         const n = self.ui.tree.get(self.node).?;
         const t = if (lim.x > 0) n.scroll_x / lim.x else 0;
         return .{ .x = t * (view.w - w), .y = view.h - bar_w - bar_margin, .w = w, .h = bar_w };
