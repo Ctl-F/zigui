@@ -596,6 +596,18 @@ pub const CodeEditor = struct {
         }
     }
 
+    /// Change the text size, tab width, line numbers and folding of a live editor.
+    pub fn configure(self: *CodeEditor, size: f32, tab_width: u32, line_numbers: bool, folding_on: bool) void {
+        self.props.size = size;
+        self.props.tab_width = tab_width;
+        self.props.line_numbers = line_numbers;
+        self.props.folding = folding_on;
+        if (!folding_on) while (self.folds.items.len > 0) self.unfold(self.folds.items[0].start);
+        self.ui.tree.markDirty(self.node, .{ .layout = true, .paint = true });
+        self.repaint = true;
+        self.resetHighlighting();
+    }
+
     /// Replace several ranges at once, as one undo step: `edits` must not overlap
     /// (any order). The selection keeps pointing at the same text. Used by
     /// refactors that change a file the user has open.

@@ -45,6 +45,7 @@
       ["ide.html", "IDE pieces"],
       ["lsp.html", "Language servers"],
       ["designer.html", "UI designer and handlers"],
+      ["settings.html", "Settings, keys, sessions"],
     ]],
     ["Project", [
       ["maintaining.html", "Maintaining these docs"],

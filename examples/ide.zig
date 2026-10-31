@@ -23,6 +23,30 @@ const stb = @import("zigui_stb");
 const Ui = zigui.Ui;
 const ide = zigui.ide; // hello
 
+/// The IDE's key bindings (the `mod` key is Ctrl, or Cmd on macOS); users change them in a keymap file.
+const default_bindings = [_][2][]const u8{
+    .{ "f5", "ide.run" },
+    .{ "mod+b", "ide.build" },
+    .{ "ctrl+shift+f6", "ide.restart" },
+    .{ "ctrl+shift+f5", "ide.build_restart" },
+    .{ "mod+shift+t", "ide.test" },
+    .{ "mod+s", "file.save" },
+    .{ "mod+shift+s", "file.save_all" },
+    .{ "mod+w", "file.close" },
+    .{ "mod+z", "edit.undo" },
+    .{ "mod+shift+z", "edit.redo" },
+    .{ "mod+x", "edit.cut" },
+    .{ "mod+c", "edit.copy" },
+    .{ "mod+v", "edit.paste" },
+    .{ "mod+a", "edit.select_all" },
+    .{ "mod+f", "edit.find" },
+    .{ "mod+h", "edit.replace" },
+    .{ "mod+shift+f", "project.search" },
+    .{ "f12", "editor.definition" },
+    .{ "f2", "refactor.rename_handler" },
+    .{ "mod+`", "view.terminal" },
+};
+
 const App = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -37,6 +61,13 @@ const App = struct {
     lsp: *ide.lsp_assist.Assist = undefined,
     terminal: *ide.TerminalPanel = undefined,
     designer: *ide.designer.Designer = undefined,
+    environ: ?*const std.process.Environ.Map = null,
+    /// Settings and keymaps as last read (the strings live in its arena).
+    loaded: ide.settings.Loaded = undefined,
+    /// The theme's own text size, to go back to when a setting is removed.
+    base_font_size: f32 = 14,
+    /// The arrangement the IDE started with (before a saved session changed it), for Reset Panel Layout.
+    default_layout: []u8 = &.{},
     prompt: *ide.prompt.Prompt = undefined,
     welcome_panel: *zigui.dock.Panel = undefined,
     output_panel: *zigui.dock.Panel = undefined,
@@ -55,6 +86,8 @@ const App = struct {
     /// Scripted (headless) runs only log what a restart would start: the new
     /// instance would inherit the script and restart again.
     dry_restart: bool = false,
+    /// Read and write the session (off in scripted runs unless ZIGUI_SESSION=1, so tests leave no trace).
+    session_enabled: bool = true,
     /// A build was started to be followed by a restart if it succeeds.
     restart_after_build: bool = false,
     terminal_panel: *zigui.dock.Panel = undefined,
@@ -94,6 +127,7 @@ const App = struct {
     /// Start a new copy of this program on the same folder and files, then quit.
     fn restartNow(self: *App) void {
         _ = self.docs.saveAll();
+        self.saveSession();
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
@@ -155,6 +189,58 @@ const App = struct {
         if (std.mem.eql(u8, name, "edit.undo")) self.forward(K.z, .{ .ctrl = true }) else if (std.mem.eql(u8, name, "edit.redo")) self.forward(K.z, .{ .ctrl = true, .shift = true }) else if (std.mem.eql(u8, name, "edit.cut")) self.forward(K.x, .{ .ctrl = true }) else if (std.mem.eql(u8, name, "edit.copy")) self.forward(K.c, .{ .ctrl = true }) else if (std.mem.eql(u8, name, "edit.paste")) self.forward(K.v, .{ .ctrl = true }) else if (std.mem.eql(u8, name, "edit.select_all")) self.forward(K.a, .{ .ctrl = true }) else if (std.mem.eql(u8, name, "edit.find")) self.forward(K.f, .{ .ctrl = true }) else if (std.mem.eql(u8, name, "edit.replace")) self.forward(K.h, .{ .ctrl = true });
     }
 
+    // ---- settings, keymap, session ----
+
+    /// Read the settings and keymaps (the global files, then the project's) and apply them.
+    fn reloadSettings(self: *App) void {
+        const fresh = ide.settings.load(self.gpa, self.io, self.project, self.environ) catch |err| return self.setStatus("could not read settings: {s}", .{@errorName(err)});
+        self.loaded.deinit();
+        self.loaded = fresh;
+        self.applySettings();
+    }
+
+    fn applySettings(self: *App) void {
+        const s = self.loaded.settings;
+        self.ui.theme.font_size = if (s.ui_font_size > 0) s.ui_font_size else self.base_font_size;
+        self.docs.defaults = .{ .size = s.editor_font_size, .tab_width = s.tab_width, .line_numbers = s.line_numbers, .folding = s.folding };
+        self.docs.applyDefaults();
+        self.ui.tree.markDirty(self.ui.tree.root, .{ .layout = true, .paint = true });
+        if (s.problems > 0) self.setStatus("settings: {d} entries were not understood and were ignored", .{s.problems});
+    }
+
+    fn applyKeymap(self: *App) void {
+        if (self.loaded.keymap.len == 0) return;
+        const report = self.ui.loadKeymap(self.loaded.keymap);
+        if (report.errors > 0) self.setStatus("keybindings: {d} lines were not understood (first: line {d})", .{ report.errors, report.first_error_line });
+    }
+
+    /// Open a file under `.zigide/`, creating it from `text` first if it is missing.
+    fn openConfig(self: *App, rel: []const u8, text: []const u8) void {
+        if (self.project.readFile(self.gpa, rel, 16)) |existing| self.gpa.free(existing) else |_| {
+            self.project.dir.createDirPath(self.io, ".zigide") catch {};
+            self.project.writeFile(rel, text) catch |err| return self.setStatus("could not create {s}: {s}", .{ rel, @errorName(err) });
+        }
+        _ = self.docs.open(rel, 0, 0) catch |err| self.setStatus("could not open {s}: {s}", .{ rel, @errorName(err) });
+    }
+
+    /// A document was saved: reread the settings or keymap if that is what it was.
+    fn savedThunk(ctx: ?*anyopaque, doc: *ide.documents.Doc) void {
+        const self: *App = @ptrCast(@alignCast(ctx.?));
+        self.onSaved(doc);
+    }
+
+    fn onSaved(self: *App, doc: *ide.documents.Doc) void {
+        if (std.mem.eql(u8, doc.path, ide.settings.project_settings) or std.mem.eql(u8, doc.path, ide.settings.project_keymap)) {
+            self.reloadSettings();
+            self.applyKeymap();
+        }
+    }
+
+    fn saveSession(self: *App) void {
+        if (!self.session_enabled) return;
+        ide.session.save(self.gpa, self.project, self.docs, self.dock, self.designer) catch |err| std.log.warn("could not save the session: {s}", .{@errorName(err)});
+    }
+
     fn onCommand(self: *App, ev: *zigui.Event) void {
         const name = ev.text;
         const eq = std.mem.eql;
@@ -185,6 +271,15 @@ const App = struct {
             self.designer.attach(d) catch |err| self.setStatus("cannot design {s}: {s}", .{ d.path, @errorName(err) });
         } else if (eq(u8, name, "file.refresh")) {
             self.files.reload() catch {};
+        } else if (eq(u8, name, "file.settings")) {
+            self.openConfig(ide.settings.project_settings, ide.settings.template);
+        } else if (eq(u8, name, "file.keybindings")) {
+            var arena = std.heap.ArenaAllocator.init(self.gpa);
+            defer arena.deinit();
+            const text = ide.settings.keymapTemplate(arena.allocator(), &default_bindings) catch return;
+            self.openConfig(ide.settings.project_keymap, text);
+        } else if (eq(u8, name, "view.reset_layout")) {
+            self.dock.loadLayout(self.default_layout) catch |err| self.setStatus("could not reset the layout: {s}", .{@errorName(err)});
         } else if (eq(u8, name, "file.quit")) {
             if (self.docs.anyDirty() and !self.quit_armed) {
                 self.quit_armed = true;
@@ -480,8 +575,13 @@ pub fn main(init: std.process.Init) !void {
     ui.clipboard = .{ .get = clipGet, .set = clipSet };
 
     const scripted = init.environ_map.get("ZIGUI_SCREENSHOT") != null;
-    var app: App = .{ .dry_restart = scripted, .gpa = gpa, .io = io, .ui = &ui, .project = &project, .dock = undefined };
+    var app: App = .{ .dry_restart = scripted, .session_enabled = !scripted or init.environ_map.get("ZIGUI_SESSION") != null, .gpa = gpa, .io = io, .ui = &ui, .project = &project, .dock = undefined };
     defer if (app.rename_scan) |*sc| sc.deinit();
+    app.environ = init.environ_map;
+    app.base_font_size = ui.theme.font_size;
+    app.loaded = try ide.settings.load(gpa, io, &project, init.environ_map);
+    defer app.loaded.deinit();
+    defer gpa.free(app.default_layout);
 
     ui.tree.get(ui.tree.root).?.style = .{ .direction = .column };
     ui.tree.get(ui.tree.root).?.visual = .{ .background = zigui.Color.rgb(24, 25, 29) };
@@ -537,7 +637,8 @@ pub fn main(init: std.process.Init) !void {
     lsp.hover = hover;
     lsp.signature = signature;
     lsp.on_open = ide.output_panel.OpenHook.bind(&app, App.openAt);
-    try lsp.addServer(&zigui.syntax.zig, "zig", &.{init.environ_map.get("ZIGUI_ZLS") orelse "zls"});
+    const zls_command = if (app.loaded.settings.language_server.len > 0) app.loaded.settings.language_server else (init.environ_map.get("ZIGUI_ZLS") orelse "zls");
+    try lsp.addServer(&zigui.syntax.zig, "zig", &.{zls_command});
     try completion.addProvider(lsp.completionProvider());
     try hover.addProvider(lsp.hoverProvider());
     try signature.addProvider(lsp.signatureProvider());
@@ -547,6 +648,8 @@ pub fn main(init: std.process.Init) !void {
     app.docs.enableHints(hover, signature);
 
     app.docs.enableLsp(lsp);
+    app.docs.on_saved = .{ .ctx = &app, .call = App.savedThunk };
+    app.applySettings();
     app.designer = try ide.designer.Designer.create(&ui, dock, app.docs, &project, io, .{ .center = welcome });
     defer app.designer.destroy();
 
@@ -572,7 +675,12 @@ pub fn main(init: std.process.Init) !void {
     // The terminal shares the bottom group with Output.
     const terminal_panel = try dock.addPanel("Terminal");
     app.terminal_panel = terminal_panel;
-    app.terminal = try ide.TerminalPanel.create(&ui, terminal_panel.content, .{ .cwd = project.root, .environ = init.environ_map, .wake = sdl.wake });
+    app.terminal = try ide.TerminalPanel.create(&ui, terminal_panel.content, .{
+        .cwd = project.root,
+        .environ = init.environ_map,
+        .wake = sdl.wake,
+        .argv = if (app.loaded.settings.shell.len > 0) &.{app.loaded.settings.shell} else &.{},
+    });
     defer app.terminal.destroy();
     try dock.dockTab(terminal_panel, output_panel);
     dock.activatePanel(output_panel);
@@ -585,6 +693,8 @@ pub fn main(init: std.process.Init) !void {
         .{ "file.save_all", "Save All" },
         .{ "file.close", "Close Document" },
         .{ "file.refresh", "Refresh Files" },
+        .{ "file.settings", "Settings" },
+        .{ "file.keybindings", "Keyboard Shortcuts File" },
         .{ "file.quit", "Quit" },
         .{ "edit.undo", "Undo" },
         .{ "edit.redo", "Redo" },
@@ -604,6 +714,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "view.terminal", "Terminal" },
         .{ "view.designer", "UI Designer Panels" },
         .{ "view.welcome", "Welcome and Shortcuts" },
+        .{ "view.reset_layout", "Reset Panel Layout" },
         .{ "ide.build", "Build" },
         .{ "ide.run", "Run" },
         .{ "ide.test", "Run Tests" },
@@ -616,30 +727,10 @@ pub fn main(init: std.process.Init) !void {
         });
     }
 
-    inline for (.{
-        .{ "f5", "ide.run" },
-        .{ "mod+b", "ide.build" },
-        .{ "ctrl+shift+f6", "ide.restart" },
-        .{ "ctrl+shift+f5", "ide.build_restart" },
-        .{ "mod+shift+t", "ide.test" },
-        .{ "mod+s", "file.save" },
-        .{ "mod+shift+s", "file.save_all" },
-        .{ "mod+w", "file.close" },
-        .{ "mod+z", "edit.undo" },
-        .{ "mod+shift+z", "edit.redo" },
-        .{ "mod+x", "edit.cut" },
-        .{ "mod+c", "edit.copy" },
-        .{ "mod+v", "edit.paste" },
-        .{ "mod+a", "edit.select_all" },
-        .{ "mod+f", "edit.find" },
-        .{ "mod+h", "edit.replace" },
-        .{ "mod+shift+f", "project.search" },
-        .{ "f12", "editor.definition" },
-        .{ "f2", "refactor.rename_handler" },
-        .{ "mod+`", "view.terminal" },
-    }) |b| {
+    for (default_bindings) |b| {
         ui.bindShortcut(b[0], b[1], .app, null) catch |err| std.log.warn("cannot bind {s}: {s}", .{ b[0], @errorName(err) });
     }
+    app.applyKeymap();
 
     // The menu bar.
     try bar.addMenu("File", &.{
@@ -651,6 +742,9 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "Close Document", .command = "file.close" },
         .{ .separator = true },
         .{ .label = "Refresh Files", .command = "file.refresh" },
+        .{ .separator = true },
+        .{ .label = "Settings", .command = "file.settings" },
+        .{ .label = "Keyboard Shortcuts File", .command = "file.keybindings" },
         .{ .separator = true },
         .{ .label = "Build and Restart the IDE", .command = "ide.build_restart" },
         .{ .label = "Restart the IDE", .command = "ide.restart" },
@@ -684,6 +778,8 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "UI Designer Panels", .command = "view.designer" },
         .{ .separator = true },
         .{ .label = "Welcome and Shortcuts", .command = "view.welcome" },
+        .{ .separator = true },
+        .{ .label = "Reset Panel Layout", .command = "view.reset_layout" },
     }, null);
     try bar.addMenu("Build", &.{
         .{ .label = "Build", .command = "ide.build" },
@@ -693,7 +789,19 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "Build and Restart the IDE", .command = "ide.build_restart" },
     }, null);
 
-    for (reopen) |rel| _ = app.docs.open(rel, 0, 0) catch {};
+    app.default_layout = try dock.saveLayout(gpa);
+    var restored = false;
+    if (app.session_enabled and app.loaded.settings.restore_session and reopen.len == 0) {
+        if (ide.session.load(gpa, &project)) |loaded_session| {
+            var sess = loaded_session;
+            defer sess.deinit();
+            sess.restore(app.docs, dock, app.designer);
+            restored = true;
+        }
+    }
+    if (!restored) {
+        for (reopen) |rel| _ = app.docs.open(rel, 0, 0) catch {};
+    }
 
     const commands = try gpa.alloc(zigui.draw_list.Command, 32768);
     defer gpa.free(commands);
@@ -712,6 +820,7 @@ pub fn main(init: std.process.Init) !void {
     var script = std.mem.tokenizeScalar(u8, init.environ_map.get("ZIGUI_SCRIPT") orelse "", ';');
     var text_input_on = false;
     var running = true;
+    defer app.saveSession();
     while (running and !app.quit) {
         _ = ui.tick(sdl.ticks());
         app.poll();

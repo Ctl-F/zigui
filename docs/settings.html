@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Settings, key bindings and sessions - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Settings, key bindings and sessions (in the IDE)</h1>
+<h2>Settings</h2>
+<p><b>File &gt; Settings</b> opens <code>.zigide/settings.zon</code> in the editor (creating it from a commented template if it is missing). Save the file and the IDE applies it at once. Two files are layered, the project's overriding yours:</p>
+<ul>
+<li><code>$XDG_CONFIG_HOME/zigui-ide/settings.zon</code> (or <code>~/.config/zigui-ide/settings.zon</code>): yours, for every project. Edit it by hand.</li>
+<li><code>&lt;project&gt;/.zigide/settings.zon</code>: this project's (commit it to share it).</li>
+</ul>
+<table>
+<tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>.ui_font_size</code></td><td>0</td><td>Interface text size in logical pixels; 0 keeps the theme's. Applied live.</td></tr>
+<tr><td><code>.editor_font_size</code></td><td>0</td><td>Source editors' text size; 0 keeps the theme's. Applied live to open editors.</td></tr>
+<tr><td><code>.tab_width</code></td><td>4</td><td>1&ndash;16. Applied live.</td></tr>
+<tr><td><code>.line_numbers</code>, <code>.folding</code></td><td>true</td><td>Gutter and fold arrows. Applied live.</td></tr>
+<tr><td><code>.restore_session</code></td><td>true</td><td>Reopen the last session's files and panel layout at startup.</td></tr>
+<tr><td><code>.language_server</code></td><td>""</td><td>The Zig language server command; "" means <code>ZIGUI_ZLS</code> or <code>zls</code>. Read at startup.</td></tr>
+<tr><td><code>.shell</code></td><td>""</td><td>The terminal's shell; "" means <code>$SHELL</code>. Read at startup.</td></tr>
+</table>
+<p>Unknown keys and values of the wrong type are ignored (the status line says how many), so a typo never stops the IDE from starting.</p>
+<h2>Key bindings</h2>
+<p><b>File &gt; Keyboard Shortcuts File</b> opens <code>.zigide/keybindings.keymap</code>, created with the IDE's default bindings listed as comments. One binding per line:</p>
+<pre><code>ctrl+shift+q = file.quit          # chord = command
+ctrl+k ctrl+c = edit.comment      # a sequence of chords
+f5 = none                         # remove a binding</code></pre>
+<p>Saving applies it. Lines override the defaults (and <code>~/.config/zigui-ide/keybindings.keymap</code>, read first); removing a line takes effect after a restart. Command names are the ones in the menus' source (<code>file.save</code>, <code>edit.find</code>, <code>ide.build</code>, <code>view.terminal</code>, <code>refactor.rename_handler</code>, ...). The format is <code>Shortcuts.loadKeymap</code>; <code>mod</code> is Ctrl (Cmd on macOS).</p>
+<h2>Session and panel layout</h2>
+<p>When the IDE quits or restarts it writes <code>.zigide/session.zon</code>: the open files with the caret in each, the active tab, the UI document being designed, and the arrangement of every panel (which are tabs of which group, the splits and their sizes, floating windows, hidden panels). The next start reopens it (with <code>.restore_session = false</code> it does not; files named on the command line with <code>--open</code> take its place). Files that are gone are skipped; panels that appeared since are kept visible. The file is safe to delete. <b>View &gt; Reset Panel Layout</b> goes back to the arrangement the IDE starts with.</p>
+<h2>For your own program</h2>
+<ul>
+<li><code>Dock.saveLayout(gpa)</code> returns the arrangement as ZON text, panels named by title (a trailing " &bull;" modified marker is ignored); <code>Dock.loadLayout(text)</code> applies it: panels are matched by title, unknown names are skipped, a split with one side unknown collapses to the other, and a panel that was showing but is in neither list stays visible as a tab of the first group. <code>error.InvalidLayout</code> for text that is not ZON.</li>
+<li><code>ide.session</code>: <code>save</code>, <code>load</code> and <code>Session.restore</code>. <code>ide.settings</code>: <code>Settings.apply</code>, <code>load</code>, <code>template</code>, <code>keymapTemplate</code>.</li>
+<li><code>Documents.defaults</code> / <code>applyDefaults()</code> set up new and open editors; <code>Documents.on_saved</code> is called after a save; <code>CodeEditor.configure(size, tab_width, line_numbers, folding)</code> changes a live editor.</li>
+</ul>
+<p>Headless runs (<code>ZIGUI_SCREENSHOT</code>) neither read nor write the session unless <code>ZIGUI_SESSION=1</code>.</p>
+</main><script src="nav.js"></script></body></html>

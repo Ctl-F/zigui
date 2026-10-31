@@ -449,6 +449,14 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   answer for Zig from `std.zig.Ast` alone (std found via `zig env`), no language
   server; types of values are not inferred, which is where an LSP will add to it.
   The test rig moved to `core/test_rig.zig` so framework tests can share it.
+- Layout, session, settings, keymaps (plan step 8): `Dock.saveLayout/loadLayout`
+  (ZON by panel title; unknown names skipped, new panels stay visible; also fixes
+  a leak of float groups at `deinit`), `ide/session.zig` (`.zigide/session.zon`:
+  files with carets, active tab, designed document, layout; scripted runs skip it
+  unless `ZIGUI_SESSION=1`), `ide/settings.zig` (global then project
+  `settings.zon`, tolerant of typos; applied live on save through
+  `Documents.on_saved`), keymap files through `Ui.loadKeymap`, and View > Reset
+  Panel Layout.
 - UI designer in the IDE and event wiring (plan step 7): `Builder` gained
   `Options.embedded` (panels live in the host's dock, toolbar as a "Designer"
   panel, shortcuts bound per panel, `arrangeIn`, `setPanelsVisible`) and

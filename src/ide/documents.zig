@@ -55,6 +55,20 @@ pub const Doc = struct {
     }
 };
 
+/// How new editors are set up (and `applyDefaults` updates the open ones).
+pub const EditorDefaults = struct {
+    size: f32 = 0,
+    tab_width: u32 = 4,
+    line_numbers: bool = true,
+    folding: bool = true,
+};
+
+/// Called after a document was saved.
+pub const SavedHook = struct {
+    ctx: ?*anyopaque = null,
+    call: *const fn (ctx: ?*anyopaque, doc: *Doc) void,
+};
+
 pub const Options = struct {
     /// A panel to open the first document beside (and when no document is open).
     anchor: ?*Panel = null,
@@ -69,6 +83,8 @@ pub const Documents = struct {
     anchor: ?*Panel,
     docs: std.ArrayListUnmanaged(*Doc) = .empty,
     last_opened: ?*Doc = null,
+    defaults: EditorDefaults = .{},
+    on_saved: ?SavedHook = null,
     /// Suggestions for every editor opened from now on (see `enableCompletion`).
     completion: ?*Completion = null,
     zig: ?*ZigCompleter = null,
@@ -119,6 +135,12 @@ pub const Documents = struct {
     /// edited, saved and closed from now on. It must outlive the documents.
     pub fn enableLsp(self: *Documents, lsp: *Assist) void {
         self.lsp = lsp;
+    }
+
+    /// Apply `defaults` to every open editor (after changing them).
+    pub fn applyDefaults(self: *Documents) void {
+        const d = self.defaults;
+        for (self.docs.items) |doc| doc.editor.configure(d.size, d.tab_width, d.line_numbers, d.folding);
     }
 
     fn releaseEditor(self: *Documents, ed: *CodeEditor) void {
@@ -186,7 +208,10 @@ pub const Documents = struct {
             .style = .{ .grow = 1 },
             .label = "Source",
             .language = syntax.languageForPath(path),
-            .folding = true,
+            .folding = self.defaults.folding,
+            .line_numbers = self.defaults.line_numbers,
+            .tab_width = self.defaults.tab_width,
+            .size = self.defaults.size,
             .read_only = read_only,
         });
         find_bar.attach(ed);
@@ -257,6 +282,7 @@ pub const Documents = struct {
         };
         doc.editor.markSaved();
         if (self.lsp) |l| l.saved(doc.editor);
+        if (self.on_saved) |h| h.call(h.ctx, doc);
         doc.warned = false;
         self.say("saved {s}", .{doc.path});
         return true;

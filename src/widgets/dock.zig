@@ -20,6 +20,7 @@
 //! and keep their state.
 
 const std = @import("std");
+const zon = @import("../uidoc/zon.zig");
 const Handle = @import("../core/handle.zig").Handle;
 const geometry = @import("../core/geometry.zig");
 const Color = geometry.Color;
@@ -299,7 +300,10 @@ pub const Dock = struct {
         for (self.panels.items) |p| self.freePanel(p);
         self.panels.deinit(self.gpa);
         self.dragging.deinit(self.gpa);
-        for (self.floats.items) |f| self.gpa.destroy(f);
+        for (self.floats.items) |f| {
+            self.freeNode(f.group);
+            self.gpa.destroy(f);
+        }
         self.floats.deinit(self.gpa);
         if (self.root) |r| self.freeNode(r);
         self.ui.freeText(&self.props.titles);
@@ -672,6 +676,178 @@ pub const Dock = struct {
         f.* = .{ .dock = self, .group = g, .rect = rect };
         try self.floats.append(self.gpa, f);
         for (panels) |p| try self.addToGroup(g, p, std.math.maxInt(usize));
+    }
+
+    // ---- saving and restoring the arrangement ----
+
+    /// The arrangement (splits and their sizes, tab groups with their order and
+    /// active tab, floating windows, hidden panels) as ZON text, panels named by
+    /// title. A modified-marker (" \u{2022}") on a title is ignored. Free with `gpa`.
+    pub fn saveLayout(self: *Dock, gpa: std.mem.Allocator) ![]u8 {
+        self.capture();
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(gpa);
+        try out.appendSlice(gpa, ".{\n    .version = 1,\n");
+        if (self.root) |r| {
+            try out.appendSlice(gpa, "    .root = ");
+            try writeLayoutNode(gpa, &out, r, 1);
+            try out.appendSlice(gpa, ",\n");
+        }
+        try out.appendSlice(gpa, "    .floats = .{");
+        for (self.floats.items) |f| {
+            try out.print(gpa, "\n        .{{ .x = {d}, .y = {d}, .w = {d}, .h = {d}, .node = ", .{ f.rect.x, f.rect.y, f.rect.w, f.rect.h });
+            try writeLayoutNode(gpa, &out, f.group, 2);
+            try out.appendSlice(gpa, " },");
+        }
+        try out.appendSlice(gpa, "\n    },\n    .hidden = .{");
+        for (self.panels.items) |p| {
+            if (p.state != .hidden) continue;
+            try out.appendSlice(gpa, "\n        ");
+            try writeQuoted(gpa, &out, layoutTitle(p.title));
+            try out.append(gpa, ',');
+        }
+        try out.appendSlice(gpa, "\n    },\n}\n");
+        return out.toOwnedSlice(gpa);
+    }
+
+    fn layoutTitle(title: []const u8) []const u8 {
+        const mark = " \u{2022}";
+        return if (std.mem.endsWith(u8, title, mark)) title[0 .. title.len - mark.len] else title;
+    }
+
+    fn writeQuoted(gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), text: []const u8) !void {
+        try out.append(gpa, '"');
+        for (text) |c| {
+            if (c == '"' or c == '\\') try out.append(gpa, '\\');
+            try out.append(gpa, c);
+        }
+        try out.append(gpa, '"');
+    }
+
+    fn writeLayoutNode(gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), n: *Node, depth: usize) !void {
+        if (n.is_split) {
+            try out.print(gpa, ".{{ .split = .{{ .vertical = {s}, .size = {d}, .second = {s},\n", .{ if (n.vertical) "true" else "false", n.size, if (n.anchor_second) "true" else "false" });
+            for (0..depth + 1) |_| try out.appendSlice(gpa, "    ");
+            try out.appendSlice(gpa, ".a = ");
+            try writeLayoutNode(gpa, out, n.a.?, depth + 1);
+            try out.appendSlice(gpa, ",\n");
+            for (0..depth + 1) |_| try out.appendSlice(gpa, "    ");
+            try out.appendSlice(gpa, ".b = ");
+            try writeLayoutNode(gpa, out, n.b.?, depth + 1);
+            try out.appendSlice(gpa, ", } }");
+            return;
+        }
+        try out.print(gpa, ".{{ .group = .{{ .active = {d}, .panels = .{{", .{n.active});
+        for (n.panels.items) |p| {
+            try writeQuoted(gpa, out, layoutTitle(p.title));
+            try out.appendSlice(gpa, ", ");
+        }
+        try out.appendSlice(gpa, "} } }");
+    }
+
+    /// Rearrange the panels as `text` (from `saveLayout`) describes. Panels it
+    /// does not name are matched by title; a name with no panel is skipped, and a
+    /// panel that was showing but is in neither list (it is new since the layout
+    /// was saved) is docked as a tab of the first group so it does not vanish.
+    pub fn loadLayout(self: *Dock, text: []const u8) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const v = zon.parse(a, text, null) catch return error.InvalidLayout;
+        // Which panels were showing, so new ones can be kept visible.
+        const was_visible = try a.alloc(bool, self.panels.items.len);
+        for (self.panels.items, was_visible) |p, *w| w.* = p.state != .hidden;
+        const placed = try a.alloc(bool, self.panels.items.len);
+        @memset(placed, false);
+        // Start from nothing: contents out of the old widgets (a float's window is
+        // destroyed as its group goes), every panel out of its group.
+        for (self.panels.items) |p| {
+            if (self.ui.tree.isValid(p.content)) self.ui.tree.detach(p.content);
+        }
+        for (self.panels.items) |p| self.takeOut(p);
+        if (v.field("root")) |root_v| self.root = try self.layoutNode(a, root_v, null, placed);
+        if (v.field("floats")) |fl| for (fl.items() orelse &.{}) |fv| {
+            const node_v = fv.field("node") orelse continue;
+            const titles = self.layoutPanels(a, node_v, placed) catch continue;
+            if (titles.panels.len == 0) continue;
+            const rect: Rect = .{ .x = numField(fv, "x", 80), .y = numField(fv, "y", 80), .w = numField(fv, "w", 320), .h = numField(fv, "h", 220) };
+            try self.makeFloat(titles.panels, rect);
+            const g = self.floats.items[self.floats.items.len - 1].group;
+            g.active = @min(titles.active, g.panels.items.len -| 1);
+        };
+        // Panels the layout does not mention.
+        if (v.field("hidden")) |hv| for (hv.items() orelse &.{}) |t| {
+            if (t == .string) {
+                for (self.panels.items, 0..) |p, i| {
+                    if (!placed[i] and std.mem.eql(u8, layoutTitle(p.title), t.string)) placed[i] = true;
+                }
+            }
+        };
+        for (self.panels.items, 0..) |p, i| {
+            if (placed[i] or !was_visible[i]) continue;
+            try self.dockTab(p, if (self.firstGroup()) |g| g.panels.items[0] else null);
+        }
+        try self.rebuild();
+    }
+
+    fn numField(v: zon.Value, name: []const u8, default: f32) f32 {
+        const f = v.field(name) orelse return default;
+        return switch (f) {
+            .int => |i| @floatFromInt(i),
+            .float => |x| @floatCast(x),
+            else => default,
+        };
+    }
+
+    fn boolField(v: zon.Value, name: []const u8, default: bool) bool {
+        const f = v.field(name) orelse return default;
+        return if (f == .bool) f.bool else default;
+    }
+
+    const Found = struct { panels: []*Panel, active: usize };
+
+    /// The panels a `.group` value names (those that exist and are not yet placed).
+    fn layoutPanels(self: *Dock, a: std.mem.Allocator, v: zon.Value, placed: []bool) !Found {
+        const g = v.field("group") orelse return .{ .panels = &.{}, .active = 0 };
+        var list: std.ArrayListUnmanaged(*Panel) = .empty;
+        for ((g.field("panels") orelse zon.Value{ .list = &.{} }).items() orelse &.{}) |t| {
+            if (t != .string) continue;
+            for (self.panels.items, 0..) |p, i| {
+                if (placed[i] or !std.mem.eql(u8, layoutTitle(p.title), t.string)) continue;
+                placed[i] = true;
+                try list.append(a, p);
+                break;
+            }
+        }
+        const active: usize = if (g.field("active")) |av| (if (av == .int and av.int >= 0) @intCast(av.int) else 0) else 0;
+        return .{ .panels = list.items, .active = active };
+    }
+
+    fn layoutNode(self: *Dock, a: std.mem.Allocator, v: zon.Value, parent: ?*Node, placed: []bool) !?*Node {
+        if (v.field("split")) |sp| {
+            const left = try self.layoutNode(a, sp.field("a") orelse return null, null, placed);
+            const right = try self.layoutNode(a, sp.field("b") orelse return null, null, placed);
+            if (left == null) return right;
+            if (right == null) return left;
+            const n = try self.newNode();
+            n.is_split = true;
+            n.vertical = boolField(sp, "vertical", false);
+            n.size = numField(sp, "size", 240);
+            n.anchor_second = boolField(sp, "second", false);
+            n.a = left;
+            n.b = right;
+            left.?.parent = n;
+            right.?.parent = n;
+            n.parent = parent;
+            return n;
+        }
+        const found = try self.layoutPanels(a, v, placed);
+        if (found.panels.len == 0) return null;
+        const n = try self.newNode();
+        for (found.panels) |p| try self.addToGroup(n, p, std.math.maxInt(usize));
+        n.active = @min(found.active, found.panels.len - 1);
+        n.parent = parent;
+        return n;
     }
 
     // ---- building the widgets from the model ----
@@ -1357,4 +1533,67 @@ test "requestClose asks the hook; setTitle renames the tab; dockTab falls back t
     d.closePanel(a);
     try d.dockTab(b, a);
     try testing.expectEqual(State.docked, b.state);
+}
+
+test "a saved layout restores the splits, tab order, floats, hidden panels and sizes" {
+    const r = try Rig.init();
+    defer r.deinit();
+    const d = try r.dock();
+    defer d.destroy();
+    const a = try d.addPanel("A");
+    const b = try d.addPanel("B");
+    const c = try d.addPanel("C");
+    const e = try d.addPanel("D");
+    const f = try d.addPanel("E");
+    try d.dockTab(a, null);
+    try d.dockTab(b, a);
+    try d.dockSplit(c, a, .right, 180);
+    try d.floatPanel(e, .{ .x = 30, .y = 40, .w = 200, .h = 150 });
+    d.activatePanel(a);
+    try r.settle();
+    const saved = try d.saveLayout(testing.allocator);
+    defer testing.allocator.free(saved);
+    try testing.expect(std.mem.indexOf(u8, saved, "\"A\", \"B\"") != null);
+    try testing.expect(std.mem.indexOf(u8, saved, ".hidden = .{\n        \"E\",") != null);
+
+    // Scramble: close, move, float differently.
+    d.closePanel(b);
+    try d.dockSplit(a, c, .bottom, 100);
+    try d.floatPanel(c, .{ .x = 5, .y = 5, .w = 100, .h = 100 });
+    try d.showPanel(e);
+    try r.settle();
+
+    try d.loadLayout(saved);
+    try r.settle();
+    const again = try d.saveLayout(testing.allocator);
+    defer testing.allocator.free(again);
+    try testing.expectEqualStrings(saved, again);
+    try testing.expect(a.group == b.group and a.state == .docked and c.state == .docked and e.state == .floating and f.state == .hidden);
+    try testing.expect(c.group != a.group);
+    // The tab order and the width of the right-hand group came back.
+    try testing.expectEqualStrings("A\nB", a.group.?.tabs.?.props.titles.bytes);
+    const cw = r.ui.tree.absoluteRect(c.group.?.tabs.?.node).?.w;
+    try testing.expect(cw > 175 and cw < 185);
+}
+
+test "loading a layout tolerates unknown panels, keeps new panels visible, and rejects junk" {
+    const r = try Rig.init();
+    defer r.deinit();
+    const d = try r.dock();
+    defer d.destroy();
+    const a = try d.addPanel("A");
+    const b = try d.addPanel("B");
+    try d.dockTab(a, null);
+    try d.dockTab(b, a);
+    // A layout from another time: it knows a panel "Gone" and has never heard of "B".
+    try d.loadLayout(".{ .version = 1, .root = .{ .group = .{ .active = 0, .panels = .{ \"Gone\", \"A\" } } }, .floats = .{}, .hidden = .{} }");
+    try r.settle();
+    try testing.expect(a.state == .docked);
+    try testing.expect(b.state == .docked and b.group == a.group); // new since the layout: still visible
+    try testing.expectError(error.InvalidLayout, d.loadLayout("this is not zon"));
+    // A split with one side unknown collapses to the other side.
+    try d.loadLayout(".{ .root = .{ .split = .{ .vertical = false, .size = 100, .second = false, .a = .{ .group = .{ .active = 0, .panels = .{ \"Nope\" } } }, .b = .{ .group = .{ .active = 0, .panels = .{ \"A\" } } } } } }");
+    try r.settle();
+    try testing.expect(!d.root.?.is_split);
+    try testing.expect(a.state == .docked);
 }
