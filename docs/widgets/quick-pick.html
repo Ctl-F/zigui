@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>QuickPick - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>QuickPick</h1>
+<p>A quick-pick palette: a modal box near the top of the window with a query field above a short list of the best matches among many items (files, symbols, commands). Typing narrows and ranks the list; it is the &ldquo;go to anything&rdquo; box of other editors. The IDE's <a href="../ide.html">Ctrl+,</a> is built on it.</p>
+<pre><code>const qp = try zigui.quick_pick.QuickPick.create(&amp;ui, ui.tree.root);   // hidden until shown
+defer qp.destroy();
+qp.show(.{
+    .placeholder = "Go to file, function or type",
+    .items = items,                         // []const quick_pick.Item (borrowed)
+    .on_pick = .bind(&amp;app, App.picked),     // fn (*App, index: usize) void
+});
+qp.setItems(more);                          // while open: the query stays, the list refilters
+qp.setStatus("indexing...");                // a line under the list</code></pre>
+<table>
+<tr><th>Item field</th><th>Meaning</th></tr>
+<tr><td><code>label</code></td><td>Matched against the query (<code>completion.matchScore</code>: prefix, then case-insensitive prefix, then letters in order) and shown first.</td></tr>
+<tr><td><code>detail</code></td><td>Shown after the label (a path, a kind); not matched.</td></tr>
+<tr><td><code>group</code></td><td>Breaks ties between equal matches, lower first (the IDE uses 0 for the project, 1 for the standard library).</td></tr>
+</table>
+<ul>
+<li>Best matches first, then <code>group</code>, then shorter labels. At most 40 rows are shown; an empty query shows the first items in the order given. Matching runs over all items on every keystroke, which is fine for tens of thousands.</li>
+<li><b>Up / Down / PageUp / PageDown</b> move the selection, <b>Enter</b> or a double-click picks, <b>Escape</b> or a click on the dimmed area closes. While open it holds a modal focus scope.</li>
+<li>The hook gets the picked item's <em>index into <code>items</code></em>, after the box has closed.</li>
+<li><code>items</code> and their strings are borrowed: keep them valid until the next <code>setItems</code> or <code>close</code>.</li>
+</ul>
+<p>Code-only widget.</p>
+</main><script src="../nav.js"></script></body></html>

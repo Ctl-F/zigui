@@ -40,7 +40,8 @@ pub const MappedFile = struct {
 
 test "a mapped file exposes its bytes without reading them up front" {
     const io = std.testing.io;
-    const path = ".zig-cache/mapped_file_test.txt";
+    var path_buf: [96]u8 = undefined; // test binaries run side by side: unique per process
+    const path = try std.fmt.bufPrint(&path_buf, ".zig-cache/mapped_file_test_{x}.txt", .{@intFromPtr(&path_buf)});
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "one\ntwo\nthree\n" });
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     var m = try MappedFile.open(io, path);
@@ -50,7 +51,8 @@ test "a mapped file exposes its bytes without reading them up front" {
 
 test "an empty file maps to no bytes, and a missing one is an error" {
     const io = std.testing.io;
-    const path = ".zig-cache/mapped_file_empty.txt";
+    var path_buf: [96]u8 = undefined; // test binaries run side by side: unique per process
+    const path = try std.fmt.bufPrint(&path_buf, ".zig-cache/mapped_file_empty_{x}.txt", .{@intFromPtr(&path_buf)});
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "" });
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     var m = try MappedFile.open(io, path);

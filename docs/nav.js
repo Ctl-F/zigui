@@ -25,6 +25,7 @@
       ["widgets/completion.html", "Completion"],
       ["widgets/hover.html", "Hover and signatures"],
       ["widgets/file-dialog.html", "FileDialog"],
+      ["widgets/quick-pick.html", "QuickPick"],
       ["widgets/terminal.html", "Terminal"],
       ["widgets/canvas.html", "Canvas"],
       ["widgets/scroll-view.html", "ScrollView"],

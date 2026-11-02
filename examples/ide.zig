@@ -42,6 +42,7 @@ const default_bindings = [_][2][]const u8{
     .{ "mod+f", "edit.find" },
     .{ "mod+h", "edit.replace" },
     .{ "mod+shift+f", "project.search" },
+    .{ "mod+,", "project.quick_open" },
     .{ "f12", "editor.definition" },
     .{ "f2", "refactor.rename_handler" },
     .{ "mod+`", "view.terminal" },
@@ -70,6 +71,7 @@ const App = struct {
     default_layout: []u8 = &.{},
     prompt: *ide.prompt.Prompt = undefined,
     file_dialog: *zigui.file_dialog.FileDialog = undefined,
+    quick: *ide.QuickOpen = undefined,
     /// The zigui source this IDE was built from, for the zigui app template (null: not found).
     zigui_root: ?[]u8 = null,
     /// A new project being made: where, and what it is called, while its template is chosen.
@@ -388,6 +390,8 @@ const App = struct {
             if (self.designer.builder) |b| b.setPanelsVisible(true) else self.setStatus("open a .ui.zon document first (File > New UI Document)", .{});
         } else if (eq(u8, name, "editor.definition")) {
             if (self.docs.active()) |d| self.lsp.gotoDefinition(d.editor);
+        } else if (eq(u8, name, "project.quick_open")) {
+            self.quick.show();
         } else if (eq(u8, name, "project.search")) {
             self.showPanel(self.search_panel);
             self.ui.setFocus(self.search.field.node);
@@ -590,6 +594,7 @@ const App = struct {
             if (self.output.exit_code == 0) self.restartNow() else self.setStatus("build failed: not restarting", .{});
         }
         self.search.poll();
+        self.quick.poll();
         self.docs.poll();
         self.lsp.poll();
         self.terminal.poll();
@@ -867,6 +872,8 @@ pub fn main(init: std.process.Init) !void {
     app.search_panel = search_panel;
     app.search = try ide.SearchPanel.create(&ui, search_panel.content, &project, .{ .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt), .wake = sdl.wake, .std_dir = std_dir });
     defer app.search.destroy();
+    app.quick = try ide.QuickOpen.create(&ui, ui.tree.root, &project, std_dir, .{ .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt), .wake = sdl.wake });
+    defer app.quick.destroy();
     try dock.dockTab(search_panel, files_panel);
     dock.activatePanel(files_panel);
 
@@ -911,6 +918,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "edit.find", "Find..." },
         .{ "edit.replace", "Replace..." },
         .{ "project.search", "Find in Project..." },
+        .{ "project.quick_open", "Go to File, Function or Type..." },
         .{ "editor.definition", "Go to Definition" },
         .{ "refactor.rename_handler", "Rename Event Handler..." },
         .{ "refactor.move_handler", "Move Event Handler..." },
@@ -972,6 +980,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "Find...", .command = "edit.find" },
         .{ .label = "Replace...", .command = "edit.replace" },
         .{ .label = "Find in Project...", .command = "project.search" },
+        .{ .label = "Go to File, Function or Type...", .command = "project.quick_open" },
         .{ .separator = true },
         .{ .label = "Go to Definition", .command = "editor.definition" },
     }, null);

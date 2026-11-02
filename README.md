@@ -439,6 +439,16 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   (the host may refuse or defer a close), `setTitle`, and `dockTab` falls back to
   a hidden panel's last group. `CodeEditor.goTo(line, col)` centers off-screen
   carets and waits for the first layout. `examples/ide.zig` ties it together.
+- Search beyond the project: `Searcher.startIn` and the Search panel's `Std`
+  toggle also walk the Zig standard library (absolute paths; `Documents` opens
+  absolute paths read-only). `widgets/quick_pick.zig` is a generic ranked
+  "go to anything" box; `ide.SymbolIndex` (worker thread, `std.zig.Ast`) lists
+  files and declarations of the project and the library, and `ide.QuickOpen`
+  joins them behind Ctrl+, (`project.quick_open`). The library is indexed once
+  at startup, the project each time the box opens.
+- ZLS discovery (`ide/zls_locate.zig`): the zls matching `zig env`'s version is
+  chosen (PATH, XDG/zvm/local dirs); an older one is used with a visible note,
+  and a missing one produces a message listing where it looked.
 - Popup and completion (plan step 4): `widgets/popup.zig` is a focus-less overlay
   (`Ui.showPopup/showTip/popupMove/popupPick/hidePopup`, one at a time; lists
   close on an outside press, tooltips ignore the pointer). `widgets/completion.zig`

@@ -64,6 +64,7 @@ pub const select = @import("widgets/select.zig");
 pub const menu = @import("widgets/menu.zig");
 pub const popup = @import("widgets/popup.zig");
 pub const file_dialog = @import("widgets/file_dialog.zig");
+pub const quick_pick = @import("widgets/quick_pick.zig");
 pub const completion = @import("widgets/completion.zig");
 pub const hover = @import("widgets/hover.zig");
 pub const tab_panel = @import("widgets/tab_panel.zig");

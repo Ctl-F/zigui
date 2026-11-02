@@ -3783,7 +3783,9 @@ test "IME composition in the code editor is drawn over the caret line and commit
 
 test "openFile maps a file, shows it at once, indexes in the background, then allows editing" {
     const io = std.testing.io;
-    const path = ".zig-cache/open_file_test.txt";
+    // Test binaries run side by side, so the name must be unique per process.
+    var path_buf: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, ".zig-cache/open_file_test_{x}.txt", .{@intFromPtr(&path_buf)});
     var body: std.ArrayListUnmanaged(u8) = .empty;
     defer body.deinit(std.testing.allocator);
     for (0..30000) |i| try body.print(std.testing.allocator, "row {d} of the big file\n", .{i});
