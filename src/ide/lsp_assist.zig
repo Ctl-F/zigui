@@ -104,6 +104,9 @@ pub const Assist = struct {
     wake: ?*const fn () void = null,
     message: [160]u8 = undefined,
     message_len: usize = 0,
+    /// Something to say beside "ready" (a fallback server version, say).
+    note: [220]u8 = undefined,
+    note_len: usize = 0,
 
     pub fn create(ui: *Ui, io: std.Io, root_path: []const u8) !*Assist {
         const self = try ui.gpa.create(Assist);
@@ -158,6 +161,14 @@ pub const Assist = struct {
     /// What is going on, for a status line ("" when there is nothing to say).
     pub fn statusText(self: *const Assist) []const u8 {
         return self.message[0..self.message_len];
+    }
+
+    /// A standing remark about the server (shown with its state); "" clears it.
+    pub fn setNote(self: *Assist, text: []const u8) void {
+        const n = @min(text.len, self.note.len);
+        @memcpy(self.note[0..n], text[0..n]);
+        self.note_len = n;
+        if (self.message_len == 0) self.say("{s}", .{text[0..n]});
     }
 
     fn say(self: *Assist, comptime fmt: []const u8, args: anytype) void {
@@ -232,7 +243,8 @@ pub const Assist = struct {
             }
             s.batch.clearRetainingCapacity();
             if (!s.dead and s.client.isReady() and self.message_len > 0 and std.mem.startsWith(u8, self.statusText(), "starting")) {
-                self.say("{s}: ready", .{if (s.client.server_name.len > 0) s.client.server_name else self.configs.items[s.config].argv[0]});
+                const name = if (s.client.server_name.len > 0) s.client.server_name else std.fs.path.basename(self.configs.items[s.config].argv[0]);
+                if (self.note_len > 0) self.say("{s}: ready ({s})", .{ name, self.note[0..self.note_len] }) else self.say("{s}: ready", .{name});
             }
         }
     }

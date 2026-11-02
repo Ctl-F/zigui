@@ -798,9 +798,11 @@ pub fn main(init: std.process.Init) !void {
 
     // Suggestions that work with no language server: words in the file, plus
     // Zig names and the standard library read from source (std.zig.Ast).
-    const std_dir = ide.zig_complete.locateStdDir(gpa, io);
-    defer if (std_dir) |d| gpa.free(d);
-    if (std_dir == null) std.log.warn("could not run `zig env`; standard library completion is off", .{});
+    const zig_info = ide.zig_complete.locateZig(gpa, io);
+    defer if (zig_info) |zi| zi.deinit(gpa);
+    const std_dir: ?[]const u8 = if (zig_info) |zi| zi.std_dir else null;
+    const zig_version: []const u8 = if (zig_info) |zi| zi.version else "";
+    if (zig_info == null) std.log.warn("could not run `zig env`; standard library completion is off", .{});
     const zig_completer = try ide.zig_complete.ZigCompleter.create(gpa, io, std_dir);
     defer zig_completer.destroy();
     const completion = try zigui.completion.Completion.create(&ui);
@@ -823,8 +825,15 @@ pub fn main(init: std.process.Init) !void {
     lsp.hover = hover;
     lsp.signature = signature;
     lsp.on_open = ide.output_panel.OpenHook.bind(&app, App.openAt);
-    const zls_command = if (app.loaded.settings.language_server.len > 0) app.loaded.settings.language_server else (init.environ_map.get("ZIGUI_ZLS") orelse "zls");
-    try lsp.addServer(&zigui.syntax.zig, "zig", &.{zls_command});
+    // The language server that goes with this Zig: the setting or ZIGUI_ZLS if given, else the
+    // best match found on PATH and in the usual install folders (see zls_locate).
+    var zls_arena = std.heap.ArenaAllocator.init(gpa);
+    defer zls_arena.deinit();
+    const zls_configured = if (app.loaded.settings.language_server.len > 0) app.loaded.settings.language_server else (init.environ_map.get("ZIGUI_ZLS") orelse "");
+    if (try ide.zls_locate.find(zls_arena.allocator(), io, init.environ_map, zig_version, zls_configured)) |found| {
+        try lsp.addServer(&zigui.syntax.zig, "zig", &.{found.path});
+        lsp.setNote(found.note);
+    } else lsp.setNote(try ide.zls_locate.missingNote(zls_arena.allocator(), if (zig_version.len > 0) zig_version else "(unknown)", zls_configured));
     try completion.addProvider(lsp.completionProvider());
     try hover.addProvider(lsp.hoverProvider());
     try signature.addProvider(lsp.signatureProvider());

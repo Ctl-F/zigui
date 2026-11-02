@@ -116,6 +116,43 @@ pub fn locateStdDir(gpa: std.mem.Allocator, io: std.Io) ?[]u8 {
     return parseStdDir(gpa, res.stdout);
 }
 
+/// What `zig env` says about the installed Zig.
+pub const ZigInfo = struct {
+    /// The standard library directory.
+    std_dir: []u8,
+    /// The compiler version ("0.17.0").
+    version: []u8,
+
+    pub fn deinit(self: ZigInfo, gpa: std.mem.Allocator) void {
+        gpa.free(self.std_dir);
+        gpa.free(self.version);
+    }
+};
+
+/// Run `zig env` once for the library path and the version (null if `zig` cannot run).
+pub fn locateZig(gpa: std.mem.Allocator, io: std.Io) ?ZigInfo {
+    const res = std.process.run(gpa, io, .{ .argv = &.{ "zig", "env" } }) catch return null;
+    defer gpa.free(res.stdout);
+    defer gpa.free(res.stderr);
+    const std_dir = parseEnvString(gpa, res.stdout, ".std_dir") orelse return null;
+    const version = parseEnvString(gpa, res.stdout, ".version") orelse gpa.dupe(u8, "") catch {
+        gpa.free(std_dir);
+        return null;
+    };
+    return .{ .std_dir = std_dir, .version = version };
+}
+
+/// The string value of `key = "..."` in `zig env` output.
+pub fn parseEnvString(gpa: std.mem.Allocator, env_text: []const u8, key: []const u8) ?[]u8 {
+    var buf: [48]u8 = undefined;
+    const needle = std.fmt.bufPrint(&buf, "{s} = \"", .{key}) catch return null;
+    const at = std.mem.indexOf(u8, env_text, needle) orelse return null;
+    const rest = env_text[at + needle.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
+    if (end == 0) return null;
+    return gpa.dupe(u8, rest[0..end]) catch null;
+}
+
 /// The `.std_dir = "..."` value of `zig env`'s output.
 pub fn parseStdDir(gpa: std.mem.Allocator, env_text: []const u8) ?[]u8 {
     const key = ".std_dir = \"";
@@ -403,6 +440,14 @@ test "dotted paths are read from the text before the cursor" {
     try testing.expectEqualStrings("fs", d[1]);
     try testing.expect(dottedPath("foo(bar).", &segs) == null);
     try testing.expect(dottedPath("a.", &segs) != null);
+}
+
+test "zig env gives the library path and the version" {
+    const text = ".{\n    .zig_exe = \"/z/zig\",\n    .std_dir = \"/z/lib/std\",\n    .version = \"0.17.0\",\n}\n";
+    const v = parseEnvString(testing.allocator, text, ".version").?;
+    defer testing.allocator.free(v);
+    try testing.expectEqualStrings("0.17.0", v);
+    try testing.expect(parseEnvString(testing.allocator, text, ".nothing") == null);
 }
 
 test "parseStdDir reads zig env output" {

@@ -25,6 +25,7 @@ pub const prompt = @import("ide/prompt.zig");
 pub const settings = @import("ide/settings.zig");
 pub const session = @import("ide/session.zig");
 pub const new_project = @import("ide/new_project.zig");
+pub const zls_locate = @import("ide/zls_locate.zig");
 pub const documents = @import("ide/documents.zig");
 pub const Documents = documents.Documents;
 pub const output_panel = @import("ide/output_panel.zig");
@@ -37,6 +38,7 @@ test {
     _ = search_project;
     _ = files_panel;
     _ = documents;
+    _ = zls_locate;
     _ = new_project;
     _ = settings;
     _ = session;
