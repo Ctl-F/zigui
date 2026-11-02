@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Projects - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Opening and creating projects (in the IDE)</h1>
+<p>A project is a folder; the IDE needs nothing more (Zig projects get build commands from their <code>build.zig</code>, but any folder works for editing, search and the terminal).</p>
+<h2>Open Project</h2>
+<p><b>File &gt; Open Project...</b> shows the <a href="widgets/file-dialog.html">folder chooser</a>, starting beside the current project. Choosing a folder saves everything, writes this project's session, and starts a <b>new IDE window on that folder</b> (which reopens that folder's own session); this window closes. (One window holds one project; a window that could switch projects in place is not built.)</p>
+<h2>New Project</h2>
+<p><b>File &gt; New Project...</b> asks for a place and a name in the same dialog (the name becomes the folder, the package and the program, so it is an identifier of up to 32 letters, digits and underscores), then offers templates:</p>
+<table>
+<tr><th>Template</th><th>What you get</th></tr>
+<tr><td><b>zigui app</b></td><td>A window application whose contents come from a UI document. <code>build.zig</code> and <code>build.zig.zon</code> (made by <code>zig init</code>, so the package fingerprint is real, with zigui added as a <b>path dependency</b>), <code>main.zig</code> (window, fonts, loads <code>ui/main.ui.zon</code> from the working directory, registers the actions), <code>ui/main.ui.zon</code> (a label and a button), <code>ui/main.zig</code> (<code>Main</code> with the button's handler <code>onHelloClick</code>), the generated <code>ui_actions.zig</code> and <code>.zigide/actions.zon</code>. <code>zig build run</code> runs it; open the <code>.ui.zon</code> in the IDE and the Events tab already lists the handler. Needs the zigui source: it is found from the IDE's executable (<code>&lt;root&gt;/zig-out/bin/ide</code>) or <code>ZIGUI_ROOT</code>; without it the entry is greyed out.</td></tr>
+<tr><td><b>Zig project</b></td><td>What <code>zig init</code> makes: <code>build.zig</code>, <code>build.zig.zon</code>, <code>src/main.zig</code>, <code>src/root.zig</code>.</td></tr>
+<tr><td><b>Empty folder</b></td><td>A README only, for any language.</td></tr>
+</table>
+<p><code>zig</code> must be on <code>PATH</code> for the two Zig templates; a failure shows <code>zig init</code>'s message in the status line. An existing empty folder is fine; a folder with files in it is refused. The new project then opens in a new window, like Open Project.</p>
+<h2>Using zigui from your own project</h2>
+<p>The zigui checkout now has a <code>build.zig.zon</code>, so another project can depend on it by path and import its modules (<code>zigui</code>, <code>zigui_sdl</code>, <code>zigui_stb</code>, <code>zigui_gpu</code>) the way the generated <code>build.zig</code> does:</p>
+<pre><code>// build.zig.zon
+.dependencies = .{ .zigui = .{ .path = "../zigui" } },
+
+// build.zig
+const zigui = b.dependency("zigui", .{ .target = target, .optimize = optimize });
+exe.root_module.addImport("zigui", zigui.module("zigui"));
+exe.root_module.addImport("zigui_sdl", zigui.module("zigui_sdl"));
+exe.root_module.addImport("zigui_stb", zigui.module("zigui_stb"));</code></pre>
+<p>(SDL3's development files must be installed.)</p>
+<h2>The pieces</h2>
+<p><code>ide.new_project</code>: <code>create(gpa, io, parent, name, template, zigui_root, &amp;report)</code>, <code>templates</code>, <code>validName</code>, <code>findZiguiRoot</code>, <code>patchManifest</code>. The zigui app's files are in <code>src/ide/templates/zigui_app/</code> (<code>.tmpl</code>, with <code>@@NAME@@</code> for the project name), embedded in the IDE.</p>
+</main><script src="nav.js"></script></body></html>

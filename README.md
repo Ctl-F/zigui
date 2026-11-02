@@ -449,6 +449,14 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   answer for Zig from `std.zig.Ast` alone (std found via `zig env`), no language
   server; types of values are not inferred, which is where an LSP will add to it.
   The test rig moved to `core/test_rig.zig` so framework tests can share it.
+- Projects: `widgets/file_dialog.zig` (a toolkit-drawn modal chooser for folders,
+  files, save names and new-folder names; tested on temp directories),
+  `ide/new_project.zig` (templates: `zig init`'s output, a zigui app with a UI
+  document and a registered handler, an empty folder; the zigui app depends on
+  the zigui checkout by relative path, found from the IDE's executable or
+  `ZIGUI_ROOT`), and File > Open/New Project, which start a new IDE instance on
+  the folder (one window, one project). The repo gained a `build.zig.zon` so it
+  can be used as a path dependency; a generated app was built and run to check.
 - Layout, session, settings, keymaps (plan step 8): `Dock.saveLayout/loadLayout`
   (ZON by panel title; unknown names skipped, new panels stay visible; also fixes
   a leak of float groups at `deinit`), `ide/session.zig` (`.zigide/session.zon`:

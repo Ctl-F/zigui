@@ -1,0 +1,11 @@
+.{
+    .version = 1,
+    .root = .{
+        .type = "box",
+        .style = .{ .direction = .column, .gap = 12, .padding = .{ .left = 24, .top = 24, .right = 24, .bottom = 24 } },
+        .children = .{
+            .{ .type = "label", .props = .{ .text = "Hello from zigui" } },
+            .{ .type = "button", .id = "hello", .props = .{ .text = "Click me" }, .on = .{ .click = "helloClick" } },
+        },
+    },
+}

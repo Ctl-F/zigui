@@ -13,11 +13,6 @@
     .floats = .{
     },
     .hidden = .{
-        "Toolbox",
-        "Outline",
-        "Preview",
-        "Inspector",
-        "Designer",
     },
 },
 }

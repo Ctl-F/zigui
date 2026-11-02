@@ -1,0 +1,14 @@
+.{
+    .name = .zigui,
+    .fingerprint = 0x18d03e10bfeae2a6, // Changing this has security and trust implications.
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "third_party",
+        "README.md",
+    },
+}

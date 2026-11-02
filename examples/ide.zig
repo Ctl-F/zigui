@@ -69,6 +69,14 @@ const App = struct {
     /// The arrangement the IDE started with (before a saved session changed it), for Reset Panel Layout.
     default_layout: []u8 = &.{},
     prompt: *ide.prompt.Prompt = undefined,
+    file_dialog: *zigui.file_dialog.FileDialog = undefined,
+    /// The zigui source this IDE was built from, for the zigui app template (null: not found).
+    zigui_root: ?[]u8 = null,
+    /// A new project being made: where, and what it is called, while its template is chosen.
+    new_parent: [std.fs.max_path_bytes]u8 = undefined,
+    new_parent_len: usize = 0,
+    new_name: [64]u8 = undefined,
+    new_name_len: usize = 0,
     welcome_panel: *zigui.dock.Panel = undefined,
     output_panel: *zigui.dock.Panel = undefined,
     /// An edit command (Undo, Copy...) is forwarding itself as a key press; the
@@ -130,29 +138,88 @@ const App = struct {
 
     /// Start a new copy of this program on the same folder and files, then quit.
     fn restartNow(self: *App) void {
+        self.launchOn(self.project.root);
+    }
+
+    /// Save everything, then start a new instance of this program on folder `root` and quit
+    /// (the new instance reopens that folder's own session).
+    fn launchOn(self: *App, root: []const u8) void {
         _ = self.docs.saveAll();
         self.saveSession();
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
-        var files: std.ArrayListUnmanaged([]const u8) = .empty;
-        for (self.docs.docs.items) |d| files.append(a, d.path) catch {};
         const exe = std.process.executablePathAlloc(self.io, a) catch |err| {
-            self.setStatus("cannot restart: no executable path ({s})", .{@errorName(err)});
+            self.setStatus("cannot start a new instance: no executable path ({s})", .{@errorName(err)});
             return;
         };
         const target = ide.relaunch.resolveExe(a, self.io, exe) catch exe;
-        const cmd = ide.relaunch.argv(a, target, self.project.root, files.items) catch return;
+        const cmd = ide.relaunch.argv(a, target, root, &.{}) catch return;
         if (self.dry_restart) {
-            std.log.info("restart: would start {s} {s} (+{d} more arguments)", .{ cmd[0], cmd[1], cmd.len - 2 });
+            std.log.info("restart: would start {s} {s}", .{ cmd[0], cmd[1] });
             self.quit = true;
             return;
         }
         ide.relaunch.spawnDetached(self.io, cmd) catch |err| {
-            self.setStatus("cannot restart: could not start {s} ({s})", .{ cmd[0], @errorName(err) });
+            self.setStatus("cannot start a new instance: could not start {s} ({s})", .{ cmd[0], @errorName(err) });
             return;
         };
         self.quit = true;
+    }
+
+    // ---- projects ----
+
+    fn homeDir(self: *const App) []const u8 {
+        return if (self.environ) |e| (e.get("HOME") orelse "") else "";
+    }
+
+    fn startDir(self: *const App) []const u8 {
+        return std.fs.path.dirname(self.project.root) orelse self.project.root;
+    }
+
+    fn openProjectDialog(self: *App) void {
+        self.file_dialog.show(.{ .title = "Open project folder", .mode = .open_folder, .start_dir = self.startDir(), .home = self.homeDir(), .on_result = .bind(self, onProjectPicked) });
+    }
+
+    fn newProjectDialog(self: *App) void {
+        self.file_dialog.show(.{ .title = "New project: choose a folder and a name", .mode = .new_folder, .start_dir = self.startDir(), .home = self.homeDir(), .name = "myproject", .ok_label = "Next", .on_result = .bind(self, onNewProjectPicked) });
+    }
+
+    fn onProjectPicked(self: *App, path: []const u8) void {
+        if (std.mem.eql(u8, path, self.project.root)) return self.setStatus("{s} is already open", .{path});
+        self.launchOn(path);
+    }
+
+    fn onNewProjectPicked(self: *App, path: []const u8) void {
+        const name = std.fs.path.basename(path);
+        const parent = std.fs.path.dirname(path) orelse ".";
+        if (!ide.new_project.validName(name)) return self.setStatus("\"{s}\" is not a valid project name: use letters, digits and underscores, starting with a letter", .{name});
+        if (parent.len > self.new_parent.len or name.len > self.new_name.len) return;
+        @memcpy(self.new_parent[0..parent.len], parent);
+        self.new_parent_len = parent.len;
+        @memcpy(self.new_name[0..name.len], name);
+        self.new_name_len = name.len;
+        var items: [ide.new_project.templates.len]zigui.menu.Item = undefined;
+        var labels: [ide.new_project.templates.len][160]u8 = undefined;
+        for (ide.new_project.templates, 0..) |t, i| {
+            const unavailable = t.template == .zigui_app and self.zigui_root == null;
+            items[i] = .{
+                .label = std.fmt.bufPrint(&labels[i], "{s}{s}", .{ t.title, if (unavailable) " (zigui source not found: set ZIGUI_ROOT)" else "" }) catch t.title,
+                .enabled = !unavailable,
+            };
+        }
+        self.ui.openMenu(&items, 320, 60, .{ .on_pick = zigui.menu.PickHook.bind(self, onTemplatePick), .min_width = 320 }) catch {};
+    }
+
+    fn onTemplatePick(self: *App, index: usize) void {
+        if (index >= ide.new_project.templates.len) return;
+        const t = ide.new_project.templates[index];
+        var report: ide.new_project.Report = .{};
+        const made = ide.new_project.create(self.gpa, self.io, self.new_parent[0..self.new_parent_len], self.new_name[0..self.new_name_len], t.template, self.zigui_root, &report) catch |err| {
+            return self.setStatus("could not create the project: {s}", .{if (report.len > 0) report.text() else @errorName(err)});
+        };
+        defer self.gpa.free(made);
+        self.launchOn(made);
     }
 
     fn setStatus(self: *App, comptime fmt: []const u8, args: anytype) void {
@@ -267,6 +334,10 @@ const App = struct {
             _ = self.docs.saveAll();
         } else if (eq(u8, name, "file.close")) {
             if (self.docs.active()) |d| self.dock.requestClose(d.panel);
+        } else if (eq(u8, name, "file.new_project")) {
+            self.newProjectDialog();
+        } else if (eq(u8, name, "file.open_project")) {
+            self.openProjectDialog();
         } else if (eq(u8, name, "file.new_ui")) {
             self.prompt.ask("New UI document (a path ending in .ui.zon):", "ui/untitled.ui.zon", .bind(self, onNewUiName));
         } else if (eq(u8, name, "file.design")) {
@@ -683,6 +754,13 @@ pub fn main(init: std.process.Init) !void {
     app.dock = dock;
     app.prompt = try ide.prompt.Prompt.create(&ui, ui.tree.root);
     defer app.prompt.destroy();
+    app.file_dialog = try zigui.file_dialog.FileDialog.create(&ui, io, ui.tree.root);
+    defer app.file_dialog.destroy();
+    if (std.process.executablePathAlloc(io, gpa)) |exe| {
+        defer gpa.free(exe);
+        app.zigui_root = try ide.new_project.findZiguiRoot(gpa, io, exe, init.environ_map);
+    } else |_| {}
+    defer if (app.zigui_root) |r| gpa.free(r);
     app.status = try ui.add(zigui.Label, ui.tree.root, .{ .style = .{ .padding = zigui.style.Edges.xy(8, 3), .shrink = 0 } });
 
     // Center: a welcome tab that documents open beside.
@@ -775,6 +853,8 @@ pub fn main(init: std.process.Init) !void {
 
     // Commands (menus and shortcuts refer to them by name).
     inline for (.{
+        .{ "file.new_project", "New Project..." },
+        .{ "file.open_project", "Open Project..." },
         .{ "file.new_ui", "New UI Document..." },
         .{ "file.design", "Design This Document" },
         .{ "file.save", "Save" },
@@ -823,6 +903,9 @@ pub fn main(init: std.process.Init) !void {
 
     // The menu bar.
     try bar.addMenu("File", &.{
+        .{ .label = "New Project...", .command = "file.new_project" },
+        .{ .label = "Open Project...", .command = "file.open_project" },
+        .{ .separator = true },
         .{ .label = "New UI Document...", .command = "file.new_ui" },
         .{ .label = "Design This Document", .command = "file.design" },
         .{ .separator = true },

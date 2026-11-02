@@ -1,0 +1,11 @@
+const zigui = @import("zigui");
+
+pub const Main = struct {
+    clicks: u32 = 0,
+
+    pub fn onHelloClick(self: *Main, ev: *zigui.event.Event) void {
+        _ = ev;
+        self.clicks += 1;
+        @import("std").log.info("clicked {d} times", .{self.clicks});
+    }
+};

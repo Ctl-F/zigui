@@ -24,6 +24,7 @@
       ["widgets/popup.html", "Popup"],
       ["widgets/completion.html", "Completion"],
       ["widgets/hover.html", "Hover and signatures"],
+      ["widgets/file-dialog.html", "FileDialog"],
       ["widgets/terminal.html", "Terminal"],
       ["widgets/canvas.html", "Canvas"],
       ["widgets/scroll-view.html", "ScrollView"],
@@ -46,6 +47,7 @@
       ["lsp.html", "Language servers"],
       ["designer.html", "UI designer and handlers"],
       ["settings.html", "Settings, keys, sessions"],
+      ["projects.html", "Projects: open and create"],
     ]],
     ["Project", [
       ["maintaining.html", "Maintaining these docs"],

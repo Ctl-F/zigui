@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>FileDialog - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>FileDialog</h1>
+<p>A file dialog drawn by the toolkit, so it looks and behaves the same on every platform and can be tested: a modal panel with a path field, a list of the folder's entries, and OK / Cancel. It chooses a folder, an existing file, a file name to save to, or the name of a new folder inside an existing one.</p>
+<pre><code>const dialog = try zigui.file_dialog.FileDialog.create(&amp;ui, io, ui.tree.root);   // hidden until shown
+defer dialog.destroy();
+dialog.show(.{
+    .title = "Open project folder",
+    .mode = .open_folder,                       // .open_folder, .open_file, .save_file, .new_folder
+    .start_dir = "/home/me/projects",
+    .home = "/home/me",                         // shows a Home button
+    .on_result = .bind(&amp;app, App.opened),       // fn (*App, path: []const u8) void (absolute path)
+});</code></pre>
+<table>
+<tr><th>Mode</th><th>Result</th></tr>
+<tr><td><code>open_folder</code></td><td>The selected sub-folder, or the folder shown if nothing is selected. Files are not listed.</td></tr>
+<tr><td><code>open_file</code></td><td>The selected file (<code>suffix</code> limits the list, e.g. <code>".zig"</code>); choosing a folder opens it.</td></tr>
+<tr><td><code>save_file</code></td><td>Folder shown + the typed name.</td></tr>
+<tr><td><code>new_folder</code></td><td>Folder shown + the typed name (no slashes); the dialog does not create it.</td></tr>
+</table>
+<h2>Using it</h2>
+<ul>
+<li>Click selects; <b>double-click or Enter</b> on a folder opens it (on a file it accepts, in the modes that choose files). <b>Up</b> goes to the parent, <b>Home</b> to the home folder, and the path field takes a typed path (Enter goes there; a bad one says "cannot open that folder" and stays). <b>Hidden</b> toggles dot-files. Folders are listed first, then files, each in name order ignoring case; symbolic links to folders count as folders.</li>
+<li><b>OK</b> or Enter in the name field accepts; <b>Cancel</b> or Escape closes without calling the hook. A missing selection or name is reported in red in the dialog.</li>
+<li>While it is open it holds a modal focus scope: the rest of the window gets no input, and the area outside the panel is dimmed.</li>
+</ul>
+<p><code>show</code> can be called again with new options to reuse the dialog; <code>close()</code> hides it; <code>navigate(path)</code> and <code>accept()</code> are available to drive it from code. Code-only widget.</p>
+</main><script src="../nav.js"></script></body></html>

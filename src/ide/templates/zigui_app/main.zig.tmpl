@@ -1,0 +1,107 @@
+const std = @import("std");
+const zigui = @import("zigui");
+const sdl = @import("zigui_sdl");
+const stb = @import("zigui_stb");
+const ui_actions = @import("ui_actions.zig");
+const handlers = @import("ui/main.zig");
+
+const WindowPresenter = struct {
+    window: *sdl.Window,
+
+    fn present(ctx: ?*anyopaque, rgba: []const u8, w: u32, h: u32) zigui.render_backend.Error!void {
+        const self: *WindowPresenter = @ptrCast(@alignCast(ctx.?));
+        self.window.present(rgba, w, h) catch return error.PresentFailed;
+    }
+
+    fn presenter(self: *WindowPresenter) zigui.software_backend.Presenter {
+        return .{ .ctx = self, .present = present };
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+
+    try sdl.init();
+    defer sdl.quit();
+    var window = try sdl.Window.create("@@NAME@@", 800, 600);
+    defer window.destroy();
+
+    var ui = try zigui.Ui.init(gpa);
+    ui.clock = sdl.ticksNs;
+    ui.wake = sdl.wake;
+    defer ui.deinit();
+
+    const ui_bytes = stb.loadFirst(io, gpa, init.environ_map.get("ZIGUI_FONT"), &stb.ui_font_candidates);
+    defer if (ui_bytes) |b| gpa.free(b);
+    const mono_bytes = stb.loadFirst(io, gpa, init.environ_map.get("ZIGUI_MONO_FONT"), &stb.mono_font_candidates);
+    defer if (mono_bytes) |b| gpa.free(b);
+    var ui_font: stb.StbFont = undefined;
+    var mono_font: stb.StbFont = undefined;
+    if (ui_bytes) |bytes| {
+        try ui_font.init(bytes, 0);
+        _ = try ui.addFont(ui_font.backend());
+        if (mono_bytes) |mb| {
+            try mono_font.init(mb, 0);
+            ui.theme.mono_font = try ui.addFont(mono_font.backend());
+        }
+    } else std.log.warn("no UI font found (set ZIGUI_FONT=/path/to/font.ttf); text will not be drawn", .{});
+
+    // The window's contents come from ui/main.ui.zon (edit it in the zigui IDE's designer,
+    // then run again). Its events call the methods registered in ui_actions.zig.
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, "ui/main.ui.zon", gpa, .limited(1 << 20));
+    defer gpa.free(text);
+    var doc = try zigui.uidoc.parseDoc(gpa, text, null, null);
+    defer doc.deinit();
+    var main_handlers: handlers.Main = .{};
+    var actions: zigui.uiload.Actions = .{};
+    defer actions.deinit(gpa);
+    try ui_actions.register(&actions, gpa, .{ .main = &main_handlers });
+    ui.tree.get(ui.tree.root).?.style = .{ .direction = .column };
+    ui.tree.get(ui.tree.root).?.visual = .{ .background = zigui.Color.rgb(32, 40, 60) };
+    var inst = try zigui.uiload.instantiate(&ui, ui.tree.root, &doc, .{ .actions = &actions });
+    defer inst.deinit();
+
+    const commands = try gpa.alloc(zigui.draw_list.Command, 16384);
+    defer gpa.free(commands);
+    const glyphs = try gpa.alloc(zigui.draw_list.Glyph, 32768);
+    defer gpa.free(glyphs);
+    var list = zigui.DrawList.init(commands, glyphs);
+    var presenter: WindowPresenter = .{ .window = &window };
+    var renderer = try zigui.software_backend.SoftwareBackend.init(gpa, presenter.presenter());
+    defer renderer.deinit();
+    const backend = renderer.backend();
+
+    var force = true;
+    var running = true;
+    while (running) {
+        _ = ui.tick(sdl.ticks());
+        ui.update();
+        if (force or ui.isDirty()) {
+            const px = window.pixelSize();
+            try ui.renderFrame(backend, &list, .{ .pixel_w = px.w, .pixel_h = px.h, .scale = window.scale(), .clear = zigui.Color.black });
+            force = false;
+        }
+        ui.endFrame();
+        const timeout: i32 = if (ui.nextWakeMs()) |ms| @intCast(ms) else -1;
+        var ev = sdl.waitEvent(timeout);
+        _ = ui.tick(sdl.ticks());
+        while (ev) |e| : (ev = sdl.pollEvent()) {
+            switch (e.data) {
+                .quit, .close_requested => running = false,
+                .resized, .expose => force = true,
+                .mouse_move => |m| ui.pointerMove(m.x, m.y),
+                .mouse_button => |m| ui.pointerButtonEx(m.x, m.y, @backingInt(m.button), m.down, m.clicks),
+                .mouse_wheel => |m| ui.wheel(m.px, m.py, m.x, m.y),
+                .pointer_left => ui.pointerLeft(),
+                .focus_lost => ui.pointerCancel(),
+                .text_input => |t| ui.textInput(t.bytes[0..t.len]),
+                .text_editing => |t| ui.textEditing(t.bytes[0..t.len], t.cursor),
+                .key => |k| {
+                    const used = ui.keyHandled(k.key, k.mods, k.down, k.repeat);
+                    if (k.down and k.key == .escape and !used) running = false;
+                },
+            }
+        }
+    }
+}
