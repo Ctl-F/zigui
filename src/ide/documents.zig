@@ -207,6 +207,13 @@ pub const Documents = struct {
         self.message_len = s.len;
     }
 
+    /// The real path of a document path: absolute paths (files outside the
+    /// project, like the standard library) are returned as they are.
+    fn absOf(self: *const Documents, path: []const u8) ![]u8 {
+        if (std.fs.path.isAbsolute(path)) return self.gpa.dupe(u8, path);
+        return self.project.absPath(self.gpa, path);
+    }
+
     pub fn find(self: *const Documents, path: []const u8) ?*Doc {
         for (self.docs.items) |d| {
             if (std.mem.eql(u8, d.path, path)) return d;
@@ -234,12 +241,17 @@ pub const Documents = struct {
     }
 
     fn load(self: *Documents, path: []const u8) !*Doc {
-        var bytes: ?[]u8 = self.project.readFile(self.gpa, path, max_editable) catch |err| switch (err) {
+        const external = std.fs.path.isAbsolute(path);
+        var bytes: ?[]u8 = (if (external)
+            std.Io.Dir.cwd().readFileAlloc(self.io, path, self.gpa, .limited(max_editable))
+        else
+            self.project.readFile(self.gpa, path, max_editable)) catch |err| switch (err) {
             error.FileNotFound, error.AccessDenied => return err,
             else => null,
         };
         errdefer if (bytes) |b| self.gpa.free(b);
-        const read_only = bytes == null;
+        // Files outside the project (the standard library) are for reading.
+        const read_only = bytes == null or external;
 
         const doc = try self.gpa.create(Doc);
         errdefer self.gpa.destroy(doc);
@@ -267,7 +279,7 @@ pub const Documents = struct {
         if (self.completion) |c| {
             try c.attach(ed);
             if (self.zig) |z| {
-                const abs = try self.project.absPath(self.gpa, path);
+                const abs = try self.absOf(path);
                 defer self.gpa.free(abs);
                 try z.setDir(ed, std.fs.path.dirname(abs) orelse self.project.root);
             }
@@ -276,7 +288,7 @@ pub const Documents = struct {
             try ed.loadText(b, true);
             bytes = null;
         } else {
-            const abs = try self.project.absPath(self.gpa, path);
+            const abs = try self.absOf(path);
             defer self.gpa.free(abs);
             try ed.openFile(self.io, abs);
         }
@@ -292,7 +304,7 @@ pub const Documents = struct {
         try self.dock.dockTab(panel, near);
         self.last_opened = doc;
         if (self.lsp) |l| {
-            const abs = self.project.absPath(self.gpa, path) catch null;
+            const abs = self.absOf(path) catch null;
             if (abs) |a| {
                 defer self.gpa.free(a);
                 l.attach(ed, a) catch {};
@@ -315,7 +327,7 @@ pub const Documents = struct {
 
     pub fn save(self: *Documents, doc: *Doc) bool {
         if (doc.read_only) {
-            self.say("{s} is too large to edit; it is read-only", .{doc.path});
+            self.say("{s} is read-only (outside the project or too large)", .{doc.path});
             return false;
         }
         const text = doc.editor.textAlloc(self.gpa) catch {

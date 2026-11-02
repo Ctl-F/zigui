@@ -35,6 +35,8 @@ pub const Options = struct {
     on_open: ?OpenHook = null,
     /// Wakes the event loop when results arrive (`sdl.wake`).
     wake: ?*const fn () void = null,
+    /// The Zig standard library's directory; enables the "Std" toggle.
+    std_dir: ?[]const u8 = null,
 };
 
 const Hit = struct { path_item: u32, line: u32, col: u32 };
@@ -47,6 +49,9 @@ pub const SearchPanel = struct {
     field: *TextField,
     case_btn: *Button,
     word_btn: *Button,
+    std_btn: ?*Button = null,
+    std_dir: ?[]u8 = null,
+    include_std: bool = false,
     status: *Label,
     results: *TreeView,
     on_open: ?OpenHook,
@@ -85,6 +90,10 @@ pub const SearchPanel = struct {
         });
         const case_btn = try ui.add(Button, row, .{ .text = "Aa", .variant = .flat, .style = .{ .padding = pad }, .on_click = .bind(self, onToggle) });
         const word_btn = try ui.add(Button, row, .{ .text = "W", .variant = .flat, .style = .{ .padding = pad }, .on_click = .bind(self, onToggle) });
+        const std_btn: ?*Button = if (opts.std_dir != null)
+            try ui.add(Button, row, .{ .text = "Std", .variant = .flat, .style = .{ .padding = pad }, .on_click = .bind(self, onToggle) })
+        else
+            null;
         _ = try ui.add(Button, row, .{ .text = "Search", .variant = .flat, .style = .{ .padding = pad }, .on_click = .bind(self, onSubmit) });
         const status = try ui.add(Label, node, .{ .text = "", .style = .{ .shrink = 0 } });
         const results = try ui.add(TreeView, node, .{
@@ -105,6 +114,8 @@ pub const SearchPanel = struct {
             .results = results,
             .on_open = opts.on_open,
             .wake = opts.wake,
+            .std_btn = std_btn,
+            .std_dir = if (opts.std_dir) |d| try ui.gpa.dupe(u8, d) else null,
         };
         return self;
     }
@@ -116,6 +127,7 @@ pub const SearchPanel = struct {
         self.files.deinit(self.gpa);
         self.file_paths.deinit(self.gpa);
         self.batch.deinit(self.gpa);
+        if (self.std_dir) |d| self.gpa.free(d);
         self.gpa.destroy(self);
     }
 
@@ -138,6 +150,12 @@ pub const SearchPanel = struct {
         self.word_btn.setVariant(if (whole_word) .primary else .flat);
     }
 
+    /// Include the standard library in searches (needs `Options.std_dir`).
+    pub fn setIncludeStd(self: *SearchPanel, on: bool) void {
+        self.include_std = on and self.std_dir != null;
+        if (self.std_btn) |b| b.setVariant(if (self.include_std) .primary else .flat);
+    }
+
     /// Is a search still running?
     pub fn running(self: *const SearchPanel) bool {
         if (self.searcher) |s| return !s.finished();
@@ -158,7 +176,7 @@ pub const SearchPanel = struct {
             self.status.setText("") catch {};
             return;
         }
-        self.searcher = sp.Searcher.start(self.gpa, self.project, q, .{ .case_sensitive = self.case_sensitive, .whole_word = self.whole_word }, self.wake) catch {
+        self.searcher = sp.Searcher.startIn(self.gpa, self.project, if (self.include_std) self.std_dir else null, q, .{ .case_sensitive = self.case_sensitive, .whole_word = self.whole_word }, self.wake) catch {
             self.status.setText("could not start the search") catch {};
             return;
         };
@@ -184,8 +202,10 @@ pub const SearchPanel = struct {
     fn apply(self: *SearchPanel, e: *sp.Event) !void {
         switch (e.*) {
             .hit => |h| {
+                var shown_buf: [std.fs.max_path_bytes + 8]u8 = undefined;
                 const file_item = self.files.get(h.path) orelse blk: {
-                    const id = try self.results.addItem(tree_view.no_item, h.path);
+                    const shown = self.displayPath(h.path, &shown_buf);
+                    const id = try self.results.addItem(tree_view.no_item, shown);
                     const key = try self.gpa.dupe(u8, h.path);
                     errdefer self.gpa.free(key);
                     try self.file_paths.put(self.gpa, id, key);
@@ -205,6 +225,13 @@ pub const SearchPanel = struct {
         }
     }
 
+    /// Files under the standard library show as "std/...".
+    fn displayPath(self: *const SearchPanel, path: []const u8, buf: []u8) []const u8 {
+        const d = self.std_dir orelse return path;
+        if (!std.mem.startsWith(u8, path, d)) return path;
+        return std.fmt.bufPrint(buf, "std{s}", .{path[d.len..]}) catch path;
+    }
+
     fn showStatus(self: *SearchPanel, done: bool, summary: ?sp.Summary) void {
         var buf: [96]u8 = undefined;
         const files = self.files.count();
@@ -221,6 +248,13 @@ pub const SearchPanel = struct {
     }
 
     fn onToggle(self: *SearchPanel, ev: *event.Event) void {
+        if (self.std_btn) |b| {
+            if (ev.current.eql(b.node)) {
+                self.setIncludeStd(!self.include_std);
+                if (self.field.text().len > 0) self.start();
+                return;
+            }
+        }
         if (ev.current.eql(self.case_btn.node)) self.setOptions(!self.case_sensitive, self.whole_word) else self.setOptions(self.case_sensitive, !self.whole_word);
         if (self.field.text().len > 0) self.start();
     }

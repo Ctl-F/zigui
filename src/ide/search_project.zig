@@ -60,17 +60,27 @@ pub const Searcher = struct {
     project: *const Project,
     query: []u8,
     opts: search.Options,
+    /// Also search this directory (an absolute path, normally the Zig standard
+    /// library); its hits carry absolute paths. Owned.
+    extra_root: ?[]u8 = null,
     queue: worker.Queue(Event),
     thread: ?std.Thread = null,
     cancelled: std.atomic.Value(bool) = .init(false),
     finished_flag: std.atomic.Value(bool) = .init(false),
 
     pub fn start(gpa: std.mem.Allocator, project: *const Project, query: []const u8, opts: search.Options, wake: ?*const fn () void) !*Searcher {
+        return startIn(gpa, project, null, query, opts, wake);
+    }
+
+    /// Like `start`, and also searches `extra_root` (absolute) when given.
+    pub fn startIn(gpa: std.mem.Allocator, project: *const Project, extra_root: ?[]const u8, query: []const u8, opts: search.Options, wake: ?*const fn () void) !*Searcher {
         const self = try gpa.create(Searcher);
         errdefer gpa.destroy(self);
         const q = try gpa.dupe(u8, query);
         errdefer gpa.free(q);
-        self.* = .{ .gpa = gpa, .project = project, .query = q, .opts = opts, .queue = .{ .gpa = gpa, .wake = wake } };
+        const extra: ?[]u8 = if (extra_root) |r| try gpa.dupe(u8, r) else null;
+        errdefer if (extra) |e| gpa.free(e);
+        self.* = .{ .gpa = gpa, .project = project, .query = q, .opts = opts, .extra_root = extra, .queue = .{ .gpa = gpa, .wake = wake } };
         self.thread = try std.Thread.spawn(.{}, run, .{self});
         return self;
     }
@@ -96,6 +106,7 @@ pub const Searcher = struct {
         left.deinit(self.gpa);
         self.queue.deinit();
         self.gpa.free(self.query);
+        if (self.extra_root) |e| self.gpa.free(e);
         self.gpa.destroy(self);
     }
 
@@ -120,11 +131,39 @@ pub const Searcher = struct {
                 else => {},
             }
         }
+        if (self.extra_root) |root| try self.walkExtra(root, summary);
+    }
+
+    fn walkExtra(self: *Searcher, root: []const u8, summary: *Summary) !void {
+        const io = self.project.io;
+        var dir = try std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true });
+        defer dir.close(io);
+        var walker = try dir.walkSelectively(self.gpa);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| {
+            if (self.cancelled.load(.acquire) or summary.truncated) return;
+            switch (entry.kind) {
+                .directory => walker.enter(io, entry) catch {},
+                .file => {
+                    if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+                    const bytes = dir.readFileAlloc(io, entry.path, self.gpa, .limited(max_file)) catch continue;
+                    defer self.gpa.free(bytes);
+                    const abs = std.fs.path.join(self.gpa, &.{ root, entry.path }) catch continue;
+                    defer self.gpa.free(abs);
+                    self.searchBytes(abs, bytes, summary);
+                },
+                else => {},
+            }
+        }
     }
 
     fn searchFile(self: *Searcher, rel: []const u8, summary: *Summary) void {
         const bytes = self.project.readFile(self.gpa, rel, max_file) catch return;
         defer self.gpa.free(bytes);
+        self.searchBytes(rel, bytes, summary);
+    }
+
+    fn searchBytes(self: *Searcher, rel: []const u8, bytes: []const u8, summary: *Summary) void {
         if (std.mem.indexOfScalar(u8, bytes[0..@min(bytes.len, 8192)], 0) != null) return;
         summary.files += 1;
         var line_no: u32 = 0;
@@ -252,4 +291,31 @@ test "an empty query finds nothing and cancel stops early" {
     const s2 = try Searcher.start(testing.allocator, &p, "e", .{}, null);
     s2.cancel();
     s2.destroy(); // joins; must not hang or leak
+}
+
+test "an extra root is searched too and its hits carry absolute paths" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var p = try project_mod.testProject(&tmp);
+    defer p.close();
+    var other = testing.tmpDir(.{ .iterate = true });
+    defer other.cleanup();
+    try other.dir.createDirPath(testing.io, "sub");
+    try other.dir.writeFile(testing.io, .{ .sub_path = "sub/lib.zig", .data = "pub fn zzqx() void {}\n" });
+    try other.dir.writeFile(testing.io, .{ .sub_path = "sub/note.txt", .data = "zzqx\n" });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try other.dir.realPath(testing.io, &buf);
+    const s = try Searcher.startIn(testing.allocator, &p, buf[0..n], "zzqx", .{}, null);
+    defer s.destroy();
+    var events: std.ArrayListUnmanaged(Event) = .empty;
+    defer freeEvents(&events);
+    try collect(s, &events);
+    var hits: usize = 0;
+    for (events.items) |e| if (e == .hit) {
+        hits += 1;
+        try testing.expect(std.fs.path.isAbsolute(e.hit.path));
+        try testing.expect(std.mem.endsWith(u8, e.hit.path, "sub/lib.zig"));
+    };
+    try testing.expectEqual(@as(usize, 1), hits);
 }

@@ -642,6 +642,11 @@ fn runCommand(app: *App, ui: *Ui, cmd: []const u8) void {
         app.dock.activatePanel(app.search_panel);
         app.search.setQuery(rest);
         app.search.start();
+    } else if (std.mem.eql(u8, verb, "searchstd")) {
+        app.dock.activatePanel(app.search_panel);
+        app.search.setIncludeStd(true);
+        app.search.setQuery(rest);
+        app.search.start();
     } else if (std.mem.eql(u8, verb, "type")) {
         ui.textInput(rest);
     } else if (std.mem.eql(u8, verb, "key")) {
@@ -860,7 +865,7 @@ pub fn main(init: std.process.Init) !void {
 
     const search_panel = try dock.addPanel("Search");
     app.search_panel = search_panel;
-    app.search = try ide.SearchPanel.create(&ui, search_panel.content, &project, .{ .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt), .wake = sdl.wake });
+    app.search = try ide.SearchPanel.create(&ui, search_panel.content, &project, .{ .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt), .wake = sdl.wake, .std_dir = std_dir });
     defer app.search.destroy();
     try dock.dockTab(search_panel, files_panel);
     dock.activatePanel(files_panel);
