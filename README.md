@@ -467,7 +467,7 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   and renames as lists of file edits, and applies them through open editor
   buffers when there are any. `ide/designer.zig` syncs a `.ui.zon` text tab and
   the builder both ways; `ide/prompt.zig` is the one-line question bar (two-step
-  rename confirmation). The Events menu groups handlers into a submenu per file
+  rename confirmation). Moving a handler (`planMove`/`Handlers.move`, Refactor menu) carries the doc comment, retypes the receiver, makes it `pub`, creates a missing struct/file, updates the manifest and rewrites `Old.fn` where the new struct is in scope; it refuses bodies that use `self`, and reports the uses it cannot fix. The Events menu groups handlers into a submenu per file
   (`HandlerChoice.group`), offers "New handler in <companion>.zig" (`ui/main.ui.zon`
   -> `ui/main.zig` with `Main`, created with the document) and "New handler in..."
   (`HandlerTarget`s); `planCreate` takes an optional `Target` and creates a missing

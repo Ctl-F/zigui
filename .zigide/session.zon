@@ -1,0 +1,23 @@
+// The IDE's last session; written when it quits. Safe to delete.
+.{
+    .version = 1,
+    .files = .{
+    },
+    .layout = .{
+    .version = 1,
+    .root = .{ .split = .{ .vertical = true, .size = 220, .second = true,
+        .a = .{ .split = .{ .vertical = false, .size = 280, .second = false,
+            .a = .{ .group = .{ .active = 0, .panels = .{"Files", "Search", } } },
+            .b = .{ .group = .{ .active = 0, .panels = .{"Welcome", } } }, } },
+        .b = .{ .group = .{ .active = 0, .panels = .{"Output", "Terminal", } } }, } },
+    .floats = .{
+    },
+    .hidden = .{
+        "Toolbox",
+        "Outline",
+        "Preview",
+        "Inspector",
+        "Designer",
+    },
+},
+}

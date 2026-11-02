@@ -51,6 +51,9 @@ pub const Handler = struct {
     decl_start: usize,
     /// Start of the container's declaration (`pub const X = struct`); 0 for file level.
     container_decl_start: usize,
+    /// The whole declaration with its `///` doc comment and line break: [span_start, span_end).
+    span_start: usize,
+    span_end: usize,
 };
 
 pub const Container = struct {
@@ -126,7 +129,7 @@ fn isEventPointer(type_text: []const u8) bool {
     return std.mem.eql(u8, t, "Event") or std.mem.endsWith(u8, t, ".Event");
 }
 
-const Found = struct { name: []const u8, takes_self: bool, is_pub: bool, name_tok: Ast.TokenIndex, first_tok: Ast.TokenIndex };
+const Found = struct { name: []const u8, takes_self: bool, is_pub: bool, name_tok: Ast.TokenIndex, first_tok: Ast.TokenIndex, node: Ast.Node.Index };
 
 fn asHandler(ast: *const Ast, node: Ast.Node.Index) ?Found {
     if (ast.nodeTag(node) != .fn_decl) return null;
@@ -147,13 +150,13 @@ fn asHandler(ast: *const Ast, node: Ast.Node.Index) ?Found {
     const first_tok = fp.visib_token orelse fp.extern_export_inline_token orelse fp.ast.fn_token;
     if (n == 1) {
         if (!isEventPointer(types[0] orelse return null)) return null;
-        return .{ .name = ast.tokenSlice(name_tok), .takes_self = false, .is_pub = fp.visib_token != null, .name_tok = name_tok, .first_tok = first_tok };
+        return .{ .name = ast.tokenSlice(name_tok), .takes_self = false, .is_pub = fp.visib_token != null, .name_tok = name_tok, .first_tok = first_tok, .node = node };
     }
     if (n == 2) {
         const first = std.mem.trim(u8, types[0] orelse return null, " ");
         if (!std.mem.startsWith(u8, first, "*")) return null;
         if (!isEventPointer(types[1] orelse return null)) return null;
-        return .{ .name = ast.tokenSlice(name_tok), .takes_self = true, .is_pub = fp.visib_token != null, .name_tok = name_tok, .first_tok = first_tok };
+        return .{ .name = ast.tokenSlice(name_tok), .takes_self = true, .is_pub = fp.visib_token != null, .name_tok = name_tok, .first_tok = first_tok, .node = node };
     }
     return null;
 }
@@ -205,6 +208,23 @@ pub fn scan(gpa: Allocator, project: *const Project) !Scan {
     return result;
 }
 
+/// Where a declaration starts, counting its `///` lines, at the beginning of its line.
+fn spanStart(ast: *const Ast, src: []const u8, first_tok: Ast.TokenIndex) usize {
+    var t = first_tok;
+    while (t > 0 and ast.tokenTag(t - 1) == .doc_comment) t -= 1;
+    const at = ast.tokenStart(t);
+    const ls = lineStartOf(src, at);
+    return if (std.mem.trim(u8, src[ls..at], " \t").len == 0) ls else at;
+}
+
+/// The end of a declaration, past the line break that follows it.
+fn spanEnd(ast: *const Ast, src: []const u8, node: Ast.Node.Index) usize {
+    const last = ast.lastToken(node);
+    var e = ast.tokenStart(last) + ast.tokenSlice(last).len;
+    while (e < src.len and src[e] != '\n') e += 1;
+    return @min(e + 1, src.len);
+}
+
 fn makeHandler(a: Allocator, ast: *const Ast, src: []const u8, file: []const u8, container: []const u8, container_pub: bool, container_decl_start: usize, f: Found) !Handler {
     const start = ast.tokenStart(f.name_tok);
     var line: u32 = 1;
@@ -223,6 +243,8 @@ fn makeHandler(a: Allocator, ast: *const Ast, src: []const u8, file: []const u8,
         .name_end = start + f.name.len,
         .decl_start = ast.tokenStart(f.first_tok),
         .container_decl_start = container_decl_start,
+        .span_start = spanStart(ast, src, f.first_tok),
+        .span_end = spanEnd(ast, src, f.node),
     };
 }
 
@@ -622,6 +644,101 @@ pub fn newFileText(a: Allocator, t: Target, body: []const u8) ![]u8 {
     , .{ subject, t.container, t.container, body });
 }
 
+/// What goes into a struct as a new method.
+const InsertSpec = union(enum) {
+    /// An empty handler with this function name.
+    stub: []const u8,
+    /// An existing method's source (its doc comment and declaration, at indent 0),
+    /// written with the `zigui` import alias it uses in its old file.
+    moved: struct { text: []const u8, alias: []const u8 },
+};
+
+/// The method's text at `indent` in a struct whose file calls the import `alias`.
+fn methodText(a: Allocator, spec: InsertSpec, indent: usize, container: []const u8, alias: []const u8, blank_before: bool) ![]u8 {
+    switch (spec) {
+        .stub => |function| return stubText(a, indent, container, function, alias, blank_before),
+        .moved => |m| {
+            var out: std.ArrayListUnmanaged(u8) = .empty;
+            if (blank_before) try out.append(a, '\n');
+            var it = std.mem.splitScalar(u8, m.text, '\n');
+            while (it.next()) |line| {
+                if (line.len == 0) {
+                    try out.append(a, '\n');
+                    continue;
+                }
+                try out.appendNTimes(a, ' ', indent);
+                try out.appendSlice(a, try renameIdentifierQualifier(a, line, m.alias, alias));
+                try out.append(a, '\n');
+            }
+            // The text ended with a line break: that last empty piece added one too many.
+            if (out.items.len > 0 and out.items[out.items.len - 1] == '\n' and m.text.len > 0 and m.text[m.text.len - 1] == '\n') _ = out.pop();
+            return out.items;
+        },
+    }
+}
+
+/// `line` with the identifier `from` (when followed by a dot) renamed `to`.
+fn renameIdentifierQualifier(a: Allocator, line: []const u8, from: []const u8, to: []const u8) ![]const u8 {
+    if (std.mem.eql(u8, from, to) or from.len == 0) return line;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < line.len) {
+        const at = std.mem.indexOfPos(u8, line, i, from) orelse break;
+        const end = at + from.len;
+        const before_ok = at == 0 or !(std.ascii.isAlphanumeric(line[at - 1]) or line[at - 1] == '_' or line[at - 1] == '.');
+        const after_ok = end < line.len and line[end] == '.';
+        try out.appendSlice(a, line[i..at]);
+        try out.appendSlice(a, if (before_ok and after_ok) to else from);
+        i = end;
+    }
+    try out.appendSlice(a, line[i..]);
+    return out.items;
+}
+
+/// Edits that add `spec` as a method of `goal` (a struct that may be missing from
+/// an existing file, or in a file that does not exist: then `new_file` is set).
+fn planInsert(gpa: Allocator, a: Allocator, project: *const Project, scan_result: *const Scan, goal: Target, spec: InsertSpec, edits: *std.ArrayListUnmanaged(FileEdit), new_file: *?[]const u8) !void {
+    const existing = scan_result.findContainer(goal.container, goal.file);
+    const bytes: ?[]u8 = project.readFile(gpa, goal.file, 4 * 1024 * 1024) catch null;
+    defer if (bytes) |b| gpa.free(b);
+    if (bytes) |b| {
+        const src = try gpa.dupeSentinel(u8, b, 0);
+        defer gpa.free(src);
+        var ast = try Ast.parse(gpa, src, .{});
+        defer ast.deinit(gpa);
+        const alias = zigAlias(&ast) orelse "zigui";
+        if (existing) |t| {
+            const body_empty = blk: {
+                var i = t.close;
+                while (i > 0 and (src[i - 1] == ' ' or src[i - 1] == '\n' or src[i - 1] == '\r' or src[i - 1] == '\t')) i -= 1;
+                break :blk i > 0 and src[i - 1] == '{';
+            };
+            const text = try methodText(a, spec, t.indent, goal.container, alias, !body_empty);
+            // Before the closing brace's line when it stands alone on it.
+            const ls = lineStartOf(src, t.close);
+            const alone = std.mem.trim(u8, src[ls..t.close], " \t").len == 0;
+            const at = if (alone) ls else t.close;
+            try edits.append(a, .{ .file = goal.file, .start = at, .end = at, .text = text });
+            if (!t.is_pub) {
+                // The binding file names the struct from another file.
+                const decl = declStart(&ast, goal.container) orelse 0;
+                try edits.append(a, .{ .file = goal.file, .start = decl, .end = decl, .text = "pub " });
+            }
+        } else {
+            // The file exists but has no such struct: add it at the end.
+            const lead: []const u8 = if (src.len > 0 and src[src.len - 1] != '\n') "\n\n" else "\n";
+            const body = try methodText(a, spec, 4, goal.container, alias, false);
+            const text = try std.fmt.allocPrint(a, "{s}pub const {s} = struct {{\n{s}}};\n", .{ lead, goal.container, body });
+            try edits.append(a, .{ .file = goal.file, .start = src.len, .end = src.len, .text = text });
+        }
+        if (zigAlias(&ast) == null) {
+            try edits.append(a, .{ .file = goal.file, .start = importOffset(src), .end = importOffset(src), .text = "const zigui = @import(\"zigui\");\n" });
+        }
+    } else {
+        new_file.* = try newFileText(a, goal, try methodText(a, spec, 4, goal.container, "zigui", false));
+    }
+}
+
 /// Plan a new handler for event `event_name` of the node called `base`, in
 /// `want` (if that struct or file is missing it is created) or else the default struct.
 pub fn planCreate(gpa: Allocator, project: *const Project, scan_result: *const Scan, manifest: *const Manifest, base: []const u8, event_name: []const u8, want: ?Target) !Plan {
@@ -644,49 +761,198 @@ pub fn planCreate(gpa: Allocator, project: *const Project, scan_result: *const S
     }
 
     var edits: std.ArrayListUnmanaged(FileEdit) = .empty;
-    const bytes: ?[]u8 = project.readFile(gpa, file, 4 * 1024 * 1024) catch null;
-    defer if (bytes) |b| gpa.free(b);
-    if (bytes) |b| {
-        const src = try gpa.dupeSentinel(u8, b, 0);
-        defer gpa.free(src);
-        var ast = try Ast.parse(gpa, src, .{});
-        defer ast.deinit(gpa);
-        const alias = zigAlias(&ast) orelse "zigui";
-        if (existing) |t| {
-            const body_empty = blk: {
-                var i = t.close;
-                while (i > 0 and (src[i - 1] == ' ' or src[i - 1] == '\n' or src[i - 1] == '\r' or src[i - 1] == '\t')) i -= 1;
-                break :blk i > 0 and src[i - 1] == '{';
-            };
-            const stub = try stubText(a, t.indent, container, function, alias, !body_empty);
-            // Before the closing brace's line when it stands alone on it.
-            const ls = lineStartOf(src, t.close);
-            const alone = std.mem.trim(u8, src[ls..t.close], " \t").len == 0;
-            const at = if (alone) ls else t.close;
-            try edits.append(a, .{ .file = file, .start = at, .end = at, .text = stub });
-            if (!t.is_pub) {
-                // The binding file names the struct from another file.
-                const decl = declStart(&ast, container) orelse 0;
-                try edits.append(a, .{ .file = file, .start = decl, .end = decl, .text = "pub " });
-            }
-        } else {
-            // The file exists but has no such struct: add it at the end.
-            const lead: []const u8 = if (src.len > 0 and src[src.len - 1] != '\n') "\n\n" else "\n";
-            const text = try std.fmt.allocPrint(a, "{s}pub const {s} = struct {{\n{s}}};\n", .{ lead, container, try stubText(a, 4, container, function, alias, false) });
-            try edits.append(a, .{ .file = file, .start = src.len, .end = src.len, .text = text });
-        }
-        if (zigAlias(&ast) == null) {
-            try edits.append(a, .{ .file = file, .start = importOffset(src), .end = importOffset(src), .text = "const zigui = @import(\"zigui\");\n" });
-        }
-    } else {
-        p.new_file = try newFileText(a, goal, try stubText(a, 4, container, function, "zigui", false));
-    }
+    try planInsert(gpa, a, project, scan_result, .{ .file = file, .container = container, .doc = goal.doc }, .{ .stub = function }, &edits, &p.new_file);
     p.edits = edits.items;
     p.action = action;
     p.container = container;
     p.function = function;
     p.file = file;
     return p;
+}
+
+// ---- move ------------------------------------------------------------------
+
+pub const MoveError = error{
+    /// The function uses its receiver (`self`), which is a different type after the move.
+    UsesReceiver,
+    SameLocation,
+    NoSuchHandler,
+    /// The destination already has a member with that name.
+    NameTaken,
+    InvalidName,
+};
+
+/// Plan moving handler `h` to `want`: its source (doc comment included) leaves its
+/// struct and becomes a method of the destination (created if missing), with the
+/// receiver type changed. `unfixed` (optional) lists the places that still name the
+/// old location and that the plan could not safely change: they need a hand.
+/// Refuses when the function's body uses its receiver, since that value would be a
+/// different type.
+pub fn planMove(gpa: Allocator, project: *const Project, scan_result: *const Scan, h: Handler, want: Target, unfixed: ?*std.ArrayListUnmanaged(Reference)) !Plan {
+    if (std.mem.eql(u8, h.file, want.file) and std.mem.eql(u8, h.container, want.container)) return error.SameLocation;
+    if (scan_result.findHandler(want.container, want.file, h.name) != null) return error.NameTaken;
+    var p: Plan = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
+    errdefer p.arena.deinit();
+    const a = p.arena.allocator();
+
+    const bytes = try project.readFile(gpa, h.file, 4 * 1024 * 1024);
+    defer gpa.free(bytes);
+    const src = try gpa.dupeSentinel(u8, bytes, 0);
+    defer gpa.free(src);
+    var ast = try Ast.parse(gpa, src, .{});
+    defer ast.deinit(gpa);
+    const alias = zigAlias(&ast) orelse "zigui";
+
+    // The receiver: its name, and whether the body does anything with it besides `_ = self;`.
+    var receiver: []const u8 = "";
+    var i: u32 = 1;
+    var fn_node: ?Ast.Node.Index = null;
+    while (i < ast.nodes.len) : (i += 1) {
+        const n: Ast.Node.Index = @enumFromInt(i);
+        if (ast.nodeTag(n) != .fn_decl) continue;
+        const f = asHandler(&ast, n) orelse continue;
+        if (ast.tokenStart(f.name_tok) == h.name_start) {
+            fn_node = n;
+            break;
+        }
+    }
+    const node = fn_node orelse return error.NoSuchHandler;
+    var fb: [1]Ast.Node.Index = undefined;
+    const fp = ast.fullFnProto(&fb, ast.nodeData(node).node_and_node[0]).?;
+    if (h.takes_self) {
+        var it = fp.iterate(&ast);
+        if (it.next()) |first| if (first.name_token) |t| {
+            receiver = ast.tokenSlice(t);
+        };
+    }
+    if (receiver.len > 0 and !std.mem.eql(u8, receiver, "_")) {
+        const body = ast.nodeData(node).node_and_node[1];
+        var t = ast.firstToken(body);
+        const end = ast.lastToken(body);
+        while (t <= end) : (t += 1) {
+            if (ast.tokenTag(t) != .identifier or !std.mem.eql(u8, ast.tokenSlice(t), receiver)) continue;
+            // `_ = self;` is the usual way to say it is unused.
+            const discard = t >= 2 and ast.tokenTag(t - 1) == .equal and ast.tokenTag(t - 2) == .identifier and std.mem.eql(u8, ast.tokenSlice(t - 2), "_");
+            if (!discard) return error.UsesReceiver;
+        }
+    }
+
+    // The text to move, with the receiver's type changed and its indentation removed.
+    const raw = src[h.span_start..h.span_end];
+    const old_indent = indentOfLine(src, h.span_start);
+    var moved: std.ArrayListUnmanaged(u8) = .empty;
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    var first_sig = true;
+    while (lines.next()) |line| {
+        var l = line;
+        var cut: usize = 0;
+        while (cut < old_indent and cut < l.len and l[cut] == ' ') cut += 1;
+        l = l[cut..];
+        if (first_sig and std.mem.indexOf(u8, l, "fn ") != null) {
+            if (h.container.len > 0 and h.takes_self) l = try retypeReceiver(a, l, h.container, want.container);
+            // The binding file calls it from another file: it must be public.
+            if (!h.is_pub) l = try std.fmt.allocPrint(a, "pub {s}", .{l});
+            first_sig = false;
+        }
+        try moved.appendSlice(a, l);
+        try moved.append(a, '\n');
+    }
+    // `raw` ended with a line break, so splitting produced one empty piece at the end.
+    if (moved.items.len > 0 and moved.items[moved.items.len - 1] == '\n' and raw[raw.len - 1] == '\n') _ = moved.pop();
+    const text = moved.items;
+
+    var edits: std.ArrayListUnmanaged(FileEdit) = .empty;
+    // Out of the old place (and the blank line that separated it, if that leaves two).
+    var del_start = h.span_start;
+    var del_end = h.span_end;
+    const blank_before = del_start >= 2 and src[del_start - 1] == '\n' and src[del_start - 2] == '\n';
+    const next_blank = del_end < src.len and src[del_end] == '\n';
+    const next_close = std.mem.startsWith(u8, std.mem.trimStart(u8, src[del_end..], " \t"), "}");
+    if (blank_before and (next_close or next_blank)) del_start -= 1;
+    if (!blank_before and next_blank and del_start > 0 and src[del_start - 1] == '{') del_end += 1;
+    try edits.append(a, .{ .file = try a.dupe(u8, h.file), .start = del_start, .end = del_end, .text = "" });
+    // Into the new one.
+    const goal: Target = .{ .file = try a.dupe(u8, want.file), .container = try a.dupe(u8, want.container), .doc = want.doc };
+    try planInsert(gpa, a, project, scan_result, goal, .{ .moved = .{ .text = text, .alias = try a.dupe(u8, alias) } }, &edits, &p.new_file);
+    // Qualified uses `Old.name` elsewhere: renamed where the new struct is in scope, otherwise reported.
+    if (h.container.len > 0) try fixQualifiedUses(gpa, a, project, h, goal, &edits, unfixed);
+
+    p.edits = edits.items;
+    p.container = goal.container;
+    p.function = try a.dupe(u8, h.name);
+    p.file = goal.file;
+    return p;
+}
+
+/// `fn onX(self: *Old, ev: ...)` with `*Old` (or `*const Old`) changed to the new struct.
+fn retypeReceiver(a: Allocator, sig: []const u8, old: []const u8, new: []const u8) ![]const u8 {
+    const open = std.mem.indexOfScalar(u8, sig, '(') orelse return sig;
+    const comma = std.mem.indexOfScalarPos(u8, sig, open, ',') orelse return sig;
+    const first = sig[open..comma];
+    const star = std.mem.indexOf(u8, first, old) orelse return sig;
+    // The whole word only.
+    const end = star + old.len;
+    if (star > 0 and (std.ascii.isAlphanumeric(first[star - 1]) or first[star - 1] == '_')) return sig;
+    if (end < first.len and (std.ascii.isAlphanumeric(first[end]) or first[end] == '_')) return sig;
+    return std.fmt.allocPrint(a, "{s}{s}{s}{s}", .{ sig[0 .. open + star], new, first[end..], sig[comma..] });
+}
+
+fn hasTopLevel(ast: *const Ast, name: []const u8) bool {
+    for (ast.rootDecls()) |d| {
+        const vd = ast.fullVarDecl(d) orelse continue;
+        if (std.mem.eql(u8, ast.tokenSlice(vd.ast.mut_token + 1), name)) return true;
+    }
+    return false;
+}
+
+fn fixQualifiedUses(gpa: Allocator, a: Allocator, project: *const Project, h: Handler, goal: Target, edits: *std.ArrayListUnmanaged(FileEdit), unfixed: ?*std.ArrayListUnmanaged(Reference)) !void {
+    var files: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (files.items) |f| gpa.free(f);
+        files.deinit(gpa);
+    }
+    try listZigFiles(gpa, project, &files);
+    for (files.items) |rel| {
+        if (std.mem.eql(u8, rel, binding_file)) continue; // regenerated
+        const bytes = project.readFile(gpa, rel, 4 * 1024 * 1024) catch continue;
+        defer gpa.free(bytes);
+        if (std.mem.indexOf(u8, bytes, h.name) == null) continue;
+        const src = try gpa.dupeSentinel(u8, bytes, 0);
+        defer gpa.free(src);
+        var ast = Ast.parse(gpa, src, .{}) catch continue;
+        defer ast.deinit(gpa);
+        const in_goal = std.mem.eql(u8, rel, goal.file);
+        const new_in_scope = in_goal or hasTopLevel(&ast, goal.container);
+        const n_tokens: u32 = @intCast(ast.tokens.len);
+        var i: u32 = 0;
+        while (i < n_tokens) : (i += 1) {
+            if (ast.tokenTag(i) != .identifier or !std.mem.eql(u8, ast.tokenSlice(i), h.name)) continue;
+            const start = ast.tokenStart(i);
+            const is_decl = std.mem.eql(u8, rel, h.file) and start == h.name_start;
+            if (is_decl) continue;
+            const after_dot = i > 1 and ast.tokenTag(i - 1) == .period;
+            const own = std.mem.eql(u8, rel, h.file);
+            var qual_tok: ?u32 = null;
+            if (after_dot and ast.tokenTag(i - 2) == .identifier and std.mem.eql(u8, ast.tokenSlice(i - 2), h.container)) qual_tok = i - 2;
+            // In its old file any member access is a use of it (`self.onX(...)`): those cannot follow the move.
+            const is_use = qual_tok != null or (own and after_dot);
+            if (!is_use) continue;
+            // Within the destination file a qualified use can simply name the new struct.
+            if (qual_tok) |q| if (new_in_scope) {
+                try edits.append(a, .{ .file = try a.dupe(u8, rel), .start = ast.tokenStart(q), .end = ast.tokenStart(q) + h.container.len, .text = try a.dupe(u8, goal.container) });
+                continue;
+            };
+            if (unfixed) |list| {
+                var line: u32 = 1;
+                for (src[0..start]) |ch| {
+                    if (ch == '\n') line += 1;
+                }
+                const ls = lineStartOf(src, start);
+                const le = std.mem.indexOfScalarPos(u8, src, start, '\n') orelse src.len;
+                try list.append(gpa, .{ .file = try gpa.dupe(u8, rel), .line = line, .text = try gpa.dupe(u8, std.mem.trim(u8, src[ls..le], " \t\r")), .is_decl = false });
+            }
+        }
+    }
 }
 
 /// The `pub fn` source of an empty handler.
@@ -863,9 +1129,33 @@ pub const Handlers = struct {
         return self.manifest.find(plan.action).?.action;
     }
 
+    /// Move handler `h` to `want`, updating the manifest and the binding file. Returns
+    /// the places that still name the old location (the caller shows them).
+    pub fn move(self: *Handlers, h: Handler, want: Target, unfixed: ?*std.ArrayListUnmanaged(Reference)) !void {
+        var sc = try scan(self.gpa, self.project);
+        defer sc.deinit();
+        // Offsets in `h` may be stale (an earlier edit changed the file): look it up again.
+        const fresh = sc.handlers[sc.findHandler(h.container, h.file, h.name) orelse return error.NoSuchHandler];
+        var plan = try planMove(self.gpa, self.project, &sc, fresh, want, unfixed);
+        defer plan.deinit();
+        try self.apply(&plan);
+        const a = self.manifest.arena.allocator();
+        for (self.manifest.bindings.items) |*b| {
+            if (std.mem.eql(u8, b.function, h.name) and std.mem.eql(u8, b.container, h.container) and std.mem.eql(u8, b.file, h.file)) {
+                b.container = try a.dupe(u8, want.container);
+                b.file = try a.dupe(u8, want.file);
+            }
+        }
+        try self.commit();
+    }
+
     /// Rename a handler's function (the action name stays; documents are unaffected).
     pub fn rename(self: *Handlers, h: Handler, new_name: []const u8) !void {
-        var plan = try planRename(self.gpa, self.project, h, new_name, null);
+        if (!isIdentifier(new_name)) return error.InvalidName;
+        var sc = try scan(self.gpa, self.project);
+        defer sc.deinit();
+        const fresh = sc.handlers[sc.findHandler(h.container, h.file, h.name) orelse return error.NoSuchHandler];
+        var plan = try planRename(self.gpa, self.project, fresh, new_name, null);
         defer plan.deinit();
         try self.apply(&plan);
         for (self.manifest.bindings.items) |*b| {
@@ -1221,4 +1511,120 @@ test "a companion file goes with a UI document: names, creation in an existing f
     defer testing.allocator.free(other);
     try testing.expect(std.mem.indexOf(u8, other, "const x = 1;\n\npub const Other = struct {\n    pub fn onGoClick(self: *Other") != null);
     try testing.expect(std.mem.indexOf(u8, other, "const zigui = @import(\"zigui\");") != null);
+}
+
+fn moveProject(tmp: *testing.TmpDir) !Project {
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "src");
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data =
+        \\const zigui = @import("zigui");
+        \\
+        \\pub const App = struct {
+        \\    count: u32 = 0,
+        \\
+        \\    /// Resets things.
+        \\    /// Twice.
+        \\    fn onReset(self: *App, ev: *zigui.event.Event) void {
+        \\        _ = self;
+        \\        _ = ev;
+        \\    }
+        \\
+        \\    pub fn onBump(self: *App, ev: *zigui.event.Event) void {
+        \\        _ = ev;
+        \\        self.count += 1;
+        \\    }
+        \\
+        \\    pub fn run(self: *App) void {
+        \\        self.onReset(undefined);
+        \\    }
+        \\};
+        \\
+        \\pub const Other = struct {
+        \\};
+        \\
+        \\fn user() void {
+        \\    App.onReset(undefined, undefined);
+        \\}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/elsewhere.zig", .data =
+        \\const main = @import("main.zig");
+        \\const App = main.App;
+        \\fn go(app: *App) void {
+        \\    App.onReset(app, undefined);
+        \\}
+    });
+    const dir = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    return Project.fromDir(testing.allocator, io, dir);
+}
+
+test "moving a handler takes its doc comment along, retypes the receiver, and updates the manifest and binding file" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var p = try moveProject(&tmp);
+    defer p.close();
+    var h = try Handlers.init(testing.allocator, &p);
+    defer h.deinit();
+    var sc = try scan(testing.allocator, &p);
+    defer sc.deinit();
+    const target = sc.handlers[sc.findHandler("App", "src/main.zig", "onReset").?];
+    _ = try h.bindExisting(target);
+
+    var unfixed: std.ArrayListUnmanaged(Reference) = .empty;
+    defer {
+        for (unfixed.items) |r| {
+            testing.allocator.free(r.file);
+            testing.allocator.free(r.text);
+        }
+        unfixed.deinit(testing.allocator);
+    }
+    try h.move(target, .{ .file = "src/main.zig", .container = "Other" }, &unfixed);
+    const main = try p.readFile(testing.allocator, "src/main.zig", 1 << 20);
+    defer testing.allocator.free(main);
+    // Gone from App (and the blank line that went with it); present in Other, public, with its doc comment.
+    try testing.expect(std.mem.indexOf(u8, main, "fn onReset(self: *App") == null);
+    try testing.expect(std.mem.indexOf(u8, main, "pub const Other = struct {\n    /// Resets things.\n    /// Twice.\n    pub fn onReset(self: *Other, ev: *zigui.event.Event) void {\n        _ = self;\n        _ = ev;\n    }\n};") != null);
+    try testing.expect(std.mem.indexOf(u8, main, "    count: u32 = 0,\n\n    pub fn onBump") != null);
+    // `App.onReset(...)` in the destination file now says Other; the member access inside App
+    // (`self.onReset`) and the one in the other file (which has no `Other`) are reported.
+    try testing.expect(std.mem.indexOf(u8, main, "Other.onReset(undefined, undefined)") != null);
+    try testing.expectEqual(@as(usize, 2), unfixed.items.len);
+    // The file still parses, and the scan finds the handler in its new home.
+    var sc2 = try scan(testing.allocator, &p);
+    defer sc2.deinit();
+    try testing.expect(sc2.findHandler("Other", "src/main.zig", "onReset") != null);
+    try testing.expect(sc2.findHandler("App", "src/main.zig", "onReset") == null);
+    // The manifest follows (the action name is unchanged) and the binding file calls the new place.
+    try testing.expectEqualStrings("Other", h.manifest.find("onReset").?.container);
+    const gen = try p.readFile(testing.allocator, binding_file, 1 << 20);
+    defer testing.allocator.free(gen);
+    try testing.expect(std.mem.indexOf(u8, gen, "f0.Other.onReset") != null);
+    try testing.expect(std.mem.indexOf(u8, gen, "other: *f0.Other") != null);
+}
+
+test "moving to another file creates it, and refuses what cannot follow" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var p = try moveProject(&tmp);
+    defer p.close();
+    var h = try Handlers.init(testing.allocator, &p);
+    defer h.deinit();
+    var sc = try scan(testing.allocator, &p);
+    defer sc.deinit();
+    // onBump uses `self.count`: it cannot become another struct's method.
+    const bump = sc.handlers[sc.findHandler("App", "src/main.zig", "onBump").?];
+    try testing.expectError(error.UsesReceiver, h.move(bump, .{ .file = "src/other_file.zig", .container = "Elsewhere" }, null));
+    try testing.expectError(error.SameLocation, h.move(bump, .{ .file = "src/main.zig", .container = "App" }, null));
+    // onReset only discards its receiver, so it can move; the new file is created with a header.
+    const reset = sc.handlers[sc.findHandler("App", "src/main.zig", "onReset").?];
+    try h.move(reset, .{ .file = "src/panel.zig", .container = "Panel", .doc = "panel.ui.zon" }, null);
+    const panel = try p.readFile(testing.allocator, "src/panel.zig", 1 << 20);
+    defer testing.allocator.free(panel);
+    try testing.expect(std.mem.indexOf(u8, panel, "//! Event handlers for panel.ui.zon.") != null);
+    try testing.expect(std.mem.indexOf(u8, panel, "pub const Panel = struct {\n    /// Resets things.\n    /// Twice.\n    pub fn onReset(self: *Panel, ev: *zigui.event.Event) void {") != null);
+    // A name clash at the destination is refused.
+    try p.writeFile("src/clash.zig", "const zigui = @import(\"zigui\");\npub const Clash = struct {\n    pub fn onReset(self: *Clash, ev: *zigui.event.Event) void {\n        _ = self;\n        _ = ev;\n    }\n};\n");
+    var sc2 = try scan(testing.allocator, &p);
+    defer sc2.deinit();
+    const again = sc2.handlers[sc2.findHandler("Panel", "src/panel.zig", "onReset").?];
+    try testing.expectError(error.NameTaken, h.move(again, .{ .file = "src/clash.zig", .container = "Clash" }, null));
 }

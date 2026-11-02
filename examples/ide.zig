@@ -81,6 +81,10 @@ const App = struct {
     rename_index: usize = 0,
     rename_pending: [96]u8 = undefined,
     rename_pending_len: usize = 0,
+    /// Moving a handler: the structs offered (indexes into the scan's containers) and the one picked.
+    move_map: [64]usize = undefined,
+    move_count: usize = 0,
+    move_pick: usize = 0,
     /// Leave the main loop (set when a new instance has been started).
     quit: bool = false,
     /// Scripted (headless) runs only log what a restart would start: the new
@@ -305,6 +309,8 @@ const App = struct {
             self.ui.setFocus(self.search.field.node);
         } else if (eq(u8, name, "refactor.rename_handler")) {
             self.beginRename();
+        } else if (eq(u8, name, "refactor.move_handler")) {
+            self.beginMove();
         } else if (eq(u8, name, "refactor.regenerate")) {
             self.designer.service.commit() catch |err| return self.setStatus("could not regenerate {s}: {s}", .{ ide.handlers.binding_file, @errorName(err) });
             self.setStatus("regenerated {s}", .{ide.handlers.binding_file});
@@ -351,26 +357,108 @@ const App = struct {
         return text[s..e];
     }
 
-    fn beginRename(self: *App) void {
-        const d = self.docs.active() orelse return self.setStatus("open the file with the handler and put the caret on its name", .{});
-        const core = d.editor.core();
-        const head = core.primaryHead();
-        const text = d.editor.textAlloc(self.gpa) catch return;
+    /// The event handler whose name the caret is on, found with a fresh scan kept in `rename_scan`.
+    fn handlerAtCaret(self: *App) ?usize {
+        const d = self.docs.active() orelse {
+            self.setStatus("open the file with the handler and put the caret on its name", .{});
+            return null;
+        };
+        const head = d.editor.core().primaryHead();
+        const text = d.editor.textAlloc(self.gpa) catch return null;
         defer self.gpa.free(text);
         const word = wordAt(text, head);
-        if (word.len == 0) return self.setStatus("put the caret on the handler's name", .{});
+        if (word.len == 0) {
+            self.setStatus("put the caret on the handler's name", .{});
+            return null;
+        }
         if (self.rename_scan) |*old| old.deinit();
         self.rename_scan = ide.handlers.scan(self.gpa, self.project) catch null;
-        const sc = &(self.rename_scan orelse return);
+        const sc = &(self.rename_scan orelse return null);
         var found: ?usize = null;
         for (sc.handlers, 0..) |h, i| {
             if (std.mem.eql(u8, h.file, d.path) and std.mem.eql(u8, h.name, word)) found = i;
         }
-        const i = found orelse return self.setStatus("{s} is not an event handler (a method taking *Event)", .{word});
+        if (found == null) self.setStatus("{s} is not an event handler (a method taking *Event)", .{word});
+        return found;
+    }
+
+    fn beginRename(self: *App) void {
+        const i = self.handlerAtCaret() orelse return;
+        const word = self.rename_scan.?.handlers[i].name;
         self.rename_index = i;
         self.rename_pending_len = 0;
         var buf: [160]u8 = undefined;
         self.prompt.ask(std.fmt.bufPrint(&buf, "Rename handler {s} to:", .{word}) catch "Rename handler to:", word, .bind(self, onRenameAnswer));
+    }
+
+    // ---- moving a handler ----
+
+    /// Offer the structs the handler under the caret can move to.
+    fn beginMove(self: *App) void {
+        const i = self.handlerAtCaret() orelse return;
+        self.rename_index = i;
+        const sc = &self.rename_scan.?;
+        const h = sc.handlers[i];
+        var items: [64]zigui.menu.Item = undefined;
+        var labels: [64][160]u8 = undefined;
+        var n: usize = 0;
+        self.move_count = 0;
+        for (sc.containers, 0..) |c, ci| {
+            if (n == items.len) break;
+            if (std.mem.eql(u8, c.file, h.file) and std.mem.eql(u8, c.name, h.container)) continue;
+            items[n] = .{ .label = std.fmt.bufPrint(&labels[n], "{s}: {s}", .{ c.file, c.name }) catch c.name };
+            self.move_map[n] = ci;
+            n += 1;
+        }
+        self.move_count = n;
+        if (n == 0) return self.setStatus("there is no other struct to move {s} to; create one first", .{h.name});
+        self.ui.openMenu(items[0..n], 320, 60, .{ .on_pick = zigui.menu.PickHook.bind(self, onMovePick), .min_width = 260 }) catch {};
+    }
+
+    fn moveTarget(self: *App, index: usize) ?ide.handlers.Target {
+        if (index >= self.move_count) return null;
+        const sc = &(self.rename_scan orelse return null);
+        const c = sc.containers[self.move_map[index]];
+        return .{ .file = c.file, .container = c.name };
+    }
+
+    fn onMovePick(self: *App, index: usize) void {
+        const want = self.moveTarget(index) orelse return;
+        const sc = &(self.rename_scan orelse return);
+        const h = sc.handlers[self.rename_index];
+        var unfixed: std.ArrayListUnmanaged(ide.handlers.Reference) = .empty;
+        defer freeRefs(self.gpa, &unfixed);
+        var plan = ide.handlers.planMove(self.gpa, self.project, sc, h, want, &unfixed) catch |err| {
+            return switch (err) {
+                error.UsesReceiver => self.setStatus("{s} uses its receiver (self); it cannot become a method of {s}", .{ h.name, want.container }),
+                error.NameTaken => self.setStatus("{s} already has a member named {s}", .{ want.container, h.name }),
+                else => self.setStatus("cannot move {s}: {s}", .{ h.name, @errorName(err) }),
+            };
+        };
+        plan.deinit();
+        self.move_pick = index;
+        var buf: [220]u8 = undefined;
+        self.prompt.ask(std.fmt.bufPrint(&buf, "Move {s} to {s}: {s}; {d} other uses to fix by hand. Enter to apply:", .{ h.name, want.file, want.container, unfixed.items.len }) catch "Enter to apply the move:", "", .bind(self, onMoveConfirm));
+    }
+
+    fn onMoveConfirm(self: *App, _: []const u8) void {
+        const want = self.moveTarget(self.move_pick) orelse return;
+        const sc = &(self.rename_scan orelse return);
+        const h = sc.handlers[self.rename_index];
+        var unfixed: std.ArrayListUnmanaged(ide.handlers.Reference) = .empty;
+        defer freeRefs(self.gpa, &unfixed);
+        self.designer.service.move(h, want, &unfixed) catch |err| return self.setStatus("move failed: {s}", .{@errorName(err)});
+        if (unfixed.items.len > 0) {
+            self.setStatus("moved {s} to {s}; {d} uses still name the old place, first: {s}:{d}", .{ h.name, want.container, unfixed.items.len, unfixed.items[0].file, unfixed.items[0].line });
+        } else self.setStatus("moved {s} to {s}: {s}; {s} updated", .{ h.name, want.file, want.container, ide.handlers.binding_file });
+    }
+
+    fn freeRefs(gpa: std.mem.Allocator, list: *std.ArrayListUnmanaged(ide.handlers.Reference)) void {
+        for (list.items) |r| {
+            gpa.free(r.file);
+            gpa.free(r.text);
+        }
+        list.deinit(gpa);
     }
 
     /// First Enter: say what would change. Enter again with the same name: do it.
@@ -707,6 +795,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "project.search", "Find in Project..." },
         .{ "editor.definition", "Go to Definition" },
         .{ "refactor.rename_handler", "Rename Event Handler..." },
+        .{ "refactor.move_handler", "Move Event Handler..." },
         .{ "refactor.regenerate", "Regenerate ui_actions.zig" },
         .{ "view.files", "Files" },
         .{ "view.search", "Search" },
@@ -767,6 +856,7 @@ pub fn main(init: std.process.Init) !void {
     }, null);
     try bar.addMenu("Refactor", &.{
         .{ .label = "Rename Event Handler...", .command = "refactor.rename_handler" },
+        .{ .label = "Move Event Handler...", .command = "refactor.move_handler" },
         .{ .label = "Regenerate ui_actions.zig", .command = "refactor.regenerate" },
     }, null);
     try bar.addMenu("View", &.{
