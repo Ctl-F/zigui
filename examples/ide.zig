@@ -114,6 +114,19 @@ const App = struct {
         self.openAt(path, 0, 0);
     }
 
+    /// The file tree changed something on disk: open documents, the handler registry and
+    /// the generated binding file follow.
+    fn fileChanged(self: *App, op: ide.files_panel.Op, a: []const u8, b: []const u8) void {
+        switch (op) {
+            .created => {},
+            .renamed, .moved => {
+                self.docs.pathChanged(a, b);
+                self.designer.service.pathChanged(a, b) catch |err| self.setStatus("could not update the handler registry: {s}", .{@errorName(err)});
+            },
+            .deleted => self.docs.closeUnder(a),
+        }
+    }
+
     fn openAt(self: *App, path: []const u8, line: u32, col: u32) void {
         // Compiler output carries paths relative to where the build ran (the
         // project root) or absolute ones.
@@ -582,7 +595,7 @@ const App = struct {
         self.terminal.poll();
         self.designer.poll();
         const doc_msg = self.docs.statusText();
-        const msg = if (doc_msg.len > 0) doc_msg else if (self.designer.problemText().len > 0) self.designer.problemText() else self.lsp.statusText();
+        const msg = if (doc_msg.len > 0) doc_msg else if (self.files.statusText().len > 0) self.files.statusText() else if (self.designer.problemText().len > 0) self.designer.problemText() else self.lsp.statusText();
         if (!std.mem.eql(u8, msg, self.status.props.text.bytes)) self.status.setText(msg) catch {};
     }
 };
@@ -654,6 +667,13 @@ fn runCommand(app: *App, ui: *Ui, cmd: []const u8) void {
         const dy = std.fmt.parseFloat(f32, nums.next() orelse return) catch return;
         ui.pointerMove(x, y);
         ui.wheel(x, y, 0, dy);
+    } else if (std.mem.eql(u8, verb, "rclick")) {
+        var nums = std.mem.tokenizeScalar(u8, rest, ' ');
+        const x = std.fmt.parseFloat(f32, nums.next() orelse return) catch return;
+        const y = std.fmt.parseFloat(f32, nums.next() orelse return) catch return;
+        ui.pointerMove(x, y);
+        ui.pointerButtonEx(x, y, 3, true, 1);
+        ui.pointerButtonEx(x, y, 3, false, 1);
     } else if (std.mem.eql(u8, verb, "click") or std.mem.eql(u8, verb, "move")) {
         var nums = std.mem.tokenizeScalar(u8, rest, ' ');
         const x = std.fmt.parseFloat(f32, nums.next() orelse return) catch return;
@@ -821,7 +841,11 @@ pub fn main(init: std.process.Init) !void {
 
     const files_panel = try dock.addPanel("Files");
     app.files_panel = files_panel;
-    app.files = try ide.FilesPanel.create(&ui, files_panel.content, &project, .{ .on_open = ide.files_panel.OpenFileHook.bind(&app, App.openFile) });
+    app.files = try ide.FilesPanel.create(&ui, files_panel.content, &project, .{
+        .on_open = ide.files_panel.OpenFileHook.bind(&app, App.openFile),
+        .prompt = app.prompt,
+        .on_changed = ide.files_panel.ChangeHook.bind(&app, App.fileChanged),
+    });
     defer app.files.destroy();
     try dock.dockRoot(files_panel, .left, 280);
 

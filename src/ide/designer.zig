@@ -201,7 +201,16 @@ pub const Designer = struct {
     /// Call every loop iteration: stop designing a document that was closed.
     pub fn poll(self: *Designer) void {
         const d = self.current orelse return;
-        if (self.docs.find(self.current_path) == d) return;
+        // Still open (possibly renamed: follow its path)?
+        if (std.mem.indexOfScalar(*Doc, self.docs.docs.items, d) != null) {
+            if (!std.mem.eql(u8, d.path, self.current_path)) {
+                if (self.gpa.dupe(u8, d.path)) |copy| {
+                    self.gpa.free(self.current_path);
+                    self.current_path = copy;
+                } else |_| {}
+            }
+            return;
+        }
         // The text tab is gone.
         self.current = null;
         if (self.builder) |b| b.setPanelsVisible(false);

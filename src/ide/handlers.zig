@@ -1129,6 +1129,24 @@ pub const Handlers = struct {
         return self.manifest.find(plan.action).?.action;
     }
 
+    /// A file or folder was renamed or moved (project-relative paths): bindings
+    /// that point into it follow, and the binding file is regenerated.
+    pub fn pathChanged(self: *Handlers, old: []const u8, new: []const u8) !void {
+        const a = self.manifest.arena.allocator();
+        var changed = false;
+        for (self.manifest.bindings.items) |*b| {
+            const hit = std.mem.eql(u8, b.file, old) or (b.file.len > old.len and std.mem.startsWith(u8, b.file, old) and b.file[old.len] == '/');
+            if (!hit) continue;
+            b.file = try std.mem.concat(a, u8, &.{ new, b.file[old.len..] });
+            changed = true;
+        }
+        if (std.mem.eql(u8, self.manifest.default_file, old) or (self.manifest.default_file.len > old.len and std.mem.startsWith(u8, self.manifest.default_file, old) and self.manifest.default_file[old.len] == '/')) {
+            self.manifest.default_file = try std.mem.concat(a, u8, &.{ new, self.manifest.default_file[old.len..] });
+            changed = true;
+        }
+        if (changed) try self.commit();
+    }
+
     /// Move handler `h` to `want`, updating the manifest and the binding file. Returns
     /// the places that still name the old location (the caller shows them).
     pub fn move(self: *Handlers, h: Handler, want: Target, unfixed: ?*std.ArrayListUnmanaged(Reference)) !void {
@@ -1627,4 +1645,29 @@ test "moving to another file creates it, and refuses what cannot follow" {
     defer sc2.deinit();
     const again = sc2.handlers[sc2.findHandler("Panel", "src/panel.zig", "onReset").?];
     try testing.expectError(error.NameTaken, h.move(again, .{ .file = "src/clash.zig", .container = "Clash" }, null));
+}
+
+test "renaming or moving a handlers file updates the manifest and the binding file" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var p = try moveProject(&tmp);
+    defer p.close();
+    var h = try Handlers.init(testing.allocator, &p);
+    defer h.deinit();
+    var sc = try scan(testing.allocator, &p);
+    defer sc.deinit();
+    _ = try h.bindExisting(sc.handlers[sc.findHandler("App", "src/main.zig", "onReset").?]);
+    try p.moveEntry("src/main.zig", "src/app/main.zig");
+    try h.pathChanged("src/main.zig", "src/app/main.zig");
+    try testing.expectEqualStrings("src/app/main.zig", h.manifest.find("onReset").?.file);
+    const gen = try p.readFile(testing.allocator, binding_file, 1 << 20);
+    defer testing.allocator.free(gen);
+    try testing.expect(std.mem.indexOf(u8, gen, "@import(\"src/app/main.zig\")") != null);
+    // A whole folder moving carries its files' bindings.
+    try p.moveEntry("src/app", "src/ui");
+    try h.pathChanged("src/app", "src/ui");
+    try testing.expectEqualStrings("src/ui/main.zig", h.manifest.find("onReset").?.file);
+    // An unrelated path changes nothing.
+    try h.pathChanged("other", "elsewhere");
+    try testing.expectEqualStrings("src/ui/main.zig", h.manifest.find("onReset").?.file);
 }

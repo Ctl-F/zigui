@@ -137,6 +137,53 @@ pub const Documents = struct {
         self.lsp = lsp;
     }
 
+    fn under(path: []const u8, root: []const u8) bool {
+        return std.mem.eql(u8, path, root) or (path.len > root.len and std.mem.startsWith(u8, path, root) and path[root.len] == '/');
+    }
+
+    /// A file or folder was renamed or moved on disk (`old` and `new` are project-relative):
+    /// the documents for it (or for files inside it) follow: path, tab title, language,
+    /// and the language server's idea of where the file is. Unsaved changes stay in the buffer.
+    pub fn pathChanged(self: *Documents, old: []const u8, new: []const u8) void {
+        for (self.docs.items) |d| {
+            if (!under(d.path, old)) continue;
+            const fresh = std.mem.concat(self.gpa, u8, &.{ new, d.path[old.len..] }) catch continue;
+            if (self.lsp) |l| l.detach(d.editor);
+            self.gpa.free(d.path);
+            d.path = fresh;
+            d.editor.setLanguage(syntax.languageForPath(fresh)) catch {};
+            if (self.lsp) |l| {
+                if (self.project.absPath(self.gpa, fresh)) |abs| {
+                    defer self.gpa.free(abs);
+                    l.attach(d.editor, abs) catch {};
+                } else |_| {}
+            }
+            if (self.zig) |z| {
+                if (self.project.absPath(self.gpa, fresh)) |abs| {
+                    defer self.gpa.free(abs);
+                    z.setDir(d.editor, std.fs.path.dirname(abs) orelse self.project.root) catch {};
+                } else |_| {}
+            }
+            // Titles may now collide (or stop colliding): refresh them all.
+            d.shown_dirty = !d.isDirty();
+        }
+        self.poll();
+        for (self.docs.items) |d| {
+            var buf: [std.fs.max_path_bytes + 4]u8 = undefined;
+            const base = self.titleFor2(d);
+            const t = if (d.isDirty()) std.fmt.bufPrint(&buf, "{s} \u{2022}", .{base}) catch base else base;
+            self.dock.setTitle(d.panel, t) catch {};
+        }
+    }
+
+    /// A file or folder was deleted: close the documents for it without asking.
+    pub fn closeUnder(self: *Documents, path: []const u8) void {
+        for (self.docs.items) |d| {
+            if (under(d.path, path)) d.closing = true;
+        }
+        self.poll();
+    }
+
     /// Apply `defaults` to every open editor (after changing them).
     pub fn applyDefaults(self: *Documents) void {
         const d = self.defaults;
@@ -424,4 +471,46 @@ test "open, edit, save, and close documents" {
     _ = try docs.open("src/main.zig", 0, 0);
     try testing.expectError(error.FileNotFound, docs.open("nope.zig", 0, 0));
     try r.frame();
+}
+
+test "renaming or moving files updates their open documents; deleting closes them" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var p = try project_mod.testProject(&tmp);
+    defer p.close();
+    const r = try Rig.init();
+    defer r.deinit();
+    const dock = try Dock.create(&r.ui, r.ui.tree.root, .{ .style = .{ .grow = 1 } });
+    const welcome = try dock.addPanel("Welcome");
+    try dock.dockTab(welcome, null);
+    const docs = try Documents.create(&r.ui, dock, &p, testing.io, .{ .anchor = welcome });
+    defer docs.destroy();
+    const main = try docs.open("src/main.zig", 0, 0);
+    const util = try docs.open("src/util/a.zig", 0, 0);
+    try r.frame();
+    // Unsaved text survives a rename of the file itself.
+    _ = try main.editor.editor.typeText("// x\n", 0);
+    docs.poll();
+    try testing.expectEqualStrings("main.zig \u{2022}", main.panel.title);
+    try p.moveEntry("src/main.zig", "src/app.zig");
+    docs.pathChanged("src/main.zig", "src/app.zig");
+    try testing.expectEqualStrings("src/app.zig", main.path);
+    try testing.expectEqualStrings("app.zig \u{2022}", main.panel.title);
+    try testing.expect(docs.find("src/app.zig") == main and docs.find("src/main.zig") == null);
+    try testing.expect(docs.save(main)); // saving writes to the new place
+    const text = try p.readFile(testing.allocator, "src/app.zig", 1024);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.startsWith(u8, text, "// x\n"));
+    // Moving a folder moves the documents inside it.
+    try p.moveEntry("src/util", "util");
+    docs.pathChanged("src/util", "util");
+    try testing.expectEqualStrings("util/a.zig", util.path);
+    try testing.expect(docs.find("util/a.zig") == util);
+    // A sibling whose name merely starts the same is not affected.
+    docs.pathChanged("src/ap", "elsewhere");
+    try testing.expectEqualStrings("src/app.zig", main.path);
+    // Deleting closes.
+    docs.closeUnder("util");
+    try testing.expectEqual(@as(usize, 1), docs.docs.items.len);
+    try testing.expect(docs.find("util/a.zig") == null);
 }

@@ -449,6 +449,13 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   answer for Zig from `std.zig.Ast` alone (std found via `zig env`), no language
   server; types of values are not inferred, which is where an LSP will add to it.
   The test rig moved to `core/test_rig.zig` so framework tests can share it.
+- File tree editing: right-click New File/New Folder/Rename/Delete/Copy Path and
+  drag-to-move in `FilesPanel` (names asked through `Prompt`, folder under the
+  pointer outlined via the scroll view's overlay hook, `refresh` keeps open
+  folders open), `Project` entry operations, and `ChangeHook` so
+  `Documents.pathChanged/closeUnder` and `Handlers.pathChanged` keep editors,
+  tab titles, the language server, the manifest and `ui_actions.zig` in step.
+  Deletes are permanent (no undo).
 - Projects: `widgets/file_dialog.zig` (a toolkit-drawn modal chooser for folders,
   files, save names and new-folder names; tested on temp directories),
   `ide/new_project.zig` (templates: `zig init`'s output, a zigui app with a UI

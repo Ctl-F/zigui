@@ -119,6 +119,66 @@ pub const Project = struct {
         return list.toOwnedSlice(gpa);
     }
 
+    // ---- changing the tree ----
+
+    pub const EntryError = error{
+        /// The name is empty, has a slash, or is `.` or `..`.
+        InvalidName,
+        /// Something is already there.
+        AlreadyExists,
+        /// The source is missing.
+        NotFound,
+        /// Moving a folder into itself.
+        IntoItself,
+    } || Io.Dir.CreateDirPathError || Io.Dir.RenameError || Io.Dir.DeleteTreeError || Io.File.OpenError || Io.Dir.StatFileError;
+
+    /// Is `name` usable as one file or folder name?
+    pub fn validEntryName(name: []const u8) bool {
+        if (name.len == 0 or name.len > 255) return false;
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
+        return std.mem.indexOfAny(u8, name, "/\\\x00") == null;
+    }
+
+    pub fn exists(self: *const Project, rel: []const u8) bool {
+        self.dir.access(self.io, rel, .{}) catch return false;
+        return true;
+    }
+
+    pub fn isDir(self: *const Project, rel: []const u8) bool {
+        const st = self.dir.statFile(self.io, rel, .{}) catch return false;
+        return st.kind == .directory;
+    }
+
+    /// Create an empty file at `rel` (its folders are made as needed).
+    pub fn createEmptyFile(self: *const Project, rel: []const u8) EntryError!void {
+        if (self.exists(rel)) return error.AlreadyExists;
+        if (std.fs.path.dirname(rel)) |parent| try self.dir.createDirPath(self.io, parent);
+        const f = try self.dir.createFile(self.io, rel, .{ .exclusive = true });
+        f.close(self.io);
+    }
+
+    /// Create the folder `rel`.
+    pub fn makeFolder(self: *const Project, rel: []const u8) EntryError!void {
+        if (self.exists(rel)) return error.AlreadyExists;
+        try self.dir.createDirPath(self.io, rel);
+    }
+
+    /// Rename or move `old` to `new` (project-relative); `new` must not exist.
+    pub fn moveEntry(self: *const Project, old: []const u8, new: []const u8) EntryError!void {
+        if (!self.exists(old)) return error.NotFound;
+        if (self.exists(new)) return error.AlreadyExists;
+        // A folder cannot go into itself.
+        if (std.mem.startsWith(u8, new, old) and new.len > old.len and new[old.len] == '/') return error.IntoItself;
+        if (std.fs.path.dirname(new)) |parent| try self.dir.createDirPath(self.io, parent);
+        try self.dir.rename(old, self.dir, new, self.io);
+    }
+
+    /// Delete a file, or a folder and everything in it.
+    pub fn deleteEntry(self: *const Project, rel: []const u8) EntryError!void {
+        if (!self.exists(rel)) return error.NotFound;
+        try self.dir.deleteTree(self.io, rel);
+    }
+
     pub fn readFile(self: *const Project, gpa: std.mem.Allocator, rel: []const u8, max: usize) ![]u8 {
         return self.dir.readFileAlloc(self.io, rel, gpa, .limited(max));
     }
@@ -191,4 +251,33 @@ test "reading, writing, and path conversion" {
     try testing.expectEqualStrings("src/main.zig", p.relPath(abs).?);
     try testing.expect(p.relPath("/elsewhere/x") == null);
     try testing.expectError(error.FileNotFound, p.readFile(testing.allocator, "missing.txt", 10));
+}
+
+test "files and folders can be created, renamed, moved and deleted" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var p = try testProject(&tmp);
+    defer p.close();
+    try p.createEmptyFile("src/new/notes.txt"); // parents are made
+    try testing.expect(p.exists("src/new/notes.txt") and p.isDir("src/new") and !p.isDir("src/new/notes.txt"));
+    try testing.expectError(error.AlreadyExists, p.createEmptyFile("src/new/notes.txt"));
+    try p.makeFolder("docs/guide");
+    try testing.expect(p.isDir("docs/guide"));
+    try testing.expectError(error.AlreadyExists, p.makeFolder("docs"));
+    // Rename a file, move it into a folder, move a folder.
+    try p.moveEntry("src/new/notes.txt", "src/new/todo.txt");
+    try testing.expect(!p.exists("src/new/notes.txt") and p.exists("src/new/todo.txt"));
+    try p.moveEntry("src/new/todo.txt", "docs/guide/todo.txt");
+    try p.moveEntry("docs", "src/docs");
+    try testing.expect(p.exists("src/docs/guide/todo.txt") and !p.exists("docs"));
+    try testing.expectError(error.AlreadyExists, p.moveEntry("README.md", "build.zig"));
+    try testing.expectError(error.NotFound, p.moveEntry("nothing", "else"));
+    try testing.expectError(error.IntoItself, p.moveEntry("src", "src/inside"));
+    // Delete a file and a whole folder.
+    try p.deleteEntry("src/docs/guide/todo.txt");
+    try p.deleteEntry("src/docs");
+    try testing.expect(!p.exists("src/docs"));
+    try testing.expectError(error.NotFound, p.deleteEntry("src/docs"));
+    try testing.expect(Project.validEntryName("a.zig") and Project.validEntryName(".hidden"));
+    try testing.expect(!Project.validEntryName("") and !Project.validEntryName("a/b") and !Project.validEntryName("..") and !Project.validEntryName("a\\b"));
 }
