@@ -16,7 +16,7 @@
 <tr><td><code>.line_numbers</code>, <code>.folding</code></td><td>true</td><td>Gutter and fold arrows. Applied live.</td></tr>
 <tr><td><code>.restore_session</code></td><td>true</td><td>Reopen the last session's files and panel layout at startup.</td></tr>
 <tr><td><code>.language_server</code></td><td>""</td><td>The Zig language server command; "" means <code>ZIGUI_ZLS</code> or <code>zls</code>. Read at startup.</td></tr>
-<tr><td><code>.shell</code></td><td>""</td><td>The terminal's shell; "" means <code>$SHELL</code>. Read at startup.</td></tr>
+<tr><td><code>.shell</code></td><td>""</td><td>The terminal's shell; "" means <code>$SHELL</code> (<code>%COMSPEC%</code> on Windows). Read at startup.</td></tr>
 </table>
 <p>Unknown keys and values of the wrong type are ignored (the status line says how many), so a typo never stops the IDE from starting.</p>
 <h2>Key bindings</h2>

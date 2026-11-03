@@ -514,7 +514,7 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   answered), `widgets/terminal.zig` (draws a Screen, encodes keys, selection,
   history, mouse reports; talks to its host only through `on_write`/`on_resize`
   hooks), `platform/pty.zig` (raw-syscall pty: `/dev/ptmx`, own session,
-  controlling terminal; stdout and stderr merge as on any terminal; Linux only)
+  controlling terminal; stdout and stderr merge as on any terminal; backends: Linux raw syscalls, macOS/BSD libc `pty_posix.zig`, Windows ConPTY `pty_windows.zig` -- the last two cross-compile but are untested on real machines)
   and `ide/terminal_panel.zig` (a shell in the project folder, restart on key).
   Alt+letter sends ESC-prefixed bytes and drops the text event that may follow.
 - Language servers (plan step 5): `ide/lsp/jsonrpc.zig` (framing), `lsp/client.zig`

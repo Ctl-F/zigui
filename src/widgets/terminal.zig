@@ -16,7 +16,7 @@
 //! Keys: everything is sent to the program (arrows, Home/End, F-keys, Ctrl+letter,
 //! Alt+letter as Escape-prefixed), except function keys, which stay with the
 //! application's shortcuts unless `pass_function_keys` is off, Shift+PageUp/Down
-//! and Shift+Home/End (scroll the history), Ctrl+Shift+C (copy) and Ctrl+Shift+V
+//! and Shift+Home/End (scroll the history), Ctrl+Shift+C (copy; Cmd+C on macOS) and Ctrl+Shift+V
 //! (paste). The wheel scrolls the history. Dragging selects; double-click selects
 //! a word and triple-click a line. Programs that ask for mouse reports (tmux, vim)
 //! get them, unless Shift is held.
@@ -532,6 +532,22 @@ pub const Terminal = struct {
         const k = ev.key;
         // Application shortcuts that must keep working.
         if (self.props.pass_function_keys and @intFromEnum(k) >= @intFromEnum(keys.Key.f1) and @intFromEnum(k) <= @intFromEnum(keys.Key.f12)) return;
+        // macOS: Cmd+C / Cmd+V copy and paste (the Command key is never sent to programs).
+        if (m.gui and !m.ctrl and !m.alt and !m.shift) {
+            switch (k) {
+                .c => {
+                    self.copySelection();
+                    ev.markHandled();
+                    return;
+                },
+                .v => {
+                    self.pasteClipboard();
+                    ev.markHandled();
+                    return;
+                },
+                else => return,
+            }
+        }
         if (m.ctrl and m.shift and !m.alt) {
             switch (k) {
                 .c => {

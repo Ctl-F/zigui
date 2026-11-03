@@ -22,7 +22,7 @@ const pty_mod = @import("../platform/pty.zig");
 pub const Options = struct {
     /// Where the shell starts.
     cwd: ?[]const u8 = null,
-    /// The program to run (default: `$SHELL`).
+    /// The program to run (default: `$SHELL`, `%COMSPEC%` on Windows, else `/bin/sh`).
     argv: []const []const u8 = &.{},
     environ: ?*const std.process.Environ.Map = null,
     wake: ?*const fn () void = null,
@@ -143,7 +143,7 @@ pub const TerminalPanel = struct {
     pub fn runCommand(self: *TerminalPanel, text: []const u8) void {
         const p = self.pty orelse return;
         p.write(text) catch return;
-        p.write("\n") catch {};
+        p.write("\r") catch {}; // what the Enter key sends; the line discipline (or ConPTY) turns it into a newline
     }
 
     pub fn focus(self: *TerminalPanel) void {
@@ -174,14 +174,14 @@ fn pollUntil(panel: *TerminalPanel, r: *Rig, needle: []const u8) !void {
         defer testing.allocator.free(text);
         if (std.mem.indexOf(u8, text, needle) != null) return;
         try r.frame();
-        var ts: std.os.linux.timespec = .{ .sec = 0, .nsec = 2_000_000 };
-        _ = std.os.linux.nanosleep(&ts, null);
+        @import("../platform/pty_common.zig").sleepMs(2);
     }
     return error.TestExpectedText;
 }
 
 test "the shell starts when the terminal has a size, shows output, takes input and reports its exit" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    // Uses /bin/sh: macOS and the BSDs have it too; Windows is covered by pty.zig's own test.
+    if (!pty_mod.supported or @import("builtin").os.tag == .windows) return error.SkipZigTest;
     const r = try Rig.init();
     defer r.deinit();
     const panel = try TerminalPanel.create(&r.ui, r.ui.tree.root, .{ .argv = &.{ "/bin/sh", "-c", "echo ready; read x; echo got-$x; exit 4" } });

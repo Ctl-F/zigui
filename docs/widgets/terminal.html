@@ -7,7 +7,7 @@
 <tr><th>Part</th><th>What it is</th></tr>
 <tr><td><code>zigui.vt.Screen</code> (<code>terminal/vt.zig</code>)</td><td>The emulator: feed it bytes, read the grid. No UI, no process.</td></tr>
 <tr><td><code>zigui.Terminal</code> (<code>widgets/terminal.zig</code>)</td><td>The widget: draws a <code>Screen</code>, sizes it to the node, handles input. Knows nothing about processes.</td></tr>
-<tr><td><code>zigui.pty.Pty</code> (<code>platform/pty.zig</code>)</td><td>A pseudo-terminal with a program (a shell) on the other end. Linux for now.</td></tr>
+<tr><td><code>zigui.pty.Pty</code> (<code>platform/pty.zig</code>)</td><td>A pseudo-terminal with a program (a shell) on the other end. Linux, macOS (and the BSDs) and Windows 10+.</td></tr>
 </table>
 <h2>The widget</h2>
 <pre><code>const term = try ui.add(zigui.Terminal, parent, .{
@@ -26,7 +26,7 @@ term.feed(bytes_the_program_printed);</code></pre>
 <tr><td>Ctrl+letter, Ctrl+Space, Ctrl+[ \ ] /</td><td>The control characters (Ctrl+C is 0x03).</td></tr>
 <tr><td>Alt+letter</td><td>Escape-prefixed (readline's word movement).</td></tr>
 <tr><td>F1&ndash;F12</td><td>Left to the application's shortcuts (F5 builds, F12 goes to definition) unless <code>pass_function_keys</code> is off.</td></tr>
-<tr><td>Ctrl+Shift+C / Ctrl+Insert, Ctrl+Shift+V / Shift+Insert</td><td>Copy the selection; paste (wrapped in <code>ESC [200~</code> when the program enabled bracketed paste). Other Ctrl+Shift combinations stay with the application.</td></tr>
+<tr><td>Ctrl+Shift+C / Ctrl+Insert, Ctrl+Shift+V / Shift+Insert</td><td>Copy the selection; paste (on macOS also Cmd+C / Cmd+V; wrapped in <code>ESC [200~</code> when the program enabled bracketed paste). Other Ctrl+Shift combinations stay with the application.</td></tr>
 <tr><td>Wheel, Shift+Page Up/Down, Shift+Home/End</td><td>Scroll the history. The view stays on the same text while output arrives. On the alternate screen (less, vim) the wheel sends arrow keys.</td></tr>
 <tr><td>Drag, double-click, triple-click</td><td>Select text, a word, a line.</td></tr>
 <tr><td>Mouse in a program that asked for reports</td><td>Sent to it (SGR encoding); hold Shift to select instead.</td></tr>
@@ -41,6 +41,14 @@ try pty.write("ls\n");
 pty.resize(120, 30);
 var batch: std.ArrayListUnmanaged(zigui.pty.Event) = .empty;
 pty.drain(&amp;batch);        // .data (bytes for the emulator) and .exited (status)</code></pre>
-<p>The program runs in its own session with the pseudo-terminal as its controlling terminal and as stdin, stdout and stderr, so it behaves as in a real terminal: prompts, colors, line editing, full-screen programs. <b>stdout and stderr arrive merged</b>, in order, on the one stream a terminal has; use <code>process.Runner</code> (the Output panel) when you need them separate. <code>TERM=xterm-256color</code> and <code>COLORTERM=truecolor</code> are set. Closing sends SIGHUP to the process group. Implemented with raw Linux system calls (no libc); other systems return <code>error.Unsupported</code> from <code>open</code>.</p>
+<p>The program runs in its own session with the pseudo-terminal as its controlling terminal and as stdin, stdout and stderr, so it behaves as in a real terminal: prompts, colors, line editing, full-screen programs. <b>stdout and stderr arrive merged</b>, in order, on the one stream a terminal has; use <code>process.Runner</code> (the Output panel) when you need them separate. <code>TERM=xterm-256color</code> and <code>COLORTERM=truecolor</code> are set. Closing sends SIGHUP to the process group. </p>
+<h3>Platforms</h3>
+<table>
+<tr><th>System</th><th>Backend</th><th>Notes</th></tr>
+<tr><td>Linux</td><td><code>pty_linux.zig</code>: <code>/dev/ptmx</code> and raw system calls (no libc)</td><td>Tested in the project's tests.</td></tr>
+<tr><td>macOS, FreeBSD, NetBSD, OpenBSD, DragonFly</td><td><code>pty_posix.zig</code>: <code>posix_openpt</code>, <code>fork</code>, <code>execve</code> from the C library</td><td>Same design as Linux. Cross-compiles (aarch64/x86_64-macos, x86_64-freebsd) but has not been run on those systems yet.</td></tr>
+<tr><td>Windows 10 (1809) or later</td><td><code>pty_windows.zig</code>: ConPTY (<code>CreatePseudoConsole</code>, two pipes, <code>CreateProcessW</code> with a pseudo-console attribute)</td><td>Cross-compiles (x86_64/aarch64-windows) but has not been run on Windows yet; it has its own test. <code>TERM</code> is not set (Windows programs ignore it). The default program is <code>%COMSPEC%</code> (<code>cmd.exe</code>); set the IDE's <code>shell</code> setting to <code>powershell.exe</code> or <code>pwsh.exe</code> if you prefer. The pseudo-console reports exit when the program ends even if its children linger.</td></tr>
+</table>
+<p>All backends share one interface (<code>open</code>, <code>write</code>, <code>resize</code>, <code>drain</code>, <code>finished</code>, <code>close</code>) and the same events; <code>pty.zig</code> picks one at compile time (<code>pty.supported</code> says whether the system has a backend; elsewhere <code>open</code> returns <code>error.Unsupported</code>). <code>pty.defaultShell(environ)</code> is the program used when none is given: <code>$SHELL</code>, else <code>/bin/sh</code>, or <code>%COMSPEC%</code> on Windows.</p>
 <p>The IDE's <a href="../ide.html">terminal panel</a> wires the three together. Code-only widget (not in the toolbox).</p>
 </main><script src="../nav.js"></script></body></html>
