@@ -37,6 +37,13 @@ pub const Symbol = struct {
     line: u32,
     col: u32,
     in_std: bool,
+    /// The `///` comment above a declaration, lines joined by spaces and cut to
+    /// about 240 bytes ("" for files and undocumented declarations).
+    doc: []const u8 = "",
+    /// A function's signature on one line (`pub fn eql(comptime T: type, a: []const T, ...) bool`), else "".
+    sig: []const u8 = "",
+    /// Lowercase `name doc path`, for a quick "might this match?" test before real scoring.
+    hay: []const u8 = "",
 };
 
 const Snapshot = struct {
@@ -244,6 +251,79 @@ const Builder = struct {
         return .{ self.line_no, @intCast(off - self.line_start + 1) };
     }
 
+    /// The `///` lines above `node`, joined with spaces (without the slashes), up to ~240 bytes.
+    fn docOf(self: *Builder, ast: *const Ast, node: Node.Index) []const u8 {
+        const first = ast.firstToken(node);
+        var t = first;
+        while (t > 0 and ast.tokenTag(t - 1) == .doc_comment) t -= 1;
+        if (t == first) return "";
+        var buf: [240]u8 = undefined;
+        var n: usize = 0;
+        while (t < first and n < buf.len) : (t += 1) {
+            var line = ast.tokenSlice(t);
+            if (std.mem.startsWith(u8, line, "///")) line = line[3..];
+            line = std.mem.trim(u8, line, " \t\r\n");
+            if (line.len == 0) continue;
+            if (n > 0 and n < buf.len) {
+                buf[n] = ' ';
+                n += 1;
+            }
+            const take = @min(line.len, buf.len - n);
+            @memcpy(buf[n .. n + take], line[0..take]);
+            n += take;
+        }
+        if (n == 0) return "";
+        return self.a.dupe(u8, buf[0..n]) catch "";
+    }
+
+    fn haystack(self: *Builder, name: []const u8, doc: []const u8, shown: []const u8) []const u8 {
+        const buf = self.a.alloc(u8, name.len + doc.len + shown.len + 3) catch return "";
+        var n: usize = 0;
+        for ([_][]const u8{ name, doc, shown }) |part| {
+            for (part) |c| {
+                buf[n] = std.ascii.toLower(c);
+                n += 1;
+            }
+            if (n < buf.len) {
+                buf[n] = ' ';
+                n += 1;
+            }
+        }
+        return buf[0..n];
+    }
+
+    /// A function's prototype with runs of whitespace folded, up to ~200 bytes.
+    fn signature(self: *Builder, ast: *const Ast, node: Node.Index) []const u8 {
+        const proto = if (ast.nodeTag(node) == .fn_decl) ast.nodeData(node).node_and_node[0] else node;
+        const src = ast.getNodeSource(proto);
+        var buf: [200]u8 = undefined;
+        var n: usize = 0;
+        var space = false;
+        var i: usize = 0;
+        while (i < src.len) : (i += 1) {
+            const c = src[i];
+            // Comments between parameters are documentation, not signature.
+            if (c == '/' and i + 1 < src.len and src[i + 1] == '/') {
+                i = std.mem.indexOfScalarPos(u8, src, i, '\n') orelse src.len;
+                space = n > 0;
+                continue;
+            }
+            if (c == ' ' or c == '\n' or c == '\t' or c == '\r') {
+                space = n > 0;
+                continue;
+            }
+            if (space and n < buf.len) {
+                buf[n] = ' ';
+                n += 1;
+            }
+            space = false;
+            if (n >= buf.len) break;
+            buf[n] = c;
+            n += 1;
+        }
+        return self.a.dupe(u8, buf[0..n]) catch "";
+    }
+
     fn members(self: *Builder, ast: *const Ast, nodes: []const Node.Index, prefix: []const u8, depth: u32, in_std: bool, path: []const u8, shown: []const u8) void {
         for (nodes) |n| {
             if (self.stop.load(.acquire)) return;
@@ -282,7 +362,9 @@ const Builder = struct {
             if (base.len == 0 or base[0] == '@' or base[0] == '"') continue; // @"quoted" names
             const name = if (prefix.len == 0) (self.a.dupe(u8, base) catch return) else (std.fmt.allocPrint(self.a, "{s}.{s}", .{ prefix, base }) catch return);
             const lc = self.lineCol(ast, tok);
-            self.list.append(self.a, .{ .name = name, .kind = kind, .path = path, .shown = shown, .line = lc[0], .col = lc[1], .in_std = in_std }) catch return;
+            const sig: []const u8 = if (kind == .function) self.signature(ast, n) else "";
+            const doc = self.docOf(ast, n);
+            self.list.append(self.a, .{ .name = name, .kind = kind, .path = path, .shown = shown, .line = lc[0], .col = lc[1], .in_std = in_std, .doc = doc, .sig = sig, .hay = self.haystack(name, doc, shown) }) catch return;
             if (container) |c| {
                 if (depth + 1 < max_depth) {
                     var cb: [2]Node.Index = undefined;
@@ -325,6 +407,8 @@ test "lists files and declarations with positions, qualifying nested ones" {
         \\
         \\pub const Circle = struct {
         \\    r: f32,
+        \\    /// The area of the circle,
+        \\    /// in square units.
         \\    pub fn area(self: Circle) f32 {
         \\        return self.r;
         \\    }
@@ -346,8 +430,11 @@ test "lists files and declarations with positions, qualifying nested ones" {
     try testing.expectEqualStrings("src/shapes.zig", circle.path);
     const area = find(syms, "Circle.area").?;
     try testing.expect(area.kind == .function);
-    try testing.expectEqual(@as(u32, 5), area.line);
+    try testing.expectEqual(@as(u32, 7), area.line);
     try testing.expectEqual(@as(u32, 12), area.col);
+    try testing.expectEqualStrings("The area of the circle, in square units.", area.doc);
+    try testing.expectEqualStrings("pub fn area(self: Circle) f32", area.sig);
+    try testing.expectEqualStrings("", find(syms, "Circle").?.doc);
     try testing.expect(find(syms, "helper").?.kind == .function); // private is listed for the project
     try testing.expect(find(syms, "counter").?.kind == .variable);
     try testing.expect(find(syms, "std") == null); // an @import is not a declaration worth jumping to

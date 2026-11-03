@@ -43,6 +43,7 @@ const default_bindings = [_][2][]const u8{
     .{ "mod+h", "edit.replace" },
     .{ "mod+shift+f", "project.search" },
     .{ "mod+,", "project.quick_open" },
+    .{ "mod+shift+d", "project.search_docs" },
     .{ "f12", "editor.definition" },
     .{ "alt+left", "nav.back" },
     .{ "alt+right", "nav.forward" },
@@ -74,6 +75,7 @@ const App = struct {
     prompt: *ide.prompt.Prompt = undefined,
     file_dialog: *zigui.file_dialog.FileDialog = undefined,
     quick: *ide.QuickOpen = undefined,
+    docsearch: *ide.doc_search.DocSearch = undefined,
     zv: *ide.zig_versions.Versions = undefined,
     watch: *ide.WatchPanel = undefined,
     problems_panel: *zigui.dock.Panel = undefined,
@@ -183,6 +185,16 @@ const App = struct {
         self.output.run(self.io, argv, self.project.root, sdl.wake) catch |err| {
             std.log.err("could not start zig build: {s}", .{@errorName(err)});
         };
+    }
+
+    /// "Search the web" from the documentation search: the query goes to Google, in the default browser.
+    fn openWeb(self: *App, query: []const u8) void {
+        const url = ide.doc_search.webSearchUrl(self.gpa, query) catch return;
+        defer self.gpa.free(url);
+        const z = self.gpa.dupeSentinel(u8, url, 0) catch return;
+        defer self.gpa.free(z);
+        if (self.dry_restart) return std.log.info("web search: would open {s}", .{url});
+        if (!sdl.openUrl(z)) self.setStatus("could not open the browser for {s}", .{url});
     }
 
     fn showOutputPanel(self: *App) void {
@@ -465,6 +477,8 @@ const App = struct {
             self.zv.installZls();
         } else if (eq(u8, name, "zig.install_zvm")) {
             if (self.zv.zvmInstall() != null) self.setStatus("ZVM is already installed", .{}) else self.zv.offerZvm();
+        } else if (eq(u8, name, "project.search_docs")) {
+            self.docsearch.show();
         } else if (eq(u8, name, "project.quick_open")) {
             self.quick.show();
         } else if (eq(u8, name, "project.search")) {
@@ -670,6 +684,7 @@ const App = struct {
         }
         self.search.poll();
         self.quick.poll();
+        self.docsearch.poll();
         self.zv.poll();
         self.watch.poll();
         self.docs.poll();
@@ -962,6 +977,11 @@ pub fn main(init: std.process.Init) !void {
     defer app.search.destroy();
     app.quick = try ide.QuickOpen.create(&ui, ui.tree.root, &project, std_dir, .{ .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt), .wake = sdl.wake });
     defer app.quick.destroy();
+    app.docsearch = try ide.doc_search.DocSearch.create(&ui, ui.tree.root, app.quick, .{
+        .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt),
+        .on_web = ide.doc_search.WebHook.bind(&app, App.openWeb),
+    });
+    defer app.docsearch.destroy();
     try dock.dockTab(search_panel, files_panel);
     dock.activatePanel(files_panel);
 
@@ -1039,6 +1059,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "edit.replace", "Replace..." },
         .{ "project.search", "Find in Project..." },
         .{ "project.quick_open", "Go to File, Function or Type..." },
+        .{ "project.search_docs", "Search Documentation..." },
         .{ "editor.definition", "Go to Definition" },
         .{ "refactor.rename_handler", "Rename Event Handler..." },
         .{ "refactor.move_handler", "Move Event Handler..." },
@@ -1110,6 +1131,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "Replace...", .command = "edit.replace" },
         .{ .label = "Find in Project...", .command = "project.search" },
         .{ .label = "Go to File, Function or Type...", .command = "project.quick_open" },
+        .{ .label = "Search Documentation...", .command = "project.search_docs" },
         .{ .separator = true },
         .{ .label = "Go to Definition", .command = "editor.definition" },
         .{ .label = "Go Back", .command = "nav.back" },

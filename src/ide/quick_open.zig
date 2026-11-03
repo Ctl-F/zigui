@@ -37,6 +37,8 @@ pub const QuickOpen = struct {
     items: std.ArrayListUnmanaged(quick_pick.Item) = .empty,
     syms: std.ArrayListUnmanaged(symbol_index.Symbol) = .empty,
     arena: std.heap.ArenaAllocator,
+    /// Counts up each time an index finished (others, like the documentation search, re-rank on it).
+    generation: u32 = 0,
 
     pub fn create(ui: *Ui, parent: Handle, project: *const project_mod.Project, std_dir: ?[]const u8, opts: Options) !*QuickOpen {
         const self = try ui.gpa.create(QuickOpen);
@@ -58,6 +60,14 @@ pub const QuickOpen = struct {
         self.syms.deinit(self.gpa);
         self.arena.deinit();
         self.gpa.destroy(self);
+    }
+
+    /// The project's symbols, then the library's (valid until the next `poll`).
+    pub fn symbolLists(self: *const QuickOpen) [2][]const symbol_index.Symbol {
+        return .{
+            self.project_index.symbols(),
+            if (self.lib_index) |l| l.symbols() else &.{},
+        };
     }
 
     pub fn isOpen(self: *const QuickOpen) bool {
@@ -82,6 +92,7 @@ pub const QuickOpen = struct {
             if (l.poll()) changed = true;
         }
         if (!changed) return;
+        self.generation +%= 1;
         self.rebuild();
         if (self.pick.isOpen()) {
             self.pick.setItems(self.items.items);

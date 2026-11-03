@@ -446,6 +446,11 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   files and declarations of the project and the library, and `ide.QuickOpen`
   joins them behind Ctrl+, (`project.quick_open`). The library is indexed once
   at startup, the project each time the box opens.
+- Documentation search (`ide/doc_search.zig`): word-based ranking over names,
+  `///` comments and file paths of the Ctrl+, index (which now keeps doc, signature
+  and a lowercase haystack per declaration), shown in a `QuickPick` in its new
+  external-ranking mode; the last row opens a Google search in the browser
+  (`sdl.openUrl`). Lexical only: no synonyms.
 - Back/Forward (`ide/nav_history.zig`): every `openAt` jump records the place left;
   the mouse side buttons (SDL buttons 4/5) and Alt+Left/Right walk the list.
 - Continuous error checking (`ide/build_watch.zig`, `ide/watch_panel.zig`): the

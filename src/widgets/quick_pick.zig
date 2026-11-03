@@ -55,7 +55,30 @@ pub const PickHook = struct {
     }
 };
 
+/// Called with the query text each time it changes, when the box does its own
+/// ranking (`Options.external`): answer with `setItems`.
+pub const QueryHook = struct {
+    ctx: ?*anyopaque = null,
+    call: *const fn (ctx: ?*anyopaque, query: []const u8) void,
+
+    pub fn bind(ctx: anytype, comptime f: anytype) QueryHook {
+        const Ptr = @TypeOf(ctx);
+        return .{
+            .ctx = @ptrCast(ctx),
+            .call = &struct {
+                fn thunk(c: ?*anyopaque, query: []const u8) void {
+                    f(@as(Ptr, @ptrCast(@alignCast(c.?))), query);
+                }
+            }.thunk,
+        };
+    }
+};
+
 pub const Options = struct {
+    /// The caller ranks: the box shows `items` as given (at most `max_rows`) and
+    /// asks `on_query` for a new list whenever the query changes (it also runs at `show`).
+    external: bool = false,
+    on_query: ?QueryHook = null,
     placeholder: []const u8 = "Type to search",
     items: []const Item = &.{},
     /// Starting query text.
@@ -77,6 +100,8 @@ pub const QuickPick = struct {
     status: *Label,
     items: []const Item = &.{},
     hook: ?PickHook = null,
+    external: bool = false,
+    query_hook: ?QueryHook = null,
     ranked: std.ArrayListUnmanaged(Ranked) = .empty,
     open: bool = false,
     scoped: bool = false,
@@ -132,6 +157,8 @@ pub const QuickPick = struct {
     pub fn show(self: *QuickPick, o: Options) void {
         self.items = o.items;
         self.hook = o.on_pick;
+        self.external = o.external;
+        self.query_hook = o.on_query;
         self.field.setPlaceholder(o.placeholder) catch {};
         self.field.setText(o.query) catch {};
         if (!self.open) {
@@ -140,6 +167,7 @@ pub const QuickPick = struct {
             self.scoped = self.ui.pushFocusScope(self.panel, true);
         }
         self.refilter();
+        self.askOwner();
         self.ui.setFocus(self.field.node);
         self.field.editor.selectAll();
     }
@@ -177,7 +205,7 @@ pub const QuickPick = struct {
     fn refilter(self: *QuickPick) void {
         const q = std.mem.trim(u8, self.field.text(), " \t");
         self.ranked.clearRetainingCapacity();
-        if (q.len == 0) {
+        if (self.external or q.len == 0) {
             const n = @min(self.items.len, max_rows);
             for (0..n) |i| self.ranked.append(self.gpa, .{ .index = @intCast(i), .score = 0 }) catch break;
         } else {
@@ -239,7 +267,15 @@ pub const QuickPick = struct {
         self.list.ensureVisible(id);
     }
 
+    /// In external mode, ask the owner for the list that goes with the query.
+    fn askOwner(self: *QuickPick) void {
+        if (!self.external) return;
+        const h = self.query_hook orelse return;
+        h.call(h.ctx, std.mem.trim(u8, self.field.text(), " \t"));
+    }
+
     fn onChange(self: *QuickPick, _: *event.Event) void {
+        if (self.external) return self.askOwner();
         self.refilter();
     }
 

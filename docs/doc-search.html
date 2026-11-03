@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Documentation search - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Documentation search</h1>
+<p><b>Edit &gt; Search Documentation...</b> (<b>Ctrl+Shift+D</b>) finds functions and types by describing what you want: type <code>path from dir</code>, <code>read file into memory</code> or <code>compare two strings</code>. It looks through the project and the Zig standard library and shows each match with its kind, file and line, and its signature (or the first words of its doc comment). Enter opens the source at the declaration. The last row is always <b>Search the web for "..."</b>: it opens <code>https://www.google.com/search?q=zig+YOUR+WORDS</code> in the default browser (the word <code>zig</code> is added to the search).</p>
+
+<h2>How the ranking works</h2>
+<p>It is ranking by words, not by meaning:</p>
+<ul>
+<li>The query is split into words; small words (<code>from</code>, <code>the</code>, <code>how</code>, <code>get</code>...) and one- or two-letter words are ignored.</li>
+<li>Names are split into words at case changes and underscores (<code>readFileAlloc</code> is read, File, Alloc); a query word matches a whole word (a plural counts), or the start of one (<code>dir</code> finds <code>directory</code>).</li>
+<li>Name hits count most, then words in the <code>///</code> doc comment, then the words of the file's own path (<code>std/fs/path.zig</code>). A name made of many words counts a little less for each word.</li>
+<li>Matching more of the query's words ranks higher; a doc comment that mentions all of them gets a bonus. Declarations holding every word are scored first, and ones with only some are added only when there are few.</li>
+<li>Project declarations rank above library ones on ties.</li>
+</ul>
+<p>So it finds what is written down in the names and comments. It does not know synonyms: <code>parent folder</code> will not find a function documented as "the directory component". When the answer is not in the list, the web row is one Enter away.</p>
+
+<h2>Under the hood</h2>
+<p>The Ctrl+, index (<code>ide.symbol_index.SymbolIndex</code>) also keeps each declaration's doc comment (about 240 bytes), a function's one-line signature and a lowercase text used to skip non-matches quickly. <code>ide.doc_search.rank(lists, query, out)</code> and <code>webSearchUrl</code> are UI-free; <code>ide.doc_search.DocSearch</code> is the box, built on <code>QuickPick</code>'s new <em>external</em> mode (the owner ranks: <code>Options.external</code> and <code>on_query</code>; see the <a href="widgets/quick-pick.html">widget page</a>). The web row calls a hook; the IDE app opens the browser with <code>sdl.openUrl</code> (SDL's <code>SDL_OpenURL</code>). Headless: <code>cmd project.search_docs</code> (a scripted run only logs the address it would open).</p>
+</main><script src="nav.js"></script></body></html>

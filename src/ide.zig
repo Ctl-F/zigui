@@ -34,6 +34,7 @@ pub const nav_history = @import("ide/nav_history.zig");
 pub const zvm = @import("ide/zvm.zig");
 pub const zig_versions = @import("ide/zig_versions.zig");
 pub const quick_open = @import("ide/quick_open.zig");
+pub const doc_search = @import("ide/doc_search.zig");
 pub const QuickOpen = quick_open.QuickOpen;
 pub const documents = @import("ide/documents.zig");
 pub const Documents = documents.Documents;
@@ -55,6 +56,7 @@ test {
     _ = zvm;
     _ = zig_versions;
     _ = quick_open;
+    _ = doc_search;
     _ = new_project;
     _ = settings;
     _ = session;

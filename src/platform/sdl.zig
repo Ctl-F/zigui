@@ -359,6 +359,11 @@ pub fn clipboardSet(text: []const u8) void {
     _ = c.SDL_SetClipboardText(&buf);
 }
 
+/// Open `url` (http/https) in the user's default browser. False if the system could not.
+pub fn openUrl(url: [:0]const u8) bool {
+    return c.SDL_OpenURL(url.ptr);
+}
+
 /// Milliseconds since SDL started.
 pub fn ticks() u64 {
     return c.SDL_GetTicks();

@@ -24,5 +24,7 @@ qp.setStatus("indexing...");                // a line under the list</code></pre
 <li>The hook gets the picked item's <em>index into <code>items</code></em>, after the box has closed.</li>
 <li><code>items</code> and their strings are borrowed: keep them valid until the next <code>setItems</code> or <code>close</code>.</li>
 </ul>
+<h2>External ranking</h2>
+<p>With <code>.external = true</code> and <code>.on_query = .bind(&amp;app, App.query)</code> (<code>fn (*App, query: []const u8) void</code>) the box does not filter: it shows the items as given (at most 40) and asks the hook for a new list whenever the query changes (and once at <code>show</code>); the hook answers with <code>setItems</code>. The documentation search uses this to rank by doc comments.</p>
 <p>Code-only widget.</p>
 </main><script src="../nav.js"></script></body></html>
