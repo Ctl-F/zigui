@@ -21,7 +21,7 @@ const sdl = @import("zigui_sdl");
 const stb = @import("zigui_stb");
 
 const Ui = zigui.Ui;
-const ide = zigui.ide; // hello
+const ide = zigui.ide;
 
 /// The IDE's key bindings (the `mod` key is Ctrl, or Cmd on macOS); users change them in a keymap file.
 const default_bindings = [_][2][]const u8{

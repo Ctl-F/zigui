@@ -10,6 +10,7 @@ const Libs = struct {
     sdl_c: *std.Build.Module,
 };
 
+
 const Checks = struct { ui_checks: ?bool, ui_strict: bool };
 
 fn makeLibs(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, exported: bool, checks: Checks) Libs {

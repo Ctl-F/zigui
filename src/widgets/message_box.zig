@@ -92,7 +92,11 @@ pub const MessageBox = struct {
         const row = try tree.create(.{ .style = .{ .direction = .row, .gap = Length.px(8), .justify = .end, .margin = .{ .top = Length.px(10) }, .shrink = 0 } });
         try tree.appendChild(panel, row);
         var buttons: [max_buttons]*Button = undefined;
-        for (&buttons) |*b| b.* = try ui.add(Button, row, .{ .text = "", .style = .{ .padding = Edges.xy(16, 6) }, .on_click = .bind(self, onButton) });
+        for (&buttons) |*b| {
+            b.* = try ui.add(Button, row, .{ .text = "", .style = .{ .padding = Edges.xy(16, 6) }, .on_click = .bind(self, onButton) });
+            // Empty until shown, so name it for accessibility; `show` replaces this with the button's text.
+            try tree.setLabel(b.*.node, "Message box button");
+        }
         self.* = .{ .gpa = ui.gpa, .ui = ui, .node = node, .panel = panel, .title = title, .lines = lines, .buttons = buttons };
         return self;
     }
@@ -122,6 +126,7 @@ pub const MessageBox = struct {
             self.ui.setHidden(b.node, i >= self.count);
             if (i < self.count) {
                 b.setText(o.buttons[i]) catch {};
+                self.ui.tree.setLabel(b.node, o.buttons[i]) catch {};
                 b.setVariant(if (i == 0) .primary else .flat);
             }
         }
