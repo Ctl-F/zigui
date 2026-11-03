@@ -72,6 +72,9 @@ const App = struct {
     prompt: *ide.prompt.Prompt = undefined,
     file_dialog: *zigui.file_dialog.FileDialog = undefined,
     quick: *ide.QuickOpen = undefined,
+    zv: *ide.zig_versions.Versions = undefined,
+    /// The template chosen in New Project, while the Zig version is being picked.
+    new_template: usize = 0,
     /// The zigui source this IDE was built from, for the zigui app template (null: not found).
     zigui_root: ?[]u8 = null,
     /// A new project being made: where, and what it is called, while its template is chosen.
@@ -151,6 +154,10 @@ const App = struct {
         };
     }
 
+    fn showOutputPanel(self: *App) void {
+        self.showPanel(self.output_panel);
+    }
+
     /// Start a new copy of this program on the same folder and files, then quit.
     fn restartNow(self: *App) void {
         self.launchOn(self.project.root);
@@ -228,9 +235,24 @@ const App = struct {
 
     fn onTemplatePick(self: *App, index: usize) void {
         if (index >= ide.new_project.templates.len) return;
-        const t = ide.new_project.templates[index];
+        self.new_template = index;
+        // With ZVM and some Zig installed, choose which version makes the project.
+        if (self.zv.showProjectVersions(self, onNewProjectVersion)) return;
+        self.createProject(null);
+    }
+
+    fn onNewProjectVersion(ctx: ?*anyopaque, version: []const u8) void {
+        const self: *App = @ptrCast(@alignCast(ctx.?));
+        self.createProject(version);
+    }
+
+    fn createProject(self: *App, version: ?[]const u8) void {
+        const t = ide.new_project.templates[self.new_template];
         var report: ide.new_project.Report = .{};
-        const made = ide.new_project.create(self.gpa, self.io, self.new_parent[0..self.new_parent_len], self.new_name[0..self.new_name_len], t.template, self.zigui_root, &report) catch |err| {
+        const exe: ?[]u8 = if (version) |v| self.zv.zigPathFor(v) else null;
+        defer if (exe) |e| self.gpa.free(e);
+        const zig: ide.new_project.Zig = .{ .exe = exe orelse "zig", .version = version };
+        const made = ide.new_project.create(self.gpa, self.io, self.new_parent[0..self.new_parent_len], self.new_name[0..self.new_name_len], t.template, self.zigui_root, zig, &report) catch |err| {
             return self.setStatus("could not create the project: {s}", .{if (report.len > 0) report.text() else @errorName(err)});
         };
         defer self.gpa.free(made);
@@ -390,6 +412,14 @@ const App = struct {
             if (self.designer.builder) |b| b.setPanelsVisible(true) else self.setStatus("open a .ui.zon document first (File > New UI Document)", .{});
         } else if (eq(u8, name, "editor.definition")) {
             if (self.docs.active()) |d| self.lsp.gotoDefinition(d.editor);
+        } else if (eq(u8, name, "zig.switch_version")) {
+            self.zv.showSwitcher();
+        } else if (eq(u8, name, "zig.install_version")) {
+            self.zv.showInstaller();
+        } else if (eq(u8, name, "zig.install_zls")) {
+            self.zv.installZls();
+        } else if (eq(u8, name, "zig.install_zvm")) {
+            if (self.zv.zvmInstall() != null) self.setStatus("ZVM is already installed", .{}) else self.zv.offerZvm();
         } else if (eq(u8, name, "project.quick_open")) {
             self.quick.show();
         } else if (eq(u8, name, "project.search")) {
@@ -595,6 +625,7 @@ const App = struct {
         }
         self.search.poll();
         self.quick.poll();
+        self.zv.poll();
         self.docs.poll();
         self.lsp.poll();
         self.terminal.poll();
@@ -791,7 +822,10 @@ pub fn main(init: std.process.Init) !void {
         app.zigui_root = try ide.new_project.findZiguiRoot(gpa, io, exe, init.environ_map);
     } else |_| {}
     defer if (app.zigui_root) |r| gpa.free(r);
-    app.status = try ui.add(zigui.Label, ui.tree.root, .{ .style = .{ .padding = zigui.style.Edges.xy(8, 3), .shrink = 0 } });
+    // The bottom bar: the status text, and the Zig version button on its right.
+    const status_row = try ui.tree.create(.{ .style = .{ .direction = .row, .align_items = .center, .shrink = 0 } });
+    try ui.tree.appendChild(ui.tree.root, status_row);
+    app.status = try ui.add(zigui.Label, status_row, .{ .style = .{ .padding = zigui.style.Edges.xy(8, 3), .shrink = 1, .grow = 1 } });
 
     // Center: a welcome tab that documents open beside.
     const welcome = try dock.addPanel("Welcome");
@@ -808,6 +842,12 @@ pub fn main(init: std.process.Init) !void {
 
     // Suggestions that work with no language server: words in the file, plus
     // Zig names and the standard library read from source (std.zig.Ast).
+    // Use the Zig version the project asks for (.zigversion or build.zig.zon), when
+    // ZVM has it: this runs before `zig env` below so everything sees the right one.
+    const auto = ide.zvm.autoSwitch(gpa, io, init.environ_map, project.dir);
+    defer auto.deinit(gpa);
+    if (auto.switched) std.log.info("zvm: switched to Zig {s} for this project", .{auto.wanted.?});
+    if (auto.failed) std.log.warn("zvm: could not switch to Zig {s}", .{auto.wanted.?});
     const zig_info = ide.zig_complete.locateZig(gpa, io);
     defer if (zig_info) |zi| zi.deinit(gpa);
     const std_dir: ?[]const u8 = if (zig_info) |zi| zi.std_dir else null;
@@ -881,6 +921,20 @@ pub fn main(init: std.process.Init) !void {
     app.output = try ide.OutputPanel.create(&ui, output_panel.content, .{ .style = .{ .grow = 1 }, .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt) });
     defer app.output.destroy();
     app.output_panel = output_panel;
+    const settings_dir: ?[]u8 = ide.settings.globalDir(gpa, init.environ_map) catch null;
+    defer if (settings_dir) |d| gpa.free(d);
+    const zvm_install_override: ?[]const u8 = init.environ_map.get("ZIGUI_ZVM_INSTALL");
+    app.zv = try ide.zig_versions.Versions.create(&ui, ui.tree.root, io, init.environ_map, .{
+        .output = app.output,
+        .button_parent = status_row,
+        .command = "zig.switch_version",
+        .global_dir = settings_dir,
+        .wake = sdl.wake,
+        .on_restart = ide.zig_versions.VoidHook.bind(&app, App.restartNow),
+        .show_output = ide.zig_versions.VoidHook.bind(&app, App.showOutputPanel),
+        .install_argv = if (zvm_install_override) |c| &.{ "sh", "-c", c } else null,
+    });
+    defer app.zv.destroy();
     try dock.dockRoot(output_panel, .bottom, 220);
 
     // The terminal shares the bottom group with Output.
@@ -930,6 +984,10 @@ pub fn main(init: std.process.Init) !void {
         .{ "view.designer", "UI Designer Panels" },
         .{ "view.welcome", "Welcome and Shortcuts" },
         .{ "view.reset_layout", "Reset Panel Layout" },
+        .{ "zig.switch_version", "Switch Zig Version..." },
+        .{ "zig.install_version", "Install Zig Version..." },
+        .{ "zig.install_zls", "Install ZLS for This Zig Version" },
+        .{ "zig.install_zvm", "Install ZVM..." },
         .{ "ide.build", "Build" },
         .{ "ide.run", "Run" },
         .{ "ide.test", "Run Tests" },
@@ -1001,6 +1059,13 @@ pub fn main(init: std.process.Init) !void {
         .{ .separator = true },
         .{ .label = "Reset Panel Layout", .command = "view.reset_layout" },
     }, null);
+    try bar.addMenu("Zig", &.{
+        .{ .label = "Switch Zig Version...", .command = "zig.switch_version" },
+        .{ .label = "Install Zig Version...", .command = "zig.install_version" },
+        .{ .label = "Install ZLS for This Zig Version", .command = "zig.install_zls" },
+        .{ .separator = true },
+        .{ .label = "Install ZVM...", .command = "zig.install_zvm" },
+    }, null);
     try bar.addMenu("Build", &.{
         .{ .label = "Build", .command = "ide.build" },
         .{ .label = "Run", .command = "ide.run" },
@@ -1022,6 +1087,9 @@ pub fn main(init: std.process.Init) !void {
     if (!restored) {
         for (reopen) |rel| _ = app.docs.open(rel, 0, 0) catch {};
     }
+
+    // ZVM questions (install ZVM; install the project's Zig version) wait until the window exists.
+    app.zv.startup(auto.wanted, auto.missing);
 
     const commands = try gpa.alloc(zigui.draw_list.Command, 32768);
     defer gpa.free(commands);

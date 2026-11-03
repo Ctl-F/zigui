@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>MessageBox - zigui</title><link rel="stylesheet" href="../style.css"></head>
+<body data-root="../"><nav id="nav"></nav><main>
+<h1>MessageBox</h1>
+<p>A modal message box: a title, a few lines of text and up to four buttons, for a question the program must ask before going on (&ldquo;Install it now?&rdquo;).</p>
+<pre><code>const mb = try zigui.message_box.MessageBox.create(&amp;ui, ui.tree.root);   // hidden until shown
+defer mb.destroy();
+mb.show(.{
+    .title = "ZVM not found",
+    .message = "ZVM is not installed.\nInstall it now?",     // \n starts a new line (up to 10, not wrapped)
+    .buttons = &amp;.{ "Install", "Not now", "Never" },          // up to 4; the first is the default
+    .cancel = 1,                                             // what Escape chooses (default: the last)
+    .on_choice = .bind(&amp;app, App.chose),                     // fn (*App, index: usize) void
+});</code></pre>
+<p>The hook runs after the box closed and gets the button's index. While it is open it holds a modal focus scope: the rest of the window gets no input, and clicks on the dimmed area do nothing. <code>choose(index)</code> and <code>close()</code> drive it from code; <code>isOpen()</code> says whether it is showing. Code-only widget.</p>
+</main><script src="../nav.js"></script></body></html>

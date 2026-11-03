@@ -15,6 +15,7 @@
 <h2>In the IDE app</h2>
 <p><code>zig build ide</code> starts <code>zls</code> from <code>PATH</code> when the first Zig file opens, or the program in <code>ZIGUI_ZLS=/path/to/zls</code>. Edits are sent as the whole text 120 ms after typing stops, and always before a request that depends on them.</p>
 <h3>Which zls is used</h3>
+<p>With <a href="zvm.html">ZVM</a>, <b>Zig &gt; Install ZLS for This Zig Version</b> installs the matching zls (<code>zvm install VERSION --zls</code>) and restarts the IDE.</p>
 <p>A zls build only understands the Zig version it was built for, so the IDE asks <code>zig env</code> for the compiler version and looks for a matching <code>zls</code> (same major.minor), in this order: <code>ZIGUI_ZLS</code> / the <code>.language_server</code> setting, <code>PATH</code>, <code>$XDG_DATA_HOME/zls/&lt;version&gt;/zls</code>, <code>~/.local/share/zls/&lt;version&gt;</code>, <code>~/.zvm/&lt;version&gt;</code>, <code>~/.local/bin</code>, <code>/usr/local/bin</code>, <code>/usr/bin</code>. If no build matches, the newest older one is used and the status line says so (&ldquo;using zls 0.16.0 for Zig 0.17.0 &hellip; some answers may be missing&rdquo;). If none is found at all the status line lists where it looked instead of a bare &ldquo;FileNotFound&rdquo;. Implemented in <code>src/ide/zls_locate.zig</code>.</p>
 <h2>Using it in your own program</h2>
 <pre><code>const lsp = try zigui.ide.lsp_assist.Assist.create(&amp;ui, io, project_root);

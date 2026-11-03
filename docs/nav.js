@@ -26,6 +26,7 @@
       ["widgets/hover.html", "Hover and signatures"],
       ["widgets/file-dialog.html", "FileDialog"],
       ["widgets/quick-pick.html", "QuickPick"],
+      ["widgets/message-box.html", "MessageBox"],
       ["widgets/terminal.html", "Terminal"],
       ["widgets/canvas.html", "Canvas"],
       ["widgets/scroll-view.html", "ScrollView"],
@@ -46,6 +47,7 @@
     ["IDE", [
       ["ide.html", "IDE pieces"],
       ["lsp.html", "Language servers"],
+      ["zvm.html", "Zig versions (ZVM)"],
       ["designer.html", "UI designer and handlers"],
       ["settings.html", "Settings, keys, sessions"],
       ["projects.html", "Projects: open and create"],

@@ -8,7 +8,7 @@
 //!     IDE's designer and the Events tab already shows the handler
 //!   * `empty`: just a folder with a README (for any language; the IDE needs nothing more)
 //!
-//!     const made = try new_project.create(gpa, io, "/home/me/code", "myapp", .zigui_app, zigui_root, &report);
+//!     const made = try new_project.create(gpa, io, "/home/me/code", "myapp", .zigui_app, zigui_root, .{}, &report);
 //!     defer gpa.free(made);                     // "/home/me/code/myapp"
 //!
 //! `zig` must be on PATH for the two Zig templates. `zigui_root` (see `findZiguiRoot`)
@@ -97,9 +97,9 @@ pub fn patchManifest(a: std.mem.Allocator, zon: []const u8, zigui_rel: []const u
     return std.mem.replaceOwned(u8, a, with_dep, "\"src\",", "\"main.zig\",\n        \"ui\",\n        \"ui_actions.zig\",");
 }
 
-fn runZigInit(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, report: *Report) bool {
-    const res = std.process.run(gpa, io, .{ .argv = &.{ "zig", "init" }, .cwd = .{ .path = dir } }) catch |err| {
-        report.set("could not run `zig init` ({s}); is zig on PATH?", .{@errorName(err)});
+fn runZigInit(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, zig: []const u8, report: *Report) bool {
+    const res = std.process.run(gpa, io, .{ .argv = &.{ zig, "init" }, .cwd = .{ .path = dir } }) catch |err| {
+        report.set("could not run `{s} init` ({s}); is zig installed?", .{ zig, @errorName(err) });
         return false;
     };
     defer gpa.free(res.stdout);
@@ -113,8 +113,16 @@ fn runZigInit(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, report: *Repo
     return false;
 }
 
+/// Which Zig makes the project (the IDE passes ZVM's choice).
+pub const Zig = struct {
+    /// The program that runs `zig init` (default: `zig` from PATH).
+    exe: []const u8 = "zig",
+    /// Recorded in `.zigversion` so opening the project selects this version (null: not recorded).
+    version: ?[]const u8 = null,
+};
+
 /// Make `<parent>/<name>` from `template`. Returns its absolute path (caller frees).
-pub fn create(gpa: std.mem.Allocator, io: std.Io, parent: []const u8, name: []const u8, template: Template, zigui_root: ?[]const u8, report: *Report) ![]u8 {
+pub fn create(gpa: std.mem.Allocator, io: std.Io, parent: []const u8, name: []const u8, template: Template, zigui_root: ?[]const u8, zig: Zig, report: *Report) ![]u8 {
     if (!validName(name)) {
         report.set("\"{s}\" is not a valid project name: use letters, digits and underscores, starting with a letter", .{name});
         return error.InvalidName;
@@ -146,15 +154,20 @@ pub fn create(gpa: std.mem.Allocator, io: std.Io, parent: []const u8, name: []co
             defer gpa.free(readme);
             try dir.writeFile(io, .{ .sub_path = "README.md", .data = readme });
         },
-        .zig_project => if (!runZigInit(gpa, io, target, report)) return error.ZigInitFailed,
-        .zigui_app => try createZiguiApp(gpa, io, dir, target, name, zigui_root.?, report),
+        .zig_project => if (!runZigInit(gpa, io, target, zig.exe, report)) return error.ZigInitFailed,
+        .zigui_app => try createZiguiApp(gpa, io, dir, target, name, zigui_root.?, zig.exe, report),
+    }
+    if (zig.version) |v| {
+        const line = try std.fmt.allocPrint(gpa, "{s}\n", .{v});
+        defer gpa.free(line);
+        try dir.writeFile(io, .{ .sub_path = ".zigversion", .data = line });
     }
     return target;
 }
 
-fn createZiguiApp(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, target: []const u8, name: []const u8, zigui_root: []const u8, report: *Report) !void {
+fn createZiguiApp(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, target: []const u8, name: []const u8, zigui_root: []const u8, zig_exe: []const u8, report: *Report) !void {
     // `zig init` gives a manifest with a real fingerprint; its sample sources are not wanted.
-    if (!runZigInit(gpa, io, target, report)) return error.ZigInitFailed;
+    if (!runZigInit(gpa, io, target, zig_exe, report)) return error.ZigInitFailed;
     dir.deleteTree(io, "src") catch {};
 
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -252,16 +265,23 @@ test "an empty project is a folder with a README; bad names and busy folders are
     const n = try tmp.dir.realPathFile(testing.io, ".", &buf);
     const parent = buf[0..n];
     var report: Report = .{};
-    const path = try create(testing.allocator, testing.io, parent, "scratch", .empty, null, &report);
+    const path = try create(testing.allocator, testing.io, parent, "scratch", .empty, null, .{}, &report);
     defer testing.allocator.free(path);
     try testing.expect(std.mem.endsWith(u8, path, "/scratch"));
     const readme = try tmp.dir.readFileAlloc(testing.io, "scratch/README.md", testing.allocator, .limited(4096));
     defer testing.allocator.free(readme);
     try testing.expect(std.mem.startsWith(u8, readme, "# scratch"));
-    try testing.expectError(error.AlreadyExists, create(testing.allocator, testing.io, parent, "scratch", .empty, null, &report));
+    try testing.expectError(error.AlreadyExists, create(testing.allocator, testing.io, parent, "scratch", .empty, null, .{}, &report));
     try testing.expect(std.mem.indexOf(u8, report.text(), "not empty") != null);
-    try testing.expectError(error.InvalidName, create(testing.allocator, testing.io, parent, "bad name", .empty, null, &report));
-    try testing.expectError(error.NoZiguiSource, create(testing.allocator, testing.io, parent, "fine", .zigui_app, null, &report));
+    try testing.expectError(error.InvalidName, create(testing.allocator, testing.io, parent, "bad name", .empty, null, .{}, &report));
+    try testing.expectError(error.NoZiguiSource, create(testing.allocator, testing.io, parent, "fine", .zigui_app, null, .{}, &report));
+
+    // A chosen Zig version is recorded so opening the project selects it again.
+    const v = try create(testing.allocator, testing.io, parent, "versioned", .empty, null, .{ .version = "0.16.0" }, &report);
+    defer testing.allocator.free(v);
+    const zv = try tmp.dir.readFileAlloc(testing.io, "versioned/.zigversion", testing.allocator, .limited(64));
+    defer testing.allocator.free(zv);
+    try testing.expectEqualStrings("0.16.0\n", zv);
 }
 
 test "a zigui app project has its files, a patched manifest and a registered handler" {
@@ -273,7 +293,7 @@ test "a zigui app project has its files, a patched manifest and a registered han
     const n = try tmp.dir.realPathFile(testing.io, "code", &buf);
     const parent = buf[0..n];
     var report: Report = .{};
-    const path = create(testing.allocator, testing.io, parent, "zapp", .zigui_app, "/opt/zigui", &report) catch |err| {
+    const path = create(testing.allocator, testing.io, parent, "zapp", .zigui_app, "/opt/zigui", .{}, &report) catch |err| {
         if (err == error.ZigInitFailed) return error.SkipZigTest; // no zig on PATH
         return err;
     };
@@ -319,7 +339,7 @@ test "a zig project is what zig init makes" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.realPathFile(testing.io, ".", &buf);
     var report: Report = .{};
-    const path = create(testing.allocator, testing.io, buf[0..n], "hello", .zig_project, null, &report) catch |err| {
+    const path = create(testing.allocator, testing.io, buf[0..n], "hello", .zig_project, null, .{}, &report) catch |err| {
         if (err == error.ZigInitFailed) return error.SkipZigTest;
         return err;
     };

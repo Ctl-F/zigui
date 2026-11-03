@@ -149,14 +149,14 @@ pub fn find(a: std.mem.Allocator, io: std.Io, environ: ?*const std.process.Envir
     const cands = try collect(a, io, environ);
     const pick = choose(cands, zig_version) orelse return null;
     const c = cands[pick.index];
-    const note = if (pick.exact or c.version.len == 0) "" else try std.fmt.allocPrint(a, "using zls {s} for Zig {s} (no zls {s} build was found); some answers may be missing", .{ c.version, zig_version, zig_version });
+    const note = if (pick.exact or c.version.len == 0) "" else try std.fmt.allocPrint(a, "using zls {s} for Zig {s} (no zls {s} build was found); some answers may be missing; Zig > Install ZLS for This Zig Version fetches the right one", .{ c.version, zig_version, zig_version });
     return .{ .path = c.path, .version = c.version, .exact = pick.exact, .note = note };
 }
 
 /// What to say when `find` returns null.
 pub fn missingNote(a: std.mem.Allocator, zig_version: []const u8, configured: []const u8) ![]const u8 {
     if (configured.len > 0) return std.fmt.allocPrint(a, "the language server \"{s}\" was not found; check the .language_server setting (or ZIGUI_ZLS)", .{configured});
-    return std.fmt.allocPrint(a, "no zls found for Zig {s} (looked on PATH, ~/.local/share/zls, ~/.zvm, ~/.local/bin); install one or set .language_server in the settings. Offline completion still works", .{zig_version});
+    return std.fmt.allocPrint(a, "no zls found for Zig {s} (looked on PATH, ~/.local/share/zls, ~/.zvm, ~/.local/bin); Zig > Install ZLS for This Zig Version installs one (needs ZVM), or set .language_server in the settings. Offline completion still works", .{zig_version});
 }
 
 // ---- tests -----------------------------------------------------------------

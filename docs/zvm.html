@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Zig versions (ZVM) - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Zig versions (ZVM)</h1>
+<p>The IDE uses <a href="https://www.zvm.app">ZVM</a>, the Zig version manager, to install Zig versions, switch between them, and use the version each project asks for. ZVM does the work; the IDE runs it (its progress shows in the Output panel) and keeps its own state in sync. Nothing here is required: without ZVM the IDE uses whatever <code>zig</code> is on <code>PATH</code>.</p>
+
+<h2>First start: is ZVM installed?</h2>
+<p>At startup the IDE looks for ZVM in <code>$ZVM_INSTALL</code>, then on <code>PATH</code>, then in <code>~/.zvm/self</code> (<code>$ZVM_PATH</code> replaces <code>~/.zvm</code>). If it is missing, a box asks whether to install it and shows the exact line it would run: <code>curl -fsSL https://www.zvm.app/install.sh | bash</code> (Linux, macOS) or <code>irm https://www.zvm.app/install.ps1 | iex</code> in PowerShell (Windows). <b>Install ZVM</b> runs ZVM's official installer in the Output panel and then picks ZVM up without a restart. <b>Not now</b> asks again next start; <b>Don't ask again</b> writes <code>zvm-declined</code> in the IDE's settings folder (<code>~/.config/zigui-ide</code>; delete it to be asked again). <b>Zig &gt; Install ZVM...</b> asks at any time.</p>
+
+<h2>The version button and the picker</h2>
+<p>The right end of the status bar shows <code>Zig 0.17.0</code>, the version <code>zig</code> on <code>PATH</code> runs (<code>Zig: no ZVM</code> or <code>Zig: none selected</code> otherwise). Clicking it, or <b>Zig &gt; Switch Zig Version...</b>, opens a picker of the installed versions (newest first, <code>master</code> on top) with the one in use and the one the project asks for marked, and <b>Install another version...</b> at the end. Choosing a version runs <code>zvm use VERSION</code>, then restarts the IDE on the same project (and files) so completion, the language server and builds all use it. Note that <code>zvm use</code> changes <code>zig</code> for the whole machine, not just this window: that is how ZVM works.</p>
+<p><b>Zig &gt; Install Zig Version...</b> lists the versions ZVM can install (it asks ZVM, which needs the network; the list says "with ZLS" where a language server build exists). Choosing one runs <code>zvm install VERSION</code> (with <code>--zls</code> when a ZLS build exists), then offers to switch to it. <b>Zig &gt; Install ZLS for This Zig Version</b> runs <code>zvm install CURRENT --zls</code>, which adds only the language server, then restarts: this is the fix for "using zls 0.16.0 for Zig 0.17.0".</p>
+
+<h2>A project's version</h2>
+<p>A project asks for a Zig version in either place (the first found wins):</p>
+<ul>
+<li><code>.zigversion</code> in the project root: its first line, such as <code>0.16.0</code> (or <code>master</code>).</li>
+<li><code>.minimum_zig_version = "0.16.0"</code> in <code>build.zig.zon</code>.</li>
+</ul>
+<p>Only plain versions and <code>master</code> count; a development string such as <code>0.17.0-dev.12+abc</code> is ignored. When a project opens, before anything reads <code>zig env</code>:</p>
+<ul>
+<li>ZVM has the version and it is already in use: nothing happens (no process is started).</li>
+<li>ZVM has it but another is in use: the IDE runs <code>zvm use VERSION</code> and starts with it.</li>
+<li>ZVM does not have it: a box offers <b>Install and switch</b> (install, <code>zvm use</code>, restart) or <b>Not now</b>.</li>
+</ul>
+
+<h2>New projects under a version</h2>
+<p>With ZVM and at least one Zig installed, <b>File &gt; New Project...</b> adds a step after the template: a picker of installed versions (the one in use first). The project is made with that version (<code>zig init</code> runs from <code>~/.zvm/VERSION/zig</code>, so the manifest matches) and a <code>.zigversion</code> file records it, so opening the project later selects the version again.</p>
+
+<h2>How it works</h2>
+<table>
+<tr><th>Piece</th><th>Where</th></tr>
+<tr><td><code>ide.zvm</code></td><td>UI-free: <code>locate</code>, <code>installed</code> and <code>current</code> (read from <code>~/.zvm</code>: every <code>VERSION/zig</code>, and where <code>bin</code> points, so no process is started), <code>projectVersion</code>, <code>autoSwitch</code>, <code>Fetcher</code> (the installable list from <code>zvm ls-remote --json</code> on a worker thread), command builders (<code>installArgv</code>, <code>useArgv</code>, <code>install_script_argv</code>).</td></tr>
+<tr><td><code>ide.zig_versions.Versions</code></td><td>The IDE side: status-bar button, pickers, questions, running ZVM in the Output panel and acting when it finishes (<code>poll()</code> each loop iteration).</td></tr>
+<tr><td><a href="widgets/quick-pick.html">QuickPick</a>, <a href="widgets/message-box.html">MessageBox</a></td><td>The picker and the yes/no boxes.</td></tr>
+</table>
+<p>For headless checks, <code>ZIGUI_ZVM_INSTALL="shell command"</code> replaces the install script, and commands <code>zig.switch_version</code>, <code>zig.install_version</code>, <code>zig.install_zls</code>, <code>zig.install_zvm</code> can be run with <code>cmd NAME</code>. ZVM prints an upgrade notice around its output; the IDE asks for <code>--color off</code> and reads only the JSON it needs.</p>
+</main><script src="nav.js"></script></body></html>

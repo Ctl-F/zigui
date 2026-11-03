@@ -27,6 +27,8 @@ pub const session = @import("ide/session.zig");
 pub const new_project = @import("ide/new_project.zig");
 pub const zls_locate = @import("ide/zls_locate.zig");
 pub const symbol_index = @import("ide/symbol_index.zig");
+pub const zvm = @import("ide/zvm.zig");
+pub const zig_versions = @import("ide/zig_versions.zig");
 pub const quick_open = @import("ide/quick_open.zig");
 pub const QuickOpen = quick_open.QuickOpen;
 pub const documents = @import("ide/documents.zig");
@@ -43,6 +45,8 @@ test {
     _ = documents;
     _ = zls_locate;
     _ = symbol_index;
+    _ = zvm;
+    _ = zig_versions;
     _ = quick_open;
     _ = new_project;
     _ = settings;

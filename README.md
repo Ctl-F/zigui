@@ -446,6 +446,14 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   files and declarations of the project and the library, and `ide.QuickOpen`
   joins them behind Ctrl+, (`project.quick_open`). The library is indexed once
   at startup, the project each time the box opens.
+- ZVM integration (`ide/zvm.zig`, `ide/zig_versions.zig`): detects ZVM at startup
+  and offers to install it (official script, run in the Output panel, with a
+  "don't ask again" marker); a status-bar version button and pickers
+  (`widgets/quick_pick.zig`, `widgets/message_box.zig`) switch (`zvm use`) and
+  install (`zvm install [--zls]`) versions and restart the IDE; a project's
+  `.zigversion` or `minimum_zig_version` is applied at open (`autoSwitch`, no
+  process unless a change is needed) and New Project records the chosen
+  version. Installed/current are read from `~/.zvm` without running ZVM.
 - ZLS discovery (`ide/zls_locate.zig`): the zls matching `zig env`'s version is
   chosen (PATH, XDG/zvm/local dirs); an older one is used with a visible note,
   and a missing one produces a message listing where it looked.
