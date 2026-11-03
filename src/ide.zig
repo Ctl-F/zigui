@@ -30,6 +30,7 @@ pub const symbol_index = @import("ide/symbol_index.zig");
 pub const build_watch = @import("ide/build_watch.zig");
 pub const watch_panel = @import("ide/watch_panel.zig");
 pub const WatchPanel = watch_panel.WatchPanel;
+pub const nav_history = @import("ide/nav_history.zig");
 pub const zvm = @import("ide/zvm.zig");
 pub const zig_versions = @import("ide/zig_versions.zig");
 pub const quick_open = @import("ide/quick_open.zig");
@@ -50,6 +51,7 @@ test {
     _ = symbol_index;
     _ = build_watch;
     _ = watch_panel;
+    _ = nav_history;
     _ = zvm;
     _ = zig_versions;
     _ = quick_open;

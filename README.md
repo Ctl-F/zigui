@@ -446,6 +446,8 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   files and declarations of the project and the library, and `ide.QuickOpen`
   joins them behind Ctrl+, (`project.quick_open`). The library is indexed once
   at startup, the project each time the box opens.
+- Back/Forward (`ide/nav_history.zig`): every `openAt` jump records the place left;
+  the mouse side buttons (SDL buttons 4/5) and Alt+Left/Right walk the list.
 - Continuous error checking (`ide/build_watch.zig`, `ide/watch_panel.zig`): the
   optional `zig build --watch -fincremental` runs in the background; a
   `Collector` splits its output at each `Build Summary:` line into located

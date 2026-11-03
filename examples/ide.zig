@@ -44,6 +44,8 @@ const default_bindings = [_][2][]const u8{
     .{ "mod+shift+f", "project.search" },
     .{ "mod+,", "project.quick_open" },
     .{ "f12", "editor.definition" },
+    .{ "alt+left", "nav.back" },
+    .{ "alt+right", "nav.forward" },
     .{ "f2", "refactor.rename_handler" },
     .{ "mod+`", "view.terminal" },
 };
@@ -78,6 +80,9 @@ const App = struct {
     /// The `build_watch` setting as last applied (a change starts or stops the watch).
     prev_build_watch: bool = false,
     watch_ready: bool = false,
+    /// Places jumped from, for the mouse's Back/Forward buttons.
+    nav: ide.nav_history.History = undefined,
+    navigating: bool = false,
     /// The template chosen in New Project, while the Zig version is being picked.
     new_template: usize = 0,
     /// The zigui source this IDE was built from, for the zigui app template (null: not found).
@@ -137,10 +142,31 @@ const App = struct {
         }
     }
 
+    /// Where the caret is now, as a history entry (null with no document open).
+    fn here(self: *App) ?ide.nav_history.Location {
+        const d = self.docs.active() orelse return null;
+        const ed = d.editor.core();
+        const head = ed.primaryHead();
+        const line = ed.doc.lineOfOffset(head);
+        return .{ .path = d.path, .line = @intCast(line + 1), .col = @intCast(head - ed.doc.lineStart(line) + 1) };
+    }
+
+    /// Mouse Back / Forward (and Alt+Left / Alt+Right): return to a place jumped from, or go on again.
+    fn navigate(self: *App, go_forward: bool) void {
+        const loc = (if (go_forward) self.nav.forward(self.here()) else self.nav.back(self.here())) orelse
+            return self.setStatus("no {s} location", .{if (go_forward) "next" else "previous"});
+        self.navigating = true;
+        defer self.navigating = false;
+        self.openAt(loc.path, loc.line, loc.col);
+    }
+
     fn openAt(self: *App, path: []const u8, line: u32, col: u32) void {
+        // The place being left joins the history (unless this is Back/Forward itself).
+        if (!self.navigating) {
+            if (self.here()) |h| self.nav.record(h);
+        }
         // Compiler output carries paths relative to where the build ran (the
         // project root) or absolute ones.
-                
         const rel = self.project.relPath(path) orelse path;
         _ = self.docs.open(rel, line, col) catch |err| {
             var buf: [200]u8 = undefined;
@@ -424,6 +450,10 @@ const App = struct {
             if (self.designer.builder) |b| b.setPanelsVisible(true) else self.setStatus("open a .ui.zon document first (File > New UI Document)", .{});
         } else if (eq(u8, name, "editor.definition")) {
             if (self.docs.active()) |d| self.lsp.gotoDefinition(d.editor);
+        } else if (eq(u8, name, "nav.back")) {
+            self.navigate(false);
+        } else if (eq(u8, name, "nav.forward")) {
+            self.navigate(true);
         } else if (eq(u8, name, "build.watch_toggle")) {
             self.watch.toggle();
             self.showPanel(self.problems_panel);
@@ -812,6 +842,8 @@ pub fn main(init: std.process.Init) !void {
 
     const scripted = init.environ_map.get("ZIGUI_SCREENSHOT") != null;
     var app: App = .{ .dry_restart = scripted, .session_enabled = !scripted or init.environ_map.get("ZIGUI_SESSION") != null, .gpa = gpa, .io = io, .ui = &ui, .project = &project, .dock = undefined };
+    app.nav = ide.nav_history.History.init(gpa);
+    defer app.nav.deinit();
     defer if (app.rename_scan) |*sc| sc.deinit();
     app.environ = init.environ_map;
     app.base_font_size = ui.theme.font_size;
@@ -1022,6 +1054,8 @@ pub fn main(init: std.process.Init) !void {
         .{ "zig.install_version", "Install Zig Version..." },
         .{ "zig.install_zls", "Install ZLS for This Zig Version" },
         .{ "zig.install_zvm", "Install ZVM..." },
+        .{ "nav.back", "Go Back" },
+        .{ "nav.forward", "Go Forward" },
         .{ "build.watch_toggle", "Check Errors Continuously (zig build --watch)" },
         .{ "ide.build", "Build" },
         .{ "ide.run", "Run" },
@@ -1078,6 +1112,8 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "Go to File, Function or Type...", .command = "project.quick_open" },
         .{ .separator = true },
         .{ .label = "Go to Definition", .command = "editor.definition" },
+        .{ .label = "Go Back", .command = "nav.back" },
+        .{ .label = "Go Forward", .command = "nav.forward" },
     }, null);
     try bar.addMenu("Refactor", &.{
         .{ .label = "Rename Event Handler...", .command = "refactor.rename_handler" },
@@ -1201,7 +1237,11 @@ pub fn main(init: std.process.Init) !void {
                     force = true;
                 },
                 .mouse_move => |m| ui.pointerMove(m.x, m.y),
-                .mouse_button => |m| ui.pointerButtonEx(m.x, m.y, @backingInt(m.button), m.down, m.clicks),
+                .mouse_button => |m| switch (m.button) {
+                    // The side buttons: Back and Forward through the places jumped from.
+                    .x1, .x2 => if (m.down) app.navigate(m.button == .x2),
+                    else => ui.pointerButtonEx(m.x, m.y, @backingInt(m.button), m.down, m.clicks),
+                },
                 .mouse_wheel => |m| ui.wheel(m.px, m.py, m.x, m.y),
                 .pointer_left => ui.pointerLeft(),
                 .focus_lost => ui.pointerCancel(),
