@@ -269,6 +269,7 @@ pub const Assist = struct {
         try self.docs.append(self.gpa, d);
         errdefer _ = self.docs.pop();
         try ed.addEditHook(event.Callback.bind(self, onEdit));
+        try ed.ui.tree.addListener(ed.node, .{ .kind = .pointer_down, .callback = event.Callback.bind(self, onPointerDown) });
         const text = try ed.textAlloc(self.gpa);
         defer self.gpa.free(text);
         try server.client.didOpen(uri, self.configs.items[cfg].language_id, d.version, text);
@@ -533,13 +534,31 @@ pub const Assist = struct {
 
     // ---- go to definition ----
 
+    /// Ctrl+click (Cmd+click on macOS) on a name goes to its definition, like F12 at the caret.
+    fn onPointerDown(self: *Assist, ev: *event.Event) void {
+        if (ev.button != 1 or !(ev.mods.ctrl or ev.mods.gui)) return;
+        for (self.docs.items) |d| {
+            if (!d.ed.node.eql(ev.current)) continue;
+            if (!ready(d)) return;
+            const off = d.ed.offsetAtPoint(ev.local_x, ev.local_y);
+            ev.markHandled();
+            self.gotoDefinitionAt(d.ed, off);
+            return;
+        }
+    }
+
     /// Ask where the name at `ed`'s caret is defined and open it through `on_open`.
     pub fn gotoDefinition(self: *Assist, ed: *CodeEditor) void {
+        self.gotoDefinitionAt(ed, ed.core().primaryHead());
+    }
+
+    /// Ask where the name at document offset `offset` of `ed` is defined.
+    pub fn gotoDefinitionAt(self: *Assist, ed: *CodeEditor, offset: usize) void {
         const d = self.docOf(ed) orelse return;
         if (!ready(d)) return;
         flushDoc(d);
         const ask = self.newAsk(d, 0, "") orelse return;
-        _ = d.server.client.positionRequest("definition", d.uri, self.positionOf(d, ed.core().primaryHead()), client_mod.ResponseHook.bind(ask, onDefinition)) catch {
+        _ = d.server.client.positionRequest("definition", d.uri, self.positionOf(d, offset), client_mod.ResponseHook.bind(ask, onDefinition)) catch {
             self.freeAsk(ask);
         };
     }
@@ -727,6 +746,21 @@ test "a server's answers become squiggles, late completions, hover text, hints a
     try testing.expectEqualStrings("/proj/src/b.zig", opened.path[0..opened.len]);
     try testing.expectEqual(@as(u32, 10), opened.line);
     try testing.expectEqual(@as(u32, 4), opened.col);
+
+    // Ctrl+click asks too (at the clicked spot); a plain click does not.
+    const before = wire.idOf("textDocument/definition").?;
+    const abs = r.ui.tree.absoluteRect(ed.node).?;
+    r.ui.pointerMove(abs.x + 60, abs.y + 12);
+    r.ui.pointerButtonEx(abs.x + 60, abs.y + 12, 1, true, 1);
+    r.ui.pointerButtonEx(abs.x + 60, abs.y + 12, 1, false, 1);
+    try testing.expectEqual(before, wire.idOf("textDocument/definition").?);
+    r.ui.key(.unknown, .{ .ctrl = true }, true, false);
+    r.ui.pointerButtonEx(abs.x + 60, abs.y + 12, 1, true, 1);
+    r.ui.pointerButtonEx(abs.x + 60, abs.y + 12, 1, false, 1);
+    r.ui.key(.unknown, .{}, false, false);
+    const clicked = wire.idOf("textDocument/definition").?;
+    try testing.expect(clicked != before);
+    try serve(client, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[]}}", .{clicked});
 }
 
 test "files of other languages are left alone, and a server that cannot start is reported" {

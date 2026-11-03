@@ -541,7 +541,7 @@ pub const CodeEditor = struct {
     }
 
     /// Document offset under a point given relative to the node's top-left.
-    fn offsetAtPoint(self: *CodeEditor, local_x: f32, local_y: f32) usize {
+    pub fn offsetAtPoint(self: *CodeEditor, local_x: f32, local_y: f32) usize {
         const m = self.metrics() orelse return 0;
         const geo = self.geometry(m);
         const ed = &self.editor;
