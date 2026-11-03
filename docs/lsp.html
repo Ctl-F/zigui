@@ -12,6 +12,7 @@
 <tr><td>Parameter hints</td><td>The server's signature, with the active parameter emphasized (<code>SignatureHelp.offer</code>).</td></tr>
 <tr><td>Go to definition</td><td><b>F12</b> opens the definition of the name at the caret (any file); <b>Ctrl+click</b> (Cmd+click on macOS) does the same for the name under the pointer (<code>Assist.gotoDefinitionAt(editor, offset)</code>).</td></tr>
 </table>
+<p>Semantic errors that zls does not report (type errors and the rest) can come from the compiler instead: see <a href="build-watch.html">continuous error checking</a>.</p>
 <h2>In the IDE app</h2>
 <p><code>zig build ide</code> starts <code>zls</code> from <code>PATH</code> when the first Zig file opens, or the program in <code>ZIGUI_ZLS=/path/to/zls</code>. Edits are sent as the whole text 120 ms after typing stops, and always before a request that depends on them.</p>
 <h3>Which zls is used</h3>

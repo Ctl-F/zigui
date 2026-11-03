@@ -34,6 +34,13 @@ pub const Settings = struct {
     language_server: []const u8 = "",
     /// The terminal's shell ("" means `$SHELL`). Read at startup.
     shell: []const u8 = "",
+    /// Run `zig build --watch` in the background and show its errors as squiggles
+    /// and in the Problems panel (see build_watch.zig). Off by default: it builds on every save.
+    build_watch: bool = false,
+    /// The build step to watch ("" = the default step).
+    build_watch_step: []const u8 = "",
+    /// Pass -fincremental, so a rebuild recompiles only what an edit touched.
+    build_watch_incremental: bool = true,
     /// Reopen the files and panel layout of the last session.
     restore_session: bool = true,
     /// How many keys of the files were not understood.
@@ -81,6 +88,15 @@ pub const Settings = struct {
         } else if (eq(u8, name, "restore_session")) {
             if (v != .bool) return false;
             self.restore_session = v.bool;
+        } else if (eq(u8, name, "build_watch")) {
+            if (v != .bool) return false;
+            self.build_watch = v.bool;
+        } else if (eq(u8, name, "build_watch_incremental")) {
+            if (v != .bool) return false;
+            self.build_watch_incremental = v.bool;
+        } else if (eq(u8, name, "build_watch_step")) {
+            if (v != .string) return false;
+            self.build_watch_step = arena.dupe(u8, v.string) catch return false;
         } else if (eq(u8, name, "language_server")) {
             if (v != .string) return false;
             self.language_server = arena.dupe(u8, v.string) catch return false;
@@ -105,6 +121,11 @@ pub const template =
     \\    .tab_width = 4,
     \\    .line_numbers = true,
     \\    .folding = true,
+    \\    // Continuous error checking: run `zig build --watch` in the background (errors as squiggles and in the
+    \\    // Problems panel). It builds on every save, so it is off by default. "" watches the default build step.
+    \\    .build_watch = false,
+    \\    .build_watch_step = "",
+    \\    .build_watch_incremental = true,
     \\    // Reopen the last session's files and layout at startup.
     \\    .restore_session = true,
     \\    // Read at startup: the Zig language server ("" = $ZIGUI_ZLS or zls) and the terminal's shell ("" = $SHELL).

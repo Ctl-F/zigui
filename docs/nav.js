@@ -48,6 +48,7 @@
       ["ide.html", "IDE pieces"],
       ["lsp.html", "Language servers"],
       ["zvm.html", "Zig versions (ZVM)"],
+      ["build-watch.html", "Continuous error checking"],
       ["designer.html", "UI designer and handlers"],
       ["settings.html", "Settings, keys, sessions"],
       ["projects.html", "Projects: open and create"],

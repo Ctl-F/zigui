@@ -446,6 +446,13 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   files and declarations of the project and the library, and `ide.QuickOpen`
   joins them behind Ctrl+, (`project.quick_open`). The library is indexed once
   at startup, the project each time the box opens.
+- Continuous error checking (`ide/build_watch.zig`, `ide/watch_panel.zig`): the
+  optional `zig build --watch -fincremental` runs in the background; a
+  `Collector` splits its output at each `Build Summary:` line into located
+  diagnostics (underline length from the `^~~~` line); the Problems panel lists
+  them, editors show squiggles (decoration owner 2) and hover text. Settings
+  `build_watch`, `build_watch_step`, `build_watch_incremental`. Ctrl+click
+  (Cmd+click) goes to definition through the language server.
 - ZVM integration (`ide/zvm.zig`, `ide/zig_versions.zig`): detects ZVM at startup
   and offers to install it (official script, run in the Output panel, with a
   "don't ask again" marker); a status-bar version button and pickers

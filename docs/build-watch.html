@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Continuous error checking - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Continuous error checking</h1>
+<p>The IDE can keep the compiler itself running in the background and show its errors as you work. It runs <code>zig build --watch</code> (with <code>-fincremental</code>, so after an edit only what the edit touched is recompiled) and reads the errors of every rebuild.</p>
+
+<h2>What it adds to the language server</h2>
+<p>zls reports syntax and <code>ast-check</code> errors (undeclared names, unused variables). The compiler also reports everything semantic analysis finds: type mismatches, wrong argument counts, missing fields, comptime failures, for the build graph as it is configured. The price: it builds (and installs) your project after each save, and only files the build reaches are checked. Both sources can be on at once; zls answers as you type, the compiler after you save.</p>
+
+<h2>Using it</h2>
+<ul>
+<li><b>Build &gt; Check Errors Continuously</b> starts and stops it (or the Start/Stop button in the <b>Problems</b> panel, next to Output). The panel header says what is happening (<code>Watching, incremental: 1 errors, 0 warnings (rebuild 3)</code>).</li>
+<li>Errors and warnings of the latest rebuild appear as wavy underlines (the compiler's <code>^~~~</code> marker gives the length), in the Problems list (double-click or Enter opens the spot) and as <code>build: message</code> when you rest the pointer on the underlined word.</li>
+<li>A rebuild with no errors clears everything. Files outside the project (the standard library, dependencies) are not marked.</li>
+<li>Squiggles follow edits until the next rebuild; after a save the compiler's answer replaces them.</li>
+<li>The project needs a <code>build.zig</code>; otherwise the panel says so.</li>
+</ul>
+
+<h2>Settings</h2>
+<table>
+<tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>.build_watch</code></td><td>false</td><td>Start it when the project opens; changing it in the settings file starts or stops it live.</td></tr>
+<tr><td><code>.build_watch_step</code></td><td>""</td><td>The build step to watch (<code>zig build STEP</code>); "" is the default step. Pick a step that compiles what you edit (for a library, its test step).</td></tr>
+<tr><td><code>.build_watch_incremental</code></td><td>true</td><td>Pass <code>-fincremental</code>. Turn it off if the incremental compiler misbehaves on your code.</td></tr>
+</table>
+
+<h2>How it works</h2>
+<p><code>ide.build_watch.Watcher</code> runs the command through <code>platform/process.zig</code> and feeds the output to a <code>Collector</code>. A rebuild always ends with a <code>Build Summary:</code> line (also when nothing failed), so the located diagnostics (<code>path:line:col: error: ...</code>) printed since the previous summary are one <code>Result</code>; the line after a diagnostic is the source and the next one the caret line. Duplicate diagnostics (several steps compiling one file) count once and notes are skipped. <code>ide.WatchPanel</code> is the Problems panel: it puts the result in a <code>TreeView</code>, sets editor decorations (owner slot 2; 1 is the language server) and provides a hover provider.</p>
+<p>The build server protocol (<code>--listen=-</code>) would give structured errors and rebuild notifications, but it is a binary protocol meant for the build runner's own tooling and changes between releases; the text output used here is the same format as the Output panel reads. Headless: <code>cmd build.watch_toggle</code>.</p>
+</main><script src="nav.js"></script></body></html>

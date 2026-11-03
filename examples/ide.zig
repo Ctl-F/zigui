@@ -73,6 +73,11 @@ const App = struct {
     file_dialog: *zigui.file_dialog.FileDialog = undefined,
     quick: *ide.QuickOpen = undefined,
     zv: *ide.zig_versions.Versions = undefined,
+    watch: *ide.WatchPanel = undefined,
+    problems_panel: *zigui.dock.Panel = undefined,
+    /// The `build_watch` setting as last applied (a change starts or stops the watch).
+    prev_build_watch: bool = false,
+    watch_ready: bool = false,
     /// The template chosen in New Project, while the Zig version is being picked.
     new_template: usize = 0,
     /// The zigui source this IDE was built from, for the zigui app template (null: not found).
@@ -313,6 +318,13 @@ const App = struct {
         self.docs.defaults = .{ .size = s.editor_font_size, .tab_width = s.tab_width, .line_numbers = s.line_numbers, .folding = s.folding };
         self.docs.applyDefaults();
         self.ui.tree.markDirty(self.ui.tree.root, .{ .layout = true, .paint = true });
+        if (self.watch_ready) {
+            self.watch.configure(s.build_watch_step, s.build_watch_incremental);
+            if (s.build_watch != self.prev_build_watch) {
+                self.prev_build_watch = s.build_watch;
+                if (s.build_watch) self.watch.start() else self.watch.stop();
+            }
+        }
         if (s.problems > 0) self.setStatus("settings: {d} entries were not understood and were ignored", .{s.problems});
     }
 
@@ -412,6 +424,9 @@ const App = struct {
             if (self.designer.builder) |b| b.setPanelsVisible(true) else self.setStatus("open a .ui.zon document first (File > New UI Document)", .{});
         } else if (eq(u8, name, "editor.definition")) {
             if (self.docs.active()) |d| self.lsp.gotoDefinition(d.editor);
+        } else if (eq(u8, name, "build.watch_toggle")) {
+            self.watch.toggle();
+            self.showPanel(self.problems_panel);
         } else if (eq(u8, name, "zig.switch_version")) {
             self.zv.showSwitcher();
         } else if (eq(u8, name, "zig.install_version")) {
@@ -626,6 +641,7 @@ const App = struct {
         self.search.poll();
         self.quick.poll();
         self.zv.poll();
+        self.watch.poll();
         self.docs.poll();
         self.lsp.poll();
         self.terminal.poll();
@@ -936,6 +952,24 @@ pub fn main(init: std.process.Init) !void {
     });
     defer app.zv.destroy();
     try dock.dockRoot(output_panel, .bottom, 220);
+    // Problems: errors from `zig build --watch` (off until started or enabled in the settings).
+    const problems_panel = try dock.addPanel("Problems");
+    app.problems_panel = problems_panel;
+    app.watch = try ide.WatchPanel.create(&ui, problems_panel.content, &project, app.docs, .{
+        .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt),
+        .wake = sdl.wake,
+        .step = app.loaded.settings.build_watch_step,
+        .incremental = app.loaded.settings.build_watch_incremental,
+    });
+    defer app.watch.destroy();
+    app.watch_ready = true;
+    try hover.addProvider(app.watch.hoverProvider());
+    try dock.dockTab(problems_panel, output_panel);
+    dock.activatePanel(output_panel);
+    if (app.loaded.settings.build_watch) {
+        app.prev_build_watch = true;
+        app.watch.start();
+    }
 
     // The terminal shares the bottom group with Output.
     const terminal_panel = try dock.addPanel("Terminal");
@@ -988,6 +1022,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "zig.install_version", "Install Zig Version..." },
         .{ "zig.install_zls", "Install ZLS for This Zig Version" },
         .{ "zig.install_zvm", "Install ZVM..." },
+        .{ "build.watch_toggle", "Check Errors Continuously (zig build --watch)" },
         .{ "ide.build", "Build" },
         .{ "ide.run", "Run" },
         .{ "ide.test", "Run Tests" },
@@ -1021,6 +1056,8 @@ pub fn main(init: std.process.Init) !void {
         .{ .separator = true },
         .{ .label = "Settings", .command = "file.settings" },
         .{ .label = "Keyboard Shortcuts File", .command = "file.keybindings" },
+        .{ .separator = true },
+        .{ .label = "Check Errors Continuously", .command = "build.watch_toggle" },
         .{ .separator = true },
         .{ .label = "Build and Restart the IDE", .command = "ide.build_restart" },
         .{ .label = "Restart the IDE", .command = "ide.restart" },
