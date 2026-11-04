@@ -80,6 +80,8 @@ pub const Symbol = struct {
 const Snapshot = struct {
     arena: std.heap.ArenaAllocator,
     symbols: []Symbol,
+    /// What a planner decided to scan (strings in `arena`).
+    roots: []Root = &.{},
 };
 
 const max_source = 2 * 1024 * 1024;
@@ -152,6 +154,11 @@ pub const SymbolIndex = struct {
         return if (self.current) |c| c.symbols else &.{};
     }
 
+    /// The roots the planner chose in the latest scan (empty without a planner).
+    pub fn roots(self: *const SymbolIndex) []const Root {
+        return if (self.current) |c| c.roots else &.{};
+    }
+
     /// Take a finished scan, if one arrived. True when `symbols()` changed.
     pub fn poll(self: *SymbolIndex) bool {
         self.queue.drain(&self.batch);
@@ -193,9 +200,20 @@ pub const SymbolIndex = struct {
         if (self.planner) |pl| {
             var plan_arena = std.heap.ArenaAllocator.init(self.gpa);
             defer plan_arena.deinit();
-            var roots: std.ArrayListUnmanaged(Root) = .empty;
-            pl.plan(pl.ctx, self.gpa, plan_arena.allocator(), self.project.io, &roots);
-            for (roots.items) |r| self.scanRoot(&b, r);
+            var found: std.ArrayListUnmanaged(Root) = .empty;
+            pl.plan(pl.ctx, self.gpa, plan_arena.allocator(), self.project.io, &found);
+            for (found.items) |r| self.scanRoot(&b, r);
+            // Keep the list (the module explorer shows it), copied out of the plan's arena.
+            if (snap.arena.allocator().alloc(Root, found.items.len)) |keep| {
+                const ka = snap.arena.allocator();
+                for (found.items, keep) |r, *k| k.* = .{
+                    .label = ka.dupe(u8, r.label) catch "",
+                    .dir = ka.dupe(u8, r.dir) catch "",
+                    .origin = r.origin,
+                    .only_file = if (r.only_file) |f| (ka.dupe(u8, f) catch null) else null,
+                };
+                snap.roots = keep;
+            } else |_| {}
         }
         if (self.stop.load(.acquire)) {
             snap.arena.deinit();

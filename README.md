@@ -446,6 +446,9 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   files and declarations of the project and the library, and `ide.QuickOpen`
   joins them behind Ctrl+, (`project.quick_open`). The library is indexed once
   at startup, the project each time the box opens.
+- Module explorer (`ide/modules_panel.zig`): a lazy tree of the standard library,
+  dependencies, outside modules and translated headers (the roots the module
+  scan found, kept by `SymbolIndex.roots()`).
 - Ctrl+, prefixes and dependencies (`ide/quick_open.zig`, `ide/build_modules.zig`,
   `ide/translate_cache.zig`): `m: t: f: c: v:` choose kinds, `p: s: x:` places,
   `d:` hands over to the documentation search. `build.zig.zon` packages (path or

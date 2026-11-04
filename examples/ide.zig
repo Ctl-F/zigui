@@ -76,6 +76,9 @@ const App = struct {
     file_dialog: *zigui.file_dialog.FileDialog = undefined,
     quick: *ide.QuickOpen = undefined,
     docsearch: *ide.doc_search.DocSearch = undefined,
+    modules: *ide.ModulesPanel = undefined,
+    modules_panel: *zigui.dock.Panel = undefined,
+    modules_seen: u32 = 0,
     zv: *ide.zig_versions.Versions = undefined,
     watch: *ide.WatchPanel = undefined,
     problems_panel: *zigui.dock.Panel = undefined,
@@ -456,6 +459,8 @@ const App = struct {
             self.showPanel(self.files_panel);
         } else if (eq(u8, name, "view.search")) {
             self.showPanel(self.search_panel);
+        } else if (eq(u8, name, "view.modules")) {
+            self.showPanel(self.modules_panel);
         } else if (eq(u8, name, "view.output")) {
             self.showPanel(self.output_panel);
         } else if (eq(u8, name, "view.terminal")) {
@@ -690,6 +695,10 @@ const App = struct {
         self.search.poll();
         self.quick.poll();
         self.docsearch.poll();
+        if (self.quick.generation != self.modules_seen) {
+            self.modules_seen = self.quick.generation;
+            self.modules.setRoots(self.quick.modRoots()) catch {};
+        }
         self.zv.poll();
         self.watch.poll();
         self.docs.poll();
@@ -995,6 +1004,12 @@ pub fn main(init: std.process.Init) !void {
         } else null,
     });
     defer app.quick.destroy();
+    const modules_panel = try dock.addPanel("Modules");
+    app.modules_panel = modules_panel;
+    app.modules = try ide.ModulesPanel.create(&ui, modules_panel.content, io, std_dir, .{ .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt) });
+    defer app.modules.destroy();
+    try dock.dockTab(modules_panel, files_panel);
+    dock.activatePanel(files_panel);
     app.docsearch = try ide.doc_search.DocSearch.create(&ui, ui.tree.root, app.quick, .{
         .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt),
         .on_web = ide.doc_search.WebHook.bind(&app, App.openWeb),
@@ -1084,6 +1099,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "refactor.regenerate", "Regenerate ui_actions.zig" },
         .{ "view.files", "Files" },
         .{ "view.search", "Search" },
+        .{ "view.modules", "Modules" },
         .{ "view.output", "Output" },
         .{ "view.terminal", "Terminal" },
         .{ "view.designer", "UI Designer Panels" },
@@ -1163,6 +1179,7 @@ pub fn main(init: std.process.Init) !void {
     try bar.addMenu("View", &.{
         .{ .label = "Files", .command = "view.files" },
         .{ .label = "Search", .command = "view.search" },
+        .{ .label = "Modules", .command = "view.modules" },
         .{ .label = "Output", .command = "view.output" },
         .{ .label = "Terminal", .command = "view.terminal" },
         .{ .separator = true },

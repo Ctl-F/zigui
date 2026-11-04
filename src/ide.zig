@@ -33,6 +33,8 @@ pub const WatchPanel = watch_panel.WatchPanel;
 pub const nav_history = @import("ide/nav_history.zig");
 pub const translate_cache = @import("ide/translate_cache.zig");
 pub const build_modules = @import("ide/build_modules.zig");
+pub const modules_panel = @import("ide/modules_panel.zig");
+pub const ModulesPanel = modules_panel.ModulesPanel;
 pub const zvm = @import("ide/zvm.zig");
 pub const zig_versions = @import("ide/zig_versions.zig");
 pub const quick_open = @import("ide/quick_open.zig");
@@ -57,6 +59,7 @@ test {
     _ = nav_history;
     _ = translate_cache;
     _ = build_modules;
+    _ = modules_panel;
     _ = zvm;
     _ = zig_versions;
     _ = quick_open;

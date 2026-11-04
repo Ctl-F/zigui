@@ -189,6 +189,11 @@ pub const QuickOpen = struct {
         };
     }
 
+    /// What the build brings in, as the latest module scan found it (for the module explorer).
+    pub fn modRoots(self: *const QuickOpen) []const symbol_index.Root {
+        return if (self.mod_index) |m| m.roots() else &.{};
+    }
+
     /// Open the box, with `text` already typed (it may start with prefixes).
     pub fn show(self: *QuickOpen) void {
         self.showWith("");

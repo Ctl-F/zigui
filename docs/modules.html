@@ -4,6 +4,9 @@
 <h1>Dependencies and C modules in the index</h1>
 <p>Ctrl+, (<a href="ide.html">go to anything</a>) and the <a href="doc-search.html">documentation search</a> include the code your build brings in, not just your own files and the standard library. Use the <code>x:</code> prefix to search only these (<code>x:api</code>, <code>x:m:open</code>). They show as <code>dep/NAME/...</code> (packages), <code>module/NAME/...</code> (modules from outside the project folder) and <code>c/HEADER.h</code> (translated C), and open read-only.</p>
 
+<h2>The module explorer</h2>
+<p>The <b>Modules</b> panel (View &gt; Modules, a tab beside Files) shows all of this as a tree like the Files panel: <b>Standard Library</b>, then groups <b>Dependencies</b>, <b>Modules</b> and <b>C modules (translated)</b>. Folders load when you open them (dot-files are hidden) and a double-click or Enter on a file opens it read-only; a translated header is one file, the cached <code>.zig</code> translation. The tree is rebuilt (collapsed) when a scan of the build files finishes. Code: <code>ide.ModulesPanel</code> (<code>setRoots</code>), fed by <code>QuickOpen.modRoots()</code> / <code>SymbolIndex.roots()</code>.</p>
+
 <h2>What is found</h2>
 <table>
 <tr><th>Source</th><th>How it is found</th></tr>
