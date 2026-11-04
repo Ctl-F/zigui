@@ -44,6 +44,7 @@ pub const documents = @import("ide/documents.zig");
 pub const Documents = documents.Documents;
 pub const output_panel = @import("ide/output_panel.zig");
 pub const OutputPanel = output_panel.OutputPanel;
+pub const proj_settings = @import("ide/proj_settings.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
@@ -80,4 +81,5 @@ test {
     _ = zig_complete;
     _ = search_panel;
     _ = output_panel;
+    _ = proj_settings;
 }
