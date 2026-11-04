@@ -52,6 +52,7 @@
       ["doc-search.html", "Documentation search"],
       ["modules.html", "Dependencies and C modules"],
       ["git.html", "Git panel"],
+      ["tests.html", "Tests panel"],
       ["designer.html", "UI designer and handlers"],
       ["settings.html", "Settings, keys, sessions"],
       ["projects.html", "Projects: open and create"],

@@ -78,6 +78,8 @@ const App = struct {
     docsearch: *ide.doc_search.DocSearch = undefined,
     modules: *ide.ModulesPanel = undefined,
     gitp: *ide.GitPanel = undefined,
+    testp: *ide.TestPanel = undefined,
+    tests_panel: *zigui.dock.Panel = undefined,
     git_panel: *zigui.dock.Panel = undefined,
     modules_panel: *zigui.dock.Panel = undefined,
     modules_seen: u32 = 0,
@@ -399,6 +401,7 @@ const App = struct {
 
     fn onSaved(self: *App, doc: *ide.documents.Doc) void {
         self.gitp.refresh();
+        self.testp.refresh();
         if (std.mem.eql(u8, doc.path, ide.settings.project_settings) or std.mem.eql(u8, doc.path, ide.settings.project_keymap)) {
             self.reloadSettings();
             self.applyKeymap();
@@ -462,6 +465,9 @@ const App = struct {
             self.showPanel(self.files_panel);
         } else if (eq(u8, name, "view.search")) {
             self.showPanel(self.search_panel);
+        } else if (eq(u8, name, "view.tests")) {
+            self.showPanel(self.tests_panel);
+            self.testp.refresh();
         } else if (eq(u8, name, "view.git")) {
             self.showPanel(self.git_panel);
             self.gitp.refresh();
@@ -707,6 +713,7 @@ const App = struct {
         }
         self.zv.poll();
         self.gitp.poll();
+        self.testp.poll();
         self.watch.poll();
         self.docs.poll();
         self.lsp.poll();
@@ -1068,6 +1075,14 @@ pub fn main(init: std.process.Init) !void {
     app.watch_ready = true;
     try hover.addProvider(app.watch.hoverProvider());
     try dock.dockTab(problems_panel, output_panel);
+    const tests_panel = try dock.addPanel("Tests");
+    app.tests_panel = tests_panel;
+    app.testp = try ide.TestPanel.create(&ui, tests_panel.content, io, &project, .{
+        .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt),
+        .wake = sdl.wake,
+    });
+    defer app.testp.destroy();
+    try dock.dockTab(tests_panel, output_panel);
     dock.activatePanel(output_panel);
     if (app.loaded.settings.build_watch) {
         app.prev_build_watch = true;
@@ -1119,6 +1134,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "view.search", "Search" },
         .{ "view.modules", "Modules" },
         .{ "view.git", "Git" },
+        .{ "view.tests", "Tests" },
         .{ "view.output", "Output" },
         .{ "view.terminal", "Terminal" },
         .{ "view.designer", "UI Designer Panels" },
@@ -1200,6 +1216,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "Search", .command = "view.search" },
         .{ .label = "Modules", .command = "view.modules" },
         .{ .label = "Git", .command = "view.git" },
+        .{ .label = "Tests", .command = "view.tests" },
         .{ .label = "Output", .command = "view.output" },
         .{ .label = "Terminal", .command = "view.terminal" },
         .{ .separator = true },

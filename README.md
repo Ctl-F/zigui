@@ -461,6 +461,12 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   and a lowercase haystack per declaration), shown in a `QuickPick` in its new
   external-ranking mode; the last row opens a Google search in the browser
   (`sdl.openUrl`). Lexical only: no synonyms.
+- Tests panel (`ide/test_scan.zig`, `ide/test_panel.zig`): tests are found by
+  parsing the files (`test_decl` nodes); runs are `zig build test`, or with a
+  `-Dtest-filter` build option / `zig test FILE` for one file or test. A
+  `Parser` reads both report styles (live per-test lines from `zig test`; failure
+  blocks and a summary from `zig build test`) and tests are matched by name
+  (`FILE.test.NAME`).
 - Git panel (`ide/git.zig`, `ide/git_panel.zig`): runs `git` on a worker thread
   (one job at a time, prompts off); `parseStatus` reads `status --porcelain=v1 -z
   --branch`; the panel lists staged/changes/untracked, shows the diff with

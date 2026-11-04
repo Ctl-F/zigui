@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Tests panel - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Tests panel</h1>
+<p><b>View &gt; Tests</b> (a tab beside Output) lists every <code>test</code> in the project's <code>.zig</code> files, grouped by file, and runs them from the IDE. Each test shows a status: <code>[ ]</code> not run, <code>[..]</code> running, <code>[ok]</code>, <code>[FAIL]</code> or <code>[skip]</code>, and each file shows how many of its tests failed. Select a test to see what it printed and why it failed (the error, the stack trace, a memory-leak report) on the right; double-click it to open its source at the <code>test</code> line.</p>
+
+<h2>Finding the tests</h2>
+<p>The files are read, nothing is run: a worker thread parses each <code>.zig</code> file with <code>std.zig.Ast</code> and lists the <code>test "name"</code>, <code>test identifier</code> (shown as <code>decl name</code>) and unnamed <code>test {}</code> declarations, including ones inside <code>const X = struct { ... }</code>. It rescans when the panel opens, after a save, and with <b>Refresh</b>; statuses of tests that are still there are kept.</p>
+
+<h2>Running</h2>
+<table>
+<tr><th>Button</th><th>Runs</th></tr>
+<tr><td>Run All</td><td><code>zig build test --summary all</code> (needs a <code>build.zig</code>; <code>Options.step</code> names the step)</td></tr>
+<tr><td>Run (file selected)</td><td>All tests of that file</td></tr>
+<tr><td>Run (test selected)</td><td>That one test</td></tr>
+<tr><td>Run Failed</td><td>The tests that failed in the last run (needs the option below)</td></tr>
+<tr><td>Stop</td><td>Ends the run</td></tr>
+</table>
+<p>A single test or a file runs in one of two ways. If your <code>build.zig</code> accepts <code>-Dtest-filter</code> (the IDE checks once with <code>zig build --help</code>; add <code>const filters = b.option([]const []const u8, "test-filter", "Skip tests that do not match any filter") orelse &amp;[0][]const u8{};</code> and pass <code>.filters = filters</code> to <code>b.addTest</code>, as Zig's own build does), it runs <code>zig build test -Dtest-filter=NAME</code>, which works for anything the build can build, including files that need modules. Without that option it runs <code>zig test FILE [--test-filter NAME]</code>, which works when the file's imports stay inside its own folder and fails with a compiler message otherwise (shown in the output pane). <b>Run Failed</b> needs the option, since it passes one filter per failed test.</p>
+
+<h2>What the statuses are based on</h2>
+<ul>
+<li><code>zig test</code> runs the test program directly, which prints a line per test as it runs, so statuses appear <b>live</b>, including <code>[skip]</code>. A test that printed OK but then reported leaked memory is marked failed; a test that crashed the program is marked failed.</li>
+<li><code>zig build test</code> runs the program through the build system, which reports only a summary and a block for each failing test. So a test is marked <code>[..]</code> while it runs and, when the run ends, <code>[ok]</code> unless it was named as failed. A skipped test therefore shows <code>[ok]</code> in a build run.</li>
+<li>Tests are matched to reports by name: the compiler names a test <code>FILE.test.NAME</code> (<code>FILE</code> is the file's path in its module with dots), <code>FILE.decltest.NAME</code> or <code>FILE.test_N</code> for an unnamed one. Two files with the same base name are told apart only by that path, so identically named tests in them can be confused.</li>
+<li>If the run never reaches the tests (a compile error), the statuses stay <code>[ ]</code> and the output pane shows the compiler's message.</li>
+</ul>
+<h2>Code</h2>
+<p><code>ide.test_scan</code> is UI-free: <code>scan</code>, <code>fullName</code>, <code>matches</code> and <code>Parser</code> (modes <code>.direct</code> and <code>.build</code>, fed with the output as it arrives). <code>ide.TestPanel</code> is the panel (<code>create</code>, <code>refresh</code>, <code>poll</code>, <code>run(scope)</code>, <code>stop</code>). Headless: <code>cmd view.tests</code>. The existing <b>Build &gt; Run Tests</b> (Ctrl+Shift+T) still runs <code>zig build test</code> into the Output panel.</p>
+</main><script src="nav.js"></script></body></html>
