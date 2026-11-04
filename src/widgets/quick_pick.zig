@@ -169,7 +169,8 @@ pub const QuickPick = struct {
         self.refilter();
         self.askOwner();
         self.ui.setFocus(self.field.node);
-        self.field.editor.selectAll();
+        // Typed-in starting text (a handed-over query) keeps the caret after it; otherwise the box starts clean.
+        if (o.query.len > 0) self.field.editor.end(false) else self.field.editor.selectAll();
     }
 
     pub fn close(self: *QuickPick) void {

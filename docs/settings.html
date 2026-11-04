@@ -16,6 +16,7 @@
 <tr><td><code>.line_numbers</code>, <code>.folding</code></td><td>true</td><td>Gutter and fold arrows. Applied live.</td></tr>
 <tr><td><code>.restore_session</code></td><td>true</td><td>Reopen the last session's files and panel layout at startup.</td></tr>
 <tr><td><code>.language_server</code></td><td>""</td><td>The Zig language server command; "" means <code>ZIGUI_ZLS</code> or <code>zls</code>. Read at startup.</td></tr>
+<tr><td><code>.index_dependencies</code></td><td>true</td><td>Ctrl+, also searches the packages and translated C headers the build brings in; see <a href="modules.html">dependencies and C modules</a>. Read at startup.</td></tr>
 <tr><td><code>.build_watch</code>, <code>.build_watch_step</code>, <code>.build_watch_incremental</code></td><td>false, "", true</td><td>Continuous error checking with <code>zig build --watch</code>; see <a href="build-watch.html">its page</a>.</td></tr>
 <tr><td><code>.shell</code></td><td>""</td><td>The terminal's shell; "" means <code>$SHELL</code> (<code>%COMSPEC%</code> on Windows). Read at startup.</td></tr>
 </table>

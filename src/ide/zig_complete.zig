@@ -122,10 +122,13 @@ pub const ZigInfo = struct {
     std_dir: []u8,
     /// The compiler version ("0.17.0").
     version: []u8,
+    /// Where fetched packages and compiler caches live (`p/<hash>` holds a package); "" if unknown.
+    global_cache_dir: []u8,
 
     pub fn deinit(self: ZigInfo, gpa: std.mem.Allocator) void {
         gpa.free(self.std_dir);
         gpa.free(self.version);
+        gpa.free(self.global_cache_dir);
     }
 };
 
@@ -139,7 +142,12 @@ pub fn locateZig(gpa: std.mem.Allocator, io: std.Io) ?ZigInfo {
         gpa.free(std_dir);
         return null;
     };
-    return .{ .std_dir = std_dir, .version = version };
+    const cache = parseEnvString(gpa, res.stdout, ".global_cache_dir") orelse gpa.dupe(u8, "") catch {
+        gpa.free(std_dir);
+        gpa.free(version);
+        return null;
+    };
+    return .{ .std_dir = std_dir, .version = version, .global_cache_dir = cache };
 }
 
 /// The string value of `key = "..."` in `zig env` output.

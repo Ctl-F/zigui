@@ -25,6 +25,36 @@ const Project = project_mod.Project;
 
 pub const Kind = enum { file, function, type, constant, variable };
 
+/// Where a symbol comes from.
+pub const Origin = enum {
+    /// The open project.
+    project,
+    /// The Zig standard library.
+    std,
+    /// A package the build depends on (fetched, or a path dependency), or a module outside the project folder.
+    dependency,
+    /// A C header translated with `zig translate-c`.
+    c,
+};
+
+/// A place to scan besides the project and the library, found by a `Planner`.
+pub const Root = struct {
+    /// Where its files show as coming from (`dep/zigimg`, `c/sdl.h`).
+    label: []const u8,
+    /// Absolute folder.
+    dir: []const u8,
+    origin: Origin,
+    /// Index only this file of `dir` (a translated header).
+    only_file: ?[]const u8 = null,
+};
+
+/// Works out the extra roots (on the index's worker thread): everything it
+/// allocates goes in `arena`, which outlives the scan.
+pub const Planner = struct {
+    ctx: ?*anyopaque = null,
+    plan: *const fn (ctx: ?*anyopaque, gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, out: *std.ArrayListUnmanaged(Root)) void,
+};
+
 pub const Symbol = struct {
     /// What is matched against: a file's base name, a declaration's (qualified) name.
     name: []const u8,
@@ -36,7 +66,8 @@ pub const Symbol = struct {
     /// 1-based position of the name (files: 1:1).
     line: u32,
     col: u32,
-    in_std: bool,
+    in_std: bool = false,
+    origin: Origin = .project,
     /// The `///` comment above a declaration, lines joined by spaces and cut to
     /// about 240 bytes ("" for files and undocumented declarations).
     doc: []const u8 = "",
@@ -61,6 +92,9 @@ pub const SymbolIndex = struct {
     std_dir: ?[]u8,
     /// Scan only `std_dir` (the project is covered by another index).
     skip_project: bool = false,
+    /// Extra roots decided at scan time (dependencies, translated headers); with a
+    /// planner the index covers only those.
+    planner: ?Planner = null,
     queue: worker.Queue(*Snapshot),
     thread: ?std.Thread = null,
     running_flag: std.atomic.Value(bool) = .init(false),
@@ -69,20 +103,29 @@ pub const SymbolIndex = struct {
     batch: std.ArrayListUnmanaged(*Snapshot) = .empty,
 
     pub fn start(gpa: std.mem.Allocator, project: *const Project, std_dir: ?[]const u8, wake: ?*const fn () void) !*SymbolIndex {
-        return create(gpa, project, std_dir, false, wake);
+        return create(gpa, project, std_dir, false, wake, true);
     }
 
     /// An index of only the library at `lib_dir` (it does not change while the IDE runs).
     pub fn startLibrary(gpa: std.mem.Allocator, project: *const Project, lib_dir: []const u8, wake: ?*const fn () void) !*SymbolIndex {
-        return create(gpa, project, lib_dir, true, wake);
+        return create(gpa, project, lib_dir, true, wake, true);
     }
 
-    fn create(gpa: std.mem.Allocator, project: *const Project, std_dir: ?[]const u8, skip_project: bool, wake: ?*const fn () void) !*SymbolIndex {
+    /// An index of what `planner` finds: the packages the project depends on and
+    /// the C headers it translates. Rescans ask the planner again.
+    pub fn startModules(gpa: std.mem.Allocator, project: *const Project, planner: Planner, wake: ?*const fn () void) !*SymbolIndex {
+        const self = try create(gpa, project, null, true, wake, false);
+        self.planner = planner;
+        try self.launch();
+        return self;
+    }
+
+    fn create(gpa: std.mem.Allocator, project: *const Project, std_dir: ?[]const u8, skip_project: bool, wake: ?*const fn () void, launch_now: bool) !*SymbolIndex {
         const self = try gpa.create(SymbolIndex);
         errdefer gpa.destroy(self);
         const sd: ?[]u8 = if (std_dir) |d| try gpa.dupe(u8, d) else null;
         self.* = .{ .gpa = gpa, .project = project, .std_dir = sd, .skip_project = skip_project, .queue = .{ .gpa = gpa, .wake = wake } };
-        try self.launch();
+        if (launch_now) try self.launch();
         return self;
     }
 
@@ -147,6 +190,13 @@ pub const SymbolIndex = struct {
         var b: Builder = .{ .gpa = self.gpa, .a = snap.arena.allocator(), .list = &list, .stop = &self.stop };
         if (!self.skip_project) self.scanProject(&b);
         if (self.std_dir) |d| self.scanStd(&b, d);
+        if (self.planner) |pl| {
+            var plan_arena = std.heap.ArenaAllocator.init(self.gpa);
+            defer plan_arena.deinit();
+            var roots: std.ArrayListUnmanaged(Root) = .empty;
+            pl.plan(pl.ctx, self.gpa, plan_arena.allocator(), self.project.io, &roots);
+            for (roots.items) |r| self.scanRoot(&b, r);
+        }
         if (self.stop.load(.acquire)) {
             snap.arena.deinit();
             self.gpa.destroy(snap);
@@ -172,12 +222,51 @@ pub const SymbolIndex = struct {
                     for (rel) |*c| {
                         if (c.* == '\\') c.* = '/';
                     }
-                    b.addFile(entry.basename, rel, rel, false);
+                    b.addFile(entry.basename, rel, rel, .project);
                     if (std.mem.endsWith(u8, entry.basename, ".zig")) {
                         const src = self.project.dir.readFileAllocOptions(io, entry.path, self.gpa, .limited(max_source), .of(u8), 0) catch continue;
                         defer self.gpa.free(src);
-                        b.addDecls(src, rel, rel, false);
+                        b.addDecls(src, rel, rel, .project);
                     }
+                },
+                else => {},
+            }
+        }
+    }
+
+    const skip_dirs = [_][]const u8{ ".git", ".zig-cache", "zig-cache", "zig-out", "testdata", "test", "tests", "example", "examples", "bench", "benchmarks", "docs", "doc", "node_modules" };
+
+    fn scanRoot(self: *SymbolIndex, b: *Builder, root: Root) void {
+        const io = self.project.io;
+        var dir = std.Io.Dir.cwd().openDir(io, root.dir, .{ .iterate = true }) catch return;
+        defer dir.close(io);
+        if (root.only_file) |name| {
+            const src = dir.readFileAllocOptions(io, name, self.gpa, .limited(32 << 20), .of(u8), 0) catch return;
+            defer self.gpa.free(src);
+            const abs = std.fs.path.join(b.a, &.{ root.dir, name }) catch return;
+            b.addDecls(src, abs, root.label, root.origin);
+            return;
+        }
+        var walker = dir.walkSelectively(self.gpa) catch return;
+        defer walker.deinit();
+        var files: usize = 0;
+        while (walker.next(io) catch null) |entry| {
+            if (self.stop.load(.acquire) or b.list.items.len >= max_symbols or files >= 6000) return;
+            switch (entry.kind) {
+                .directory => {
+                    for (skip_dirs) |sd| {
+                        if (std.mem.eql(u8, entry.basename, sd)) break;
+                    } else walker.enter(io, entry) catch {};
+                },
+                .file => {
+                    if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+                    files += 1;
+                    const abs = std.fs.path.join(b.a, &.{ root.dir, entry.path }) catch return;
+                    const shown = std.fmt.allocPrint(b.a, "{s}/{s}", .{ root.label, entry.path }) catch return;
+                    b.addFile(entry.basename, abs, shown, root.origin);
+                    const src = dir.readFileAllocOptions(io, entry.path, self.gpa, .limited(max_source), .of(u8), 0) catch continue;
+                    defer self.gpa.free(src);
+                    b.addDecls(src, abs, shown, root.origin);
                 },
                 else => {},
             }
@@ -198,16 +287,43 @@ pub const SymbolIndex = struct {
                     if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
                     const abs = std.fs.path.join(b.a, &.{ root, entry.path }) catch return;
                     const shown = std.fmt.allocPrint(b.a, "std/{s}", .{entry.path}) catch return;
-                    b.addFile(entry.basename, abs, shown, true);
+                    b.addFile(entry.basename, abs, shown, .std);
                     const src = dir.readFileAllocOptions(io, entry.path, self.gpa, .limited(max_source), .of(u8), 0) catch continue;
                     defer self.gpa.free(src);
-                    b.addDecls(src, abs, shown, true);
+                    b.addDecls(src, abs, shown, .std);
                 },
                 else => {},
             }
         }
     }
 };
+
+/// Macros every C header drags in from the system headers (`INT_FAST8_FMTd`, `linux`, `SIZE_MAX`):
+/// translated headers list them with the header's own names, which they would drown.
+fn isSystemMacro(name: []const u8) bool {
+    // INT8_MAX, UINT_FAST16_MIN, INTPTR_MAX ... and PRId64, SCNu32 ...: a base name, then a width or a kind.
+    inline for (.{ "INT", "UINT" }) |p| {
+        if (std.mem.startsWith(u8, name, p) and name.len > p.len) {
+            const c = name[p.len];
+            if (std.ascii.isDigit(c) or c == '_' or c == 'P' or c == 'M') return true;
+        }
+    }
+    inline for (.{ "PRI", "SCN" }) |p| {
+        if (std.mem.startsWith(u8, name, p) and name.len > p.len + 1 and std.mem.indexOfScalar(u8, "diouxX", name[p.len]) != null) {
+            const c = name[p.len + 1];
+            if (std.ascii.isDigit(c) or c == 'L' or c == 'F' or c == 'M' or c == 'P') return true;
+        }
+    }
+    const exact = [_][]const u8{ "SIZE_MAX", "SIG_ATOMIC_MIN", "SIG_ATOMIC_MAX", "WCHAR_MIN", "WCHAR_MAX", "WINT_MIN", "WINT_MAX", "PTRDIFF_MIN", "PTRDIFF_MAX", "RSIZE_MAX", "BYTE_ORDER", "BIG_ENDIAN", "LITTLE_ENDIAN", "PDP_ENDIAN", "EOF", "linux", "unix", "i386" };
+    for (exact) |e| {
+        if (std.mem.eql(u8, name, e)) return true;
+    }
+    const prefixes = [_][]const u8{ "FLT_", "DBL_", "LDBL_", "CHAR_", "SCHAR_", "UCHAR_", "SHRT_", "USHRT_", "LONG_", "ULONG_", "LLONG_", "ULLONG_" };
+    for (prefixes) |p| {
+        if (std.mem.startsWith(u8, name, p)) return true;
+    }
+    return false;
+}
 
 const Builder = struct {
     gpa: std.mem.Allocator,
@@ -219,18 +335,18 @@ const Builder = struct {
     line_no: u32 = 1,
     line_start: usize = 0,
 
-    fn addFile(self: *Builder, base: []const u8, path: []const u8, shown: []const u8, in_std: bool) void {
+    fn addFile(self: *Builder, base: []const u8, path: []const u8, shown: []const u8, origin: Origin) void {
         const name = self.a.dupe(u8, base) catch return;
-        self.list.append(self.a, .{ .name = name, .kind = .file, .path = path, .shown = shown, .line = 1, .col = 1, .in_std = in_std }) catch {};
+        self.list.append(self.a, .{ .name = name, .kind = .file, .path = path, .shown = shown, .line = 1, .col = 1, .in_std = origin == .std, .origin = origin }) catch {};
     }
 
-    fn addDecls(self: *Builder, src: [:0]const u8, path: []const u8, shown: []const u8, in_std: bool) void {
+    fn addDecls(self: *Builder, src: [:0]const u8, path: []const u8, shown: []const u8, origin: Origin) void {
         var ast = Ast.parse(self.gpa, src, .{}) catch return;
         defer ast.deinit(self.gpa);
         self.line_off = 0;
         self.line_no = 1;
         self.line_start = 0;
-        self.members(&ast, ast.rootDecls(), "", 0, in_std, path, shown);
+        self.members(&ast, ast.rootDecls(), "", 0, origin, path, shown);
     }
 
     fn lineCol(self: *Builder, ast: *const Ast, tok: Ast.TokenIndex) struct { u32, u32 } {
@@ -324,7 +440,7 @@ const Builder = struct {
         return self.a.dupe(u8, buf[0..n]) catch "";
     }
 
-    fn members(self: *Builder, ast: *const Ast, nodes: []const Node.Index, prefix: []const u8, depth: u32, in_std: bool, path: []const u8, shown: []const u8) void {
+    fn members(self: *Builder, ast: *const Ast, nodes: []const Node.Index, prefix: []const u8, depth: u32, origin: Origin, path: []const u8, shown: []const u8) void {
         for (nodes) |n| {
             if (self.stop.load(.acquire)) return;
             var fb: [1]Node.Index = undefined;
@@ -356,19 +472,21 @@ const Builder = struct {
                 },
                 else => continue,
             }
-            if (in_std and !is_pub) continue;
+            if (origin != .project and !is_pub) continue;
             const tok = name_tok orelse continue;
             const base = ast.tokenSlice(tok);
             if (base.len == 0 or base[0] == '@' or base[0] == '"') continue; // @"quoted" names
+            // Translated C is full of compiler-defined macros (`__GNUC__`): not worth listing.
+            if (origin == .c and (std.mem.startsWith(u8, base, "_") or (kind == .constant and isSystemMacro(base)))) continue;
             const name = if (prefix.len == 0) (self.a.dupe(u8, base) catch return) else (std.fmt.allocPrint(self.a, "{s}.{s}", .{ prefix, base }) catch return);
             const lc = self.lineCol(ast, tok);
             const sig: []const u8 = if (kind == .function) self.signature(ast, n) else "";
             const doc = self.docOf(ast, n);
-            self.list.append(self.a, .{ .name = name, .kind = kind, .path = path, .shown = shown, .line = lc[0], .col = lc[1], .in_std = in_std, .doc = doc, .sig = sig, .hay = self.haystack(name, doc, shown) }) catch return;
+            self.list.append(self.a, .{ .name = name, .kind = kind, .path = path, .shown = shown, .line = lc[0], .col = lc[1], .in_std = origin == .std, .origin = origin, .doc = doc, .sig = sig, .hay = self.haystack(name, doc, shown) }) catch return;
             if (container) |c| {
                 if (depth + 1 < max_depth) {
                     var cb: [2]Node.Index = undefined;
-                    if (ast.fullContainerDecl(&cb, c)) |cd| self.members(ast, cd.ast.members, name, depth + 1, in_std, path, shown);
+                    if (ast.fullContainerDecl(&cb, c)) |cd| self.members(ast, cd.ast.members, name, depth + 1, origin, path, shown);
                 }
             }
         }
@@ -461,4 +579,9 @@ test "a second root lists only pub declarations of .zig files, with absolute pat
     try testing.expectEqualStrings("std/mem.zig", eql.shown);
     try testing.expect(find(idx.symbols(), "hidden") == null);
     try testing.expect(find(idx.symbols(), "notes.txt") == null);
+}
+
+test "system macros that every translated header carries are recognised, the header's own names are not" {
+    for ([_][]const u8{ "INT8_MAX", "UINT_FAST16_MIN", "INTPTR_MAX", "PRId64", "SCNu32", "SIZE_MAX", "FLT_EPSILON", "linux" }) |n| try testing.expect(isSystemMacro(n));
+    for ([_][]const u8{ "INTERVAL_MS", "PRIORITY_HIGH", "SDL_INIT_VIDEO", "API_VERSION", "INTENT" }) |n| try testing.expect(!isSystemMacro(n));
 }

@@ -211,7 +211,7 @@ pub fn rank(lists: []const []const symbol_index.Symbol, query: []const u8, out: 
                 var sc = score(s, words);
                 if (sc <= 0) continue;
                 // Ties and near-ties: project before library, shorter names before longer.
-                if (!s.in_std) sc += 0.5;
+                if (s.origin == .project and !s.in_std) sc += 0.5;
                 sc -= @as(f32, @floatFromInt(@min(s.name.len, 60))) * 0.01;
                 const hit: Hit = .{ .index = @intCast(i), .list = @intCast(li), .score = sc };
                 if (n < out.len) {
@@ -290,10 +290,16 @@ pub const DocSearch = struct {
     }
 
     pub fn show(self: *DocSearch) void {
+        self.showWith("");
+    }
+
+    /// Open the box with `text` already typed.
+    pub fn showWith(self: *DocSearch, text: []const u8) void {
         self.quick.project_index.rescan();
         self.seen_generation = self.quick.generation;
         self.query.clearRetainingCapacity();
         self.pick.show(.{
+            .query = text,
             .placeholder = "Search documentation: describe what you want (e.g. path from dir)",
             .external = true,
             .on_query = .bind(self, onQuery),
@@ -355,7 +361,11 @@ pub const DocSearch = struct {
                 copy.path = a.dupe(u8, s.path) catch continue;
                 copy.doc = "";
                 copy.sig = "";
-                self.items.append(self.gpa, .{ .label = label, .detail = detail, .group = if (s.in_std) 1 else 0 }) catch break;
+                self.items.append(self.gpa, .{ .label = label, .detail = detail, .group = switch (s.origin) {
+                    .project => 0,
+                    .dependency, .c => 1,
+                    .std => 2,
+                } }) catch break;
                 self.rows.append(self.gpa, copy) catch {
                     _ = self.items.pop();
                     break;
@@ -373,7 +383,7 @@ pub const DocSearch = struct {
         self.pick.setStatus(if (q.len == 0)
             "type words describing what you are looking for"
         else
-            std.fmt.bufPrint(&buf, "{d} matches in {d} names", .{ self.items.items.len -| 1, self.quick.items.items.len }) catch "");
+            std.fmt.bufPrint(&buf, "{d} matches in {d} names", .{ self.items.items.len -| 1, self.quick.total }) catch "");
     }
 
     fn onPick(self: *DocSearch, index: usize) void {

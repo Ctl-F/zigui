@@ -50,6 +50,7 @@
       ["zvm.html", "Zig versions (ZVM)"],
       ["build-watch.html", "Continuous error checking"],
       ["doc-search.html", "Documentation search"],
+      ["modules.html", "Dependencies and C modules"],
       ["designer.html", "UI designer and handlers"],
       ["settings.html", "Settings, keys, sessions"],
       ["projects.html", "Projects: open and create"],

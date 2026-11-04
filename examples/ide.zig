@@ -187,6 +187,11 @@ const App = struct {
         };
     }
 
+    /// A `d:` prefix in Ctrl+, hands over to the documentation search.
+    fn docsFor(self: *App, query: []const u8) void {
+        self.docsearch.showWith(query);
+    }
+
     /// "Search the web" from the documentation search: the query goes to Google, in the default browser.
     fn openWeb(self: *App, query: []const u8) void {
         const url = ide.doc_search.webSearchUrl(self.gpa, query) catch return;
@@ -975,7 +980,20 @@ pub fn main(init: std.process.Init) !void {
     app.search_panel = search_panel;
     app.search = try ide.SearchPanel.create(&ui, search_panel.content, &project, .{ .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt), .wake = sdl.wake, .std_dir = std_dir });
     defer app.search.destroy();
-    app.quick = try ide.QuickOpen.create(&ui, ui.tree.root, &project, std_dir, .{ .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt), .wake = sdl.wake });
+    const cache_root: ?[]u8 = ide.settings.cacheDir(gpa, init.environ_map) catch null;
+    defer if (cache_root) |d| gpa.free(d);
+    const translate_dir: ?[]u8 = if (cache_root) |d| std.fs.path.join(gpa, &.{ d, "translate-c" }) catch null else null;
+    defer if (translate_dir) |d| gpa.free(d);
+    app.quick = try ide.QuickOpen.create(&ui, ui.tree.root, &project, std_dir, .{
+        .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt),
+        .on_docs = ide.quick_open.DocsHook.bind(&app, App.docsFor),
+        .wake = sdl.wake,
+        .modules = if (app.loaded.settings.index_dependencies) .{
+            .project_root = project.root,
+            .global_cache = if (zig_info) |zi| (if (zi.global_cache_dir.len > 0) zi.global_cache_dir else null) else null,
+            .translate_cache = translate_dir,
+        } else null,
+    });
     defer app.quick.destroy();
     app.docsearch = try ide.doc_search.DocSearch.create(&ui, ui.tree.root, app.quick, .{
         .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt),

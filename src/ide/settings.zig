@@ -41,6 +41,9 @@ pub const Settings = struct {
     build_watch_step: []const u8 = "",
     /// Pass -fincremental, so a rebuild recompiles only what an edit touched.
     build_watch_incremental: bool = true,
+    /// Index the packages and C headers `build.zig` brings in, so Ctrl+, finds their names
+    /// (headers are translated with `zig translate-c` and cached; see build_modules.zig).
+    index_dependencies: bool = true,
     /// Reopen the files and panel layout of the last session.
     restore_session: bool = true,
     /// How many keys of the files were not understood.
@@ -88,6 +91,9 @@ pub const Settings = struct {
         } else if (eq(u8, name, "restore_session")) {
             if (v != .bool) return false;
             self.restore_session = v.bool;
+        } else if (eq(u8, name, "index_dependencies")) {
+            if (v != .bool) return false;
+            self.index_dependencies = v.bool;
         } else if (eq(u8, name, "build_watch")) {
             if (v != .bool) return false;
             self.build_watch = v.bool;
@@ -126,6 +132,8 @@ pub const template =
     \\    .build_watch = false,
     \\    .build_watch_step = "",
     \\    .build_watch_incremental = true,
+    \\    // Ctrl+, also searches the packages and C headers the build brings in (read from build.zig and build.zig.zon).
+    \\    .index_dependencies = true,
     \\    // Reopen the last session's files and layout at startup.
     \\    .restore_session = true,
     \\    // Read at startup: the Zig language server ("" = $ZIGUI_ZLS or zls) and the terminal's shell ("" = $SHELL).
@@ -163,6 +171,16 @@ pub const Loaded = struct {
 };
 
 /// The user's config directory for the IDE, from the environment (null if unknown).
+/// Where the IDE keeps files it can rebuild (translated headers): `$XDG_CACHE_HOME/zigui-ide`,
+/// `~/.cache/zigui-ide`, or `%LOCALAPPDATA%\\zigui-ide`.
+pub fn cacheDir(a: std.mem.Allocator, environ: ?*const std.process.Environ.Map) !?[]u8 {
+    const env = environ orelse return null;
+    if (env.get("XDG_CACHE_HOME")) |x| if (x.len > 0) return try std.fs.path.join(a, &.{ x, "zigui-ide" });
+    if (env.get("LOCALAPPDATA")) |x| if (x.len > 0) return try std.fs.path.join(a, &.{ x, "zigui-ide" });
+    if (env.get("HOME")) |h| if (h.len > 0) return try std.fs.path.join(a, &.{ h, ".cache", "zigui-ide" });
+    return null;
+}
+
 pub fn globalDir(a: std.mem.Allocator, environ: ?*const std.process.Environ.Map) !?[]u8 {
     const env = environ orelse return null;
     if (env.get("XDG_CONFIG_HOME")) |x| if (x.len > 0) return try std.fs.path.join(a, &.{ x, "zigui-ide" });

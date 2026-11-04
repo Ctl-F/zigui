@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Dependencies and C modules - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Dependencies and C modules in the index</h1>
+<p>Ctrl+, (<a href="ide.html">go to anything</a>) and the <a href="doc-search.html">documentation search</a> include the code your build brings in, not just your own files and the standard library. Use the <code>x:</code> prefix to search only these (<code>x:api</code>, <code>x:m:open</code>). They show as <code>dep/NAME/...</code> (packages), <code>module/NAME/...</code> (modules from outside the project folder) and <code>c/HEADER.h</code> (translated C), and open read-only.</p>
+
+<h2>What is found</h2>
+<table>
+<tr><th>Source</th><th>How it is found</th></tr>
+<tr><td>Packages in <code>build.zig.zon</code></td><td><code>.dependencies</code> entries: a <code>.path</code> is read relative to the manifest; a <code>.hash</code> is the folder <code>&lt;zig global cache&gt;/p/&lt;hash&gt;</code> (what <code>zig fetch</code> and the build download; the cache folder comes from <code>zig env</code>). A package's own <code>build.zig.zon</code> is followed (up to three levels). A package that is not fetched yet is skipped. Every <code>.zig</code> file in the package is indexed (public declarations only; <code>test</code>, <code>example</code>, <code>docs</code> and similar folders are skipped; at most 6000 files per package).</td></tr>
+<tr><td>Modules from outside the project</td><td><code>b.addModule("name", .{ .root_source_file = b.path("../shared/src/root.zig") })</code> (and <code>createModule</code>): when the file is outside the project folder, its folder is indexed.</td></tr>
+<tr><td>C headers</td><td><code>b.addTranslateC(.{ .root_source_file = b.path("c/api.h") })</code> in the project's or a package's <code>build.zig</code>, with the <code>addIncludePath</code>, <code>addSystemIncludePath</code> and <code>defineCMacro</code> calls made on the same variable. The header is translated with <code>zig translate-c -lc -I... -D...</code> and the result indexed.</td></tr>
+</table>
+
+<h2>The translate-c cache</h2>
+<p>Translated headers are kept in the IDE's own cache, separate from zls and from <code>zig build</code>: <code>$XDG_CACHE_HOME/zigui-ide/translate-c</code>, <code>~/.cache/zigui-ide/translate-c</code> or <code>%LOCALAPPDATA%\zigui-ide\translate-c</code>. A file is named <code>HEADER-KEY.zig</code>; the key hashes the compiler path, the header's path, size and modification time, the include folders and the defines. The same inputs find the file with no process started; a change gives a new file (old ones stay; delete the folder to clean up). A header that does not translate leaves <code>HEADER-KEY.failed</code> with the compiler's message so it is not retried at every start. Headers a header includes are not tracked: touch the top header after changing those. Names beginning with <code>_</code> and the macros every C header drags in from the system headers (<code>INT8_MAX</code>, <code>PRId64</code>, <code>SIZE_MAX</code>, <code>linux</code>...) are left out of the list.</p>
+
+<h2>Limits</h2>
+<p>This reads <code>build.zig</code> and <code>build.zig.zon</code> as text, it does not run the build (zls runs the build with its own runner to be exact). So what is spelled out plainly is seen; paths or options computed in code, generated headers, options chosen on the command line and per-target differences are not. Only the literal text of the include paths and defines is used, and a translation is for the host target.</p>
+
+<h2>Setting</h2>
+<p><code>.index_dependencies = true</code> in the <a href="settings.html">settings</a> (default) turns this on; <code>false</code> leaves the Ctrl+, index to the project and the standard library. Read at startup. Code: <code>ide.build_modules</code> (<code>translateCalls</code>, <code>moduleDefs</code>, <code>dependencies</code>, <code>Planner</code>), <code>ide.translate_cache</code>, <code>SymbolIndex.startModules</code>.</p>
+</main><script src="nav.js"></script></body></html>

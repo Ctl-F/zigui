@@ -446,6 +446,13 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   files and declarations of the project and the library, and `ide.QuickOpen`
   joins them behind Ctrl+, (`project.quick_open`). The library is indexed once
   at startup, the project each time the box opens.
+- Ctrl+, prefixes and dependencies (`ide/quick_open.zig`, `ide/build_modules.zig`,
+  `ide/translate_cache.zig`): `m: t: f: c: v:` choose kinds, `p: s: x:` places,
+  `d:` hands over to the documentation search. `build.zig.zon` packages (path or
+  fetched, found in the global cache), modules from outside the project and
+  `addTranslateC` headers (translated with `zig translate-c`, cached by the IDE
+  on its own) join the index as `dep/`, `module/`, `c/`. Read as text, not by
+  running the build.
 - Documentation search (`ide/doc_search.zig`): word-based ranking over names,
   `///` comments and file paths of the Ctrl+, index (which now keeps doc, signature
   and a lowercase haystack per declaration), shown in a `QuickPick` in its new
