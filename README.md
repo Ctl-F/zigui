@@ -461,6 +461,11 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   and a lowercase haystack per declaration), shown in a `QuickPick` in its new
   external-ranking mode; the last row opens a Google search in the browser
   (`sdl.openUrl`). Lexical only: no synonyms.
+- Git panel (`ide/git.zig`, `ide/git_panel.zig`): runs `git` on a worker thread
+  (one job at a time, prompts off); `parseStatus` reads `status --porcelain=v1 -z
+  --branch`; the panel lists staged/changes/untracked, shows the diff with
+  `added_line` tints, and stages, unstages, discards (confirmed), commits,
+  stashes and pushes. Refreshes after actions, saves and every 5 s.
 - Move lines: `Editor.moveLines(delta, now)` swaps the lines of a single selection with
   its neighbour (Alt+Up/Down, also Ctrl+Alt); adding a cursor moved to
   Ctrl+Alt+Shift+Up/Down. Handles a last line without a terminator and CRLF.

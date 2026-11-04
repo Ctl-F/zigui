@@ -77,6 +77,8 @@ const App = struct {
     quick: *ide.QuickOpen = undefined,
     docsearch: *ide.doc_search.DocSearch = undefined,
     modules: *ide.ModulesPanel = undefined,
+    gitp: *ide.GitPanel = undefined,
+    git_panel: *zigui.dock.Panel = undefined,
     modules_panel: *zigui.dock.Panel = undefined,
     modules_seen: u32 = 0,
     zv: *ide.zig_versions.Versions = undefined,
@@ -396,6 +398,7 @@ const App = struct {
     }
 
     fn onSaved(self: *App, doc: *ide.documents.Doc) void {
+        self.gitp.refresh();
         if (std.mem.eql(u8, doc.path, ide.settings.project_settings) or std.mem.eql(u8, doc.path, ide.settings.project_keymap)) {
             self.reloadSettings();
             self.applyKeymap();
@@ -459,6 +462,9 @@ const App = struct {
             self.showPanel(self.files_panel);
         } else if (eq(u8, name, "view.search")) {
             self.showPanel(self.search_panel);
+        } else if (eq(u8, name, "view.git")) {
+            self.showPanel(self.git_panel);
+            self.gitp.refresh();
         } else if (eq(u8, name, "view.modules")) {
             self.showPanel(self.modules_panel);
         } else if (eq(u8, name, "view.output")) {
@@ -700,6 +706,7 @@ const App = struct {
             self.modules.setRoots(self.quick.modRoots()) catch {};
         }
         self.zv.poll();
+        self.gitp.poll();
         self.watch.poll();
         self.docs.poll();
         self.lsp.poll();
@@ -1010,6 +1017,17 @@ pub fn main(init: std.process.Init) !void {
     defer app.modules.destroy();
     try dock.dockTab(modules_panel, files_panel);
     dock.activatePanel(files_panel);
+    const git_panel = try dock.addPanel("Git");
+    app.git_panel = git_panel;
+    app.gitp = try ide.GitPanel.create(&ui, git_panel.content, io, project.root, .{
+        .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt),
+        .overlay = ui.tree.root,
+        .environ = init.environ_map,
+        .wake = sdl.wake,
+    });
+    defer app.gitp.destroy();
+    try dock.dockTab(git_panel, files_panel);
+    dock.activatePanel(files_panel);
     app.docsearch = try ide.doc_search.DocSearch.create(&ui, ui.tree.root, app.quick, .{
         .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt),
         .on_web = ide.doc_search.WebHook.bind(&app, App.openWeb),
@@ -1100,6 +1118,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "view.files", "Files" },
         .{ "view.search", "Search" },
         .{ "view.modules", "Modules" },
+        .{ "view.git", "Git" },
         .{ "view.output", "Output" },
         .{ "view.terminal", "Terminal" },
         .{ "view.designer", "UI Designer Panels" },
@@ -1180,6 +1199,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "Files", .command = "view.files" },
         .{ .label = "Search", .command = "view.search" },
         .{ .label = "Modules", .command = "view.modules" },
+        .{ .label = "Git", .command = "view.git" },
         .{ .label = "Output", .command = "view.output" },
         .{ .label = "Terminal", .command = "view.terminal" },
         .{ .separator = true },

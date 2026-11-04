@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Git panel - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Git panel</h1>
+<p><b>View &gt; Git</b> (a tab beside Files) shows the repository the project is in and lets you review and commit changes without leaving the IDE. It uses the <code>git</code> program, so your configuration, credential helpers and ssh agent work as in a terminal. When the project is not inside a repository (or git is not installed) the panel shows a one-line note instead.</p>
+
+<h2>What it shows</h2>
+<ul>
+<li>The branch, its upstream and how far ahead or behind it is (<code>master -&gt; origin/master  ahead 1, behind 0</code>), or <code>(no upstream)</code>.</li>
+<li>The changes in groups: <b>Merge Conflicts</b> (only when there are any), <b>Staged Changes</b>, <b>Changes</b> and <b>Untracked Files</b>. A file with both staged and unstaged edits appears in both groups. Each row has a status letter (<code>M</code> modified, <code>A</code> added, <code>D</code> deleted, <code>R</code> renamed, <code>U</code> untracked) and a renamed file also shows its old name.</li>
+<li>The <b>diff</b> of the selected file below the list: added lines tinted green, removed lines red and hunk headers blue. Untracked files show as all-added. Diffs are cut at 1 MiB. Double-click a row to open the file in an editor.</li>
+</ul>
+
+<h2>What it does</h2>
+<table>
+<tr><th>Button</th><th>Runs</th></tr>
+<tr><td>Stage / Unstage</td><td><code>git add -- FILE</code> / <code>git restore --staged -- FILE</code> (<code>git rm --cached</code> in a repository with no commits yet) for the selected file</td></tr>
+<tr><td>Discard</td><td>After a confirmation: <code>git restore -- FILE</code> (changes are lost) or <code>git clean -f -- FILE</code> (an untracked file is deleted)</td></tr>
+<tr><td>Stage All / Unstage All</td><td><code>git add -A</code> / <code>git restore --staged -- .</code></td></tr>
+<tr><td>Commit</td><td><code>git commit -m MESSAGE</code> with the text in the message field; it asks for staged files and a message first, and clears the field on success</td></tr>
+<tr><td>Stash / Pop Stash</td><td><code>git stash push -u [-m MESSAGE]</code> (untracked files included; the message field is used as the stash message if it has text) / <code>git stash pop</code>; the panel shows how many stashes exist</td></tr>
+<tr><td>Push / Publish Branch</td><td><code>git push</code>, or <code>git push -u origin BRANCH</code> when the branch has no upstream yet</td></tr>
+<tr><td>Refresh</td><td>Reads the status again</td></tr>
+</table>
+<p>The result of the last action (or git's complaint) shows in a line at the bottom of the panel. The panel refreshes after each action, when a file is saved in the IDE, when you open it with View &gt; Git, and every five seconds. Only one git command runs at a time; pressing a button while one runs says so.</p>
+<p><b>Credentials:</b> git runs with <code>GIT_TERMINAL_PROMPT=0</code>, so a push that needs a password fails with a message instead of waiting on an invisible prompt. If it fails that way, push once from a terminal (or set up a credential helper or ssh key).</p>
+
+<h2>Code</h2>
+<p><code>ide.git</code> is UI-free: <code>Git</code> (a worker thread running <code>git -C ROOT ...</code>: <code>submit(job)</code>, <code>poll()</code>, <code>run(args)</code>), <code>parseStatus</code> for <code>git status --porcelain=v1 -z --branch</code> and <code>diffLineKind</code>. <code>ide.GitPanel</code> is the panel (<code>create(ui, parent, io, root, .{ .on_open, .overlay, .environ, .wake })</code>, <code>refresh()</code>, <code>poll()</code>). The diff uses the editor decoration kind <code>added_line</code> (green; the theme's <code>line_added</code>) beside <code>error_line</code> and <code>note_line</code>. Headless: <code>cmd view.git</code>.</p>
+<p><b>Not included:</b> history, blame, branch switching or creation, merges and conflict resolution, partial (hunk) staging, pull.</p>
+</main><script src="nav.js"></script></body></html>

@@ -51,6 +51,7 @@
       ["build-watch.html", "Continuous error checking"],
       ["doc-search.html", "Documentation search"],
       ["modules.html", "Dependencies and C modules"],
+      ["git.html", "Git panel"],
       ["designer.html", "UI designer and handlers"],
       ["settings.html", "Settings, keys, sessions"],
       ["projects.html", "Projects: open and create"],

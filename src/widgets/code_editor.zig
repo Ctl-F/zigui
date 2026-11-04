@@ -82,6 +82,8 @@ pub const DecorationKind = enum {
     error_line,
     warning_line,
     note_line,
+    /// Whole-line green tint (added lines of a diff).
+    added_line,
 };
 
 /// A byte range of the text with a look. Ranges follow edits: text before
@@ -1111,7 +1113,7 @@ pub const CodeEditor = struct {
                 const d = ds.items[i];
                 if (d.end < ls or d.end == d.start) continue;
                 const is_bg = switch (d.kind) {
-                    .highlight, .current, .error_line, .warning_line, .note_line => true,
+                    .highlight, .current, .error_line, .warning_line, .note_line, .added_line => true,
                     else => false,
                 };
                 if (is_bg != backgrounds) continue;
@@ -1123,10 +1125,11 @@ pub const CodeEditor = struct {
                 switch (d.kind) {
                     .highlight => try list.fillRect(.{ .x = x0, .y = row_y, .w = x1 - x0, .h = m.line_h }, Paint.solid(colors.find_match)),
                     .current => try list.fillRect(.{ .x = x0, .y = row_y, .w = x1 - x0, .h = m.line_h }, Paint.solid(colors.find_current)),
-                    .error_line, .warning_line, .note_line => {
+                    .error_line, .warning_line, .note_line, .added_line => {
                         const tint = switch (d.kind) {
                             .error_line => colors.line_error,
                             .warning_line => colors.line_warning,
+                            .added_line => colors.line_added,
                             else => colors.line_note,
                         };
                         // The whole row, not just the text.
