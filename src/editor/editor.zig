@@ -435,6 +435,72 @@ pub const Editor = struct {
         return self.replace(.other, now, edits.items, .map);
     }
 
+    /// Alt+Up / Alt+Down: swap the lines the (single) selection touches with the line
+    /// above (`delta` < 0) or below, as one undo step. The selection moves with its
+    /// text. False at the first or last line, or with several cursors.
+    pub fn moveLines(self: *Editor, delta: isize, now: u64) Error!bool {
+        if (self.sel.items.items.len != 1) return false;
+        const s = self.sel.items.items[0];
+        const first = self.doc.lineOfOffset(s.start());
+        var last = self.doc.lineOfOffset(s.end());
+        // A selection ending at a line start does not include that line.
+        if (!s.isEmpty() and last > first and self.doc.lineStart(last) == s.end()) last -= 1;
+        const count = self.doc.lineCount();
+        if (delta < 0 and first == 0) return false;
+        if (delta > 0 and last + 1 >= count) return false;
+
+        // The line after `line`, terminator included (up to the end of the text for the last line).
+        const end_of = struct {
+            fn at(e: *Editor, line: usize, n: usize) usize {
+                return if (line + 1 < n) e.doc.lineStart(line + 1) else e.doc.lineEnd(line);
+            }
+        }.at;
+
+        const block_text = try self.gpa.dupe(u8, try self.doc.range(self.doc.lineStart(first), self.doc.lineEnd(last)));
+        defer self.gpa.free(block_text);
+        const block_eol = try self.gpa.dupe(u8, try self.doc.range(self.doc.lineEnd(last), end_of(self, last, count)));
+        defer self.gpa.free(block_eol);
+
+        // The neighbouring line and where the block lands.
+        const other = if (delta < 0) first - 1 else last + 1;
+        const other_text = try self.gpa.dupe(u8, try self.doc.lineText(other));
+        defer self.gpa.free(other_text);
+        const other_eol = try self.gpa.dupe(u8, try self.doc.range(self.doc.lineEnd(other), end_of(self, other, count)));
+        defer self.gpa.free(other_eol);
+
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        defer out.deinit(self.gpa);
+        var region_start: usize = undefined;
+        var region_end: usize = undefined;
+        var shift_by: isize = undefined;
+        if (delta < 0) {
+            // other, block  ->  block, other   (the separator between them is other's terminator)
+            region_start = self.doc.lineStart(other);
+            region_end = end_of(self, last, count);
+            try out.appendSlice(self.gpa, block_text);
+            try out.appendSlice(self.gpa, other_eol);
+            try out.appendSlice(self.gpa, other_text);
+            try out.appendSlice(self.gpa, block_eol);
+            shift_by = -@as(isize, @intCast(other_text.len + other_eol.len));
+        } else {
+            // block, other  ->  other, block   (the separator is the block's terminator)
+            region_start = self.doc.lineStart(first);
+            region_end = end_of(self, other, count);
+            try out.appendSlice(self.gpa, other_text);
+            try out.appendSlice(self.gpa, block_eol);
+            try out.appendSlice(self.gpa, block_text);
+            try out.appendSlice(self.gpa, other_eol);
+            shift_by = @intCast(other_text.len + block_eol.len);
+        }
+        const edit: Edit = .{ .start = region_start, .end = region_end, .text = out.items };
+        if (!try self.replace(.other, now, &.{edit}, .carets_after)) return false;
+        const anchor: usize = @intCast(@as(isize, @intCast(s.anchor)) + shift_by);
+        const head: usize = @intCast(@as(isize, @intCast(s.head)) + shift_by);
+        self.sel.assign(&.{.{ .anchor = anchor, .head = head, .primary = true }}) catch return true;
+        self.finishMove();
+        return true;
+    }
+
     fn mergeRanges(list: *std.ArrayListUnmanaged(Edit)) void {
         if (list.items.len < 2) return;
         var out: usize = 0;
@@ -854,6 +920,51 @@ test "newline keeps indentation; Enter in the middle splits the line" {
     _ = try e.newline(3);
     try testing.expectEqual(@as(usize, 4), e.doc.lineCount());
     try testing.expectEqualStrings("", try e.doc.lineText(3));
+}
+
+test "moveLines swaps the touched lines with the neighbour, keeps the selection, and is one undo step" {
+    var e = try editorWith("one\ntwo\nthree\nfour");
+    defer e.deinit();
+    e.setCaret(e.doc.lineStart(1) + 1, false); // in "two"
+    try testing.expect(try e.moveLines(-1, 0));
+    try expectText(&e, "two\none\nthree\nfour");
+    try testing.expectEqual(@as(usize, 1), e.sel.items.items[0].head); // still inside "two", now on line 0
+    try testing.expect(!try e.moveLines(-1, 1)); // already the first line
+    try testing.expect(try e.moveLines(1, 2));
+    try testing.expect(try e.moveLines(1, 3));
+    try expectText(&e, "one\nthree\ntwo\nfour");
+    try testing.expectEqual(@as(usize, e.doc.lineStart(2) + 1), e.sel.items.items[0].head);
+
+    // The last line has no terminator: it moves up without leaving a stray newline.
+    e.setCaret(e.doc.len(), false);
+    try testing.expect(try e.moveLines(-1, 4));
+    try expectText(&e, "one\nthree\nfour\ntwo");
+    e.setCaret(e.doc.len(), false);
+    try testing.expect(!try e.moveLines(1, 5)); // last line: nowhere to go
+    try testing.expect(try e.undo());
+    try expectText(&e, "one\nthree\ntwo\nfour");
+}
+
+test "moveLines moves every line of a multi-line selection together" {
+    var e = try editorWith("a\nb\nc\nd\ne");
+    defer e.deinit();
+    e.setCaret(e.doc.lineStart(1), false);
+    e.setCaret(e.doc.lineStart(3) , true); // lines b and c (ending at the start of d does not include d)
+    try testing.expect(try e.moveLines(1, 0));
+    try expectText(&e, "a\nd\nb\nc\ne");
+    try testing.expectEqualStrings("b\nc\n", try e.doc.range(e.sel.items.items[0].start(), e.sel.items.items[0].end()));
+    try testing.expect(try e.moveLines(-1, 1));
+    try expectText(&e, "a\nb\nc\nd\ne");
+}
+
+test "moveLines keeps CRLF line endings and does nothing with several cursors" {
+    var e = try editorWith("x\r\ny\r\nz");
+    defer e.deinit();
+    e.setCaret(e.doc.lineStart(1), false);
+    try testing.expect(try e.moveLines(1, 0));
+    try expectText(&e, "x\r\nz\r\ny");
+    e.addCaret(0);
+    try testing.expect(!try e.moveLines(1, 1));
 }
 
 test "tab inserts to the next tab stop; selections spanning lines indent and outdent" {

@@ -1485,11 +1485,19 @@ pub const CodeEditor = struct {
                     ed.moveRight(shift, word) catch {};
                     moved = true;
                 },
-                .up => {
+                // Alt+Up/Down (or Ctrl+Alt+Up/Down) swaps the lines with their neighbour;
+                // Ctrl+Alt+Shift+Up/Down adds a cursor above/below.
+                .up => if (alt and !shift and writable) {
+                    edited = ed.moveLines(-1, now) catch false;
+                    moved = true;
+                } else {
                     if (ctrl and alt) ed.addCursorVertical(-1) catch {} else self.moveRows(-1, shift);
                     moved = true;
                 },
-                .down => {
+                .down => if (alt and !shift and writable) {
+                    edited = ed.moveLines(1, now) catch false;
+                    moved = true;
+                } else {
                     if (ctrl and alt) ed.addCursorVertical(1) catch {} else self.moveRows(1, shift);
                     moved = true;
                 },

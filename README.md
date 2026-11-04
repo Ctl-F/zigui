@@ -461,6 +461,9 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   and a lowercase haystack per declaration), shown in a `QuickPick` in its new
   external-ranking mode; the last row opens a Google search in the browser
   (`sdl.openUrl`). Lexical only: no synonyms.
+- Move lines: `Editor.moveLines(delta, now)` swaps the lines of a single selection with
+  its neighbour (Alt+Up/Down, also Ctrl+Alt); adding a cursor moved to
+  Ctrl+Alt+Shift+Up/Down. Handles a last line without a terminator and CRLF.
 - Back/Forward (`ide/nav_history.zig`): every `openAt` jump records the place left;
   the mouse side buttons (SDL buttons 4/5) and Alt+Left/Right walk the list.
 - Continuous error checking (`ide/build_watch.zig`, `ide/watch_panel.zig`): the

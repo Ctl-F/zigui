@@ -2276,6 +2276,26 @@ test "clicking places the caret, dragging selects, double and triple click selec
     try std.testing.expectEqualStrings("alpha beta\n", try core.doc.range(core.sel.primary().start(), core.sel.primary().end()));
 }
 
+test "Alt+Up and Alt+Down (also with Ctrl) swap the caret's line with its neighbour" {
+    const t = try TextHarness.init();
+    defer t.deinit();
+    const ui = &t.h.ui;
+    const ed = try editorBox(t);
+    try ed.loadText("one\ntwo\nthree", false);
+    try t.h.frame();
+    ui.setFocus(ed.node);
+    try press(t, .end, .{ .ctrl = true }); // caret on "three"
+    try press(t, .up, .{ .alt = true });
+    try expectEdText(ui, ed, "one\nthree\ntwo");
+    try press(t, .up, .{ .ctrl = true, .alt = true });
+    try expectEdText(ui, ed, "three\none\ntwo");
+    try press(t, .up, .{ .alt = true }); // first line: nothing happens
+    try expectEdText(ui, ed, "three\none\ntwo");
+    try press(t, .down, .{ .alt = true });
+    try expectEdText(ui, ed, "one\nthree\ntwo");
+    try std.testing.expectEqual(@as(u32, 1), ed.out.selection_count);
+}
+
 test "alt-click adds a cursor and typing goes to every cursor" {
     const t = try TextHarness.init();
     defer t.deinit();
@@ -2301,8 +2321,8 @@ test "alt-click adds a cursor and typing goes to every cursor" {
     try std.testing.expectEqual(@as(u32, 1), ed.out.selection_count);
     try std.testing.expect(!ui.keyHandled(.escape, .{}, true, false)); // nothing left to cancel: the key passes through
 
-    try press(t, .up, .{ .ctrl = true, .alt = true }); // no line above the first: no-op
-    try press(t, .down, .{ .ctrl = true, .alt = true });
+    try press(t, .up, .{ .ctrl = true, .alt = true, .shift = true }); // no line above the first: no-op
+    try press(t, .down, .{ .ctrl = true, .alt = true, .shift = true }); // (Ctrl+Alt+Up/Down without Shift swaps lines)
     try std.testing.expectEqual(@as(u32, 2), ed.out.selection_count);
 }
 
