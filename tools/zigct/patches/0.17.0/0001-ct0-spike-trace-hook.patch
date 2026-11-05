@@ -1,0 +1,242 @@
+--- a/src/Sema.zig
++++ b/src/Sema.zig
+@@ -14,6 +14,7 @@
+ 
+ const Sema = @This();
+ const Value = @import("Value.zig");
++const zct = @import("zct_hook.zig");
+ const MutableValue = @import("mutable_value.zig").MutableValue;
+ const Type = @import("Type.zig");
+ const Air = @import("Air.zig");
+@@ -1125,6 +1126,8 @@
+     var crash_info: crash_report.AnalyzeBody = undefined;
+     crash_info.push(sema, block, body);
+     defer crash_info.pop();
++    const zct_mark = if (zct.enabled) zct.enterBody() else 0;
++    defer if (zct.enabled) zct.exitBody(zct_mark);
+ 
+     // We use a while (true) loop here to avoid a redundant way of breaking out of
+     // the loop. The only way to break out of the loop is with a `noreturn`
+@@ -2702,6 +2705,7 @@
+     const io = comp.io;
+ 
+     assert(sema.err == null);
++    if (zct.enabled) zct.onError(sema, err_msg.msg);
+ 
+     if (build_options.enable_debug_extensions and comp.debug_compile_errors) {
+         var wip_errors = std.zig.ErrorBundle.Wip.init(gpa) catch @panic("out of memory");
+@@ -5839,9 +5843,9 @@
+ }
+ 
+ fn zirDbgStmt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!void {
+-    if (block.isComptime() or block.ownerModule().strip) return;
+-
+     const inst_data = sema.code.instructions.items(.data)[@backingInt(inst)].dbg_stmt;
++    if (zct.enabled and block.isComptime()) zct.onStmt(sema, block, inst_data.line, inst_data.column);
++    if (block.isComptime() or block.ownerModule().strip) return;
+ 
+     if (block.instructions.items.len != 0) {
+         const idx = block.instructions.items[block.instructions.items.len - 1];
+@@ -5864,6 +5868,11 @@
+     });
+ }
+ 
++/// zigct: read through a comptime pointer at the current moment (null when it cannot be read).
++pub fn zctDeref(sema: *Sema, block: *Block, ptr_val: Value, ptr_ty: Type) ?Value {
++    return sema.pointerDeref(block, .unneeded, ptr_val, ptr_ty) catch null;
++}
++
+ fn zirDbgEmptyStmt(_: *Sema, block: *Block, _: Zir.Inst.Index) CompileError!void {
+     if (block.isComptime() or block.ownerModule().strip) return;
+     _ = try block.addNoOp(.dbg_empty_stmt);
+@@ -5878,6 +5887,9 @@
+     const str_op = sema.code.instructions.items(.data)[@backingInt(inst)].str_op;
+     const operand = sema.resolveInst(str_op.operand);
+     const name = str_op.getStr(sema.code);
++    if (zct.enabled and block.isComptime()) {
++        zct.onVar(sema, block, name, sema.resolveValue(operand), if (air_tag == .dbg_var_ptr) sema.typeOf(operand) else null);
++    }
+     try sema.addDbgVar(block, operand, air_tag, name);
+ }
+ 
+@@ -26165,6 +26177,7 @@
+ 
+ fn emitBackwardBranch(sema: *Sema, block: *Block, src: LazySrcLoc) !void {
+     sema.branch_count += 1;
++    if (zct.enabled) zct.onBranch(sema);
+     if (sema.branch_count > sema.branch_quota) {
+         const msg = msg: {
+             const msg = try sema.errMsg(
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -32,6 +32,7 @@
+ const Zcu = @import("Zcu.zig");
+ const mingw = @import("libs/mingw.zig");
+ const dev = @import("dev.zig");
++const zct_hook = @import("zct_hook.zig");
+ const Module = @import("Module.zig");
+ 
+ test {
+@@ -282,6 +283,8 @@
+     args: []const [:0]const u8,
+     environ_map: *process.Environ.Map,
+ ) !void {
++    zct_hook.enabled = environ_map.get("ZCT_TRACE") != null;
++    std.zig.AstGen.zct_emit_comptime_dbg = zct_hook.enabled;
+     if (process.can_replace and EnvVar.ZIG_IS_DETECTING_LIBC_PATHS.isSet(environ_map)) {
+         dev.check(.cc_command);
+         // In this case we have accidentally invoked ourselves as "the system C compiler"
+--- a/lib/std/zig/AstGen.zig
++++ b/lib/std/zig/AstGen.zig
+@@ -3330,11 +3330,14 @@
+     }
+ }
+ 
++/// zigct: also emit `dbg_stmt` / `dbg_var_*` in comptime scopes (set by the compiler's main).
++pub var zct_emit_comptime_dbg: bool = false;
++
+ fn emitDbgNode(gz: *GenZir, node: Ast.Node.Index) !void {
+     // The instruction emitted here is for debugging runtime code.
+     // If the current block will be evaluated only during semantic analysis
+     // then no dbg_stmt ZIR instruction is needed.
+-    if (gz.is_comptime) return;
++    if (gz.is_comptime and !zct_emit_comptime_dbg) return;
+     const astgen = gz.astgen;
+     astgen.advanceSourceCursorToNode(node);
+     const line = astgen.source_line - gz.decl_line;
+@@ -12767,7 +12770,7 @@
+     }
+ 
+     fn addDbgVar(gz: *GenZir, tag: Zir.Inst.Tag, name: Zir.NullTerminatedString, inst: Zir.Inst.Ref) !void {
+-        if (gz.is_comptime) return;
++        if (gz.is_comptime and !zct_emit_comptime_dbg) return;
+ 
+         _ = try gz.add(.{ .tag = tag, .data = .{
+             .str_op = .{
+@@ -13315,7 +13318,7 @@
+ }
+ 
+ fn emitDbgStmt(gz: *GenZir, lc: LineColumn) !void {
+-    if (gz.is_comptime) return;
++    if (gz.is_comptime and !zct_emit_comptime_dbg) return;
+     if (gz.instructions.items.len > gz.instructions_top) {
+         const astgen = gz.astgen;
+         const last = gz.instructions.items[gz.instructions.items.len - 1];
+--- /dev/null
++++ b/src/zct_hook.zig
+@@ -0,0 +1,115 @@
++//! zigct spike (CT-0): observes Sema's comptime evaluation. All entry points are called from
++//! `Sema.zig` and cost one branch on `enabled` when no session is active.
++const std = @import("std");
++const Sema = @import("Sema.zig");
++const Zcu = @import("Zcu.zig");
++const Value = @import("Value.zig");
++const Type = @import("Type.zig");
++
++/// Set from the environment (`ZCT_TRACE`) in `main.zig`.
++pub var enabled: bool = false;
++
++const gpa = std.heap.page_allocator;
++
++const Local = struct {
++    name: []const u8,
++    /// The value, or for `var` declarations a pointer to it (`ptr_ty` set): read at every stop.
++    val: ?Value,
++    ptr_ty: ?Type,
++    block: *Sema.Block,
++    /// The Sema that declared it: comptime allocations belong to one Sema instance.
++    sema: *Sema,
++    frame: u32,
++};
++
++var locals: std.ArrayList(Local) = .empty;
++var stmt_count: u64 = 0;
++var branch_count: u64 = 0;
++
++/// Locals declared inside a body vanish when the body is left.
++pub fn enterBody() usize {
++    return locals.items.len;
++}
++pub fn exitBody(mark: usize) void {
++    locals.shrinkRetainingCapacity(mark);
++}
++
++pub fn frameDepth(block: *const Sema.Block) u32 {
++    var d: u32 = 0;
++    var b: *const Sema.Block = block;
++    while (true) {
++        if (b.inlining) |inl| {
++            d += 1;
++            b = inl.call_block;
++        } else if (b.parent) |p| {
++            b = p;
++        } else break;
++    }
++    return d;
++}
++
++const Where = struct { file: []const u8, base: u32 };
++
++fn where(sema: *Sema) Where {
++    const zcu = sema.pt.zcu;
++    const ip = &zcu.intern_pool;
++    if (sema.func_index != .none) {
++        const info = zcu.funcInfo(sema.func_index);
++        return .{
++            .file = zcu.navFileScope(info.owner_nav).sub_file_path,
++            .base = zcu.navSrcLine(info.owner_nav) + info.lbrace_line,
++        };
++    }
++    switch (sema.owner.unwrap()) {
++        .@"comptime" => |id| {
++            const full = ip.getComptimeUnit(id).zir_index.resolveFull(ip) orelse return .{ .file = "?", .base = 0 };
++            const file = zcu.fileByIndex(full.file);
++            return .{ .file = file.sub_file_path, .base = file.zir.?.getDeclaration(full.inst).src_line };
++        },
++        .nav_val, .nav_ty => |nav| return .{ .file = zcu.navFileScope(nav).sub_file_path, .base = zcu.navSrcLine(nav) },
++        else => return .{ .file = "?", .base = 0 },
++    }
++}
++
++fn fmtValue(sema: *Sema, val: ?Value) []u8 {
++    const v = val orelse return gpa.dupe(u8, "<not comptime-known>") catch @panic("OOM");
++    var buf: [400]u8 = undefined;
++    var w = std.Io.Writer.fixed(&buf);
++    w.print("{f}", .{v.fmtValueSema(sema)}) catch {};
++    return gpa.dupe(u8, w.buffered()) catch @panic("OOM");
++}
++
++pub fn onVar(sema: *Sema, block: *Sema.Block, name: []const u8, val: ?Value, ptr_ty: ?Type) void {
++    locals.append(gpa, .{ .sema = sema, .name = name, .val = val, .ptr_ty = ptr_ty, .block = block, .frame = frameDepth(block) }) catch @panic("OOM");
++}
++
++pub fn onStmt(sema: *Sema, block: *Sema.Block, line: u32, column: u32) void {
++    const w = where(sema);
++    const depth = frameDepth(block);
++    stmt_count += 1;
++    std.debug.print("[zct] stmt #{d} {s}:{d}:{d} depth={d}", .{ stmt_count, w.file, w.base + line + 1, column + 1, depth });
++    var first = true;
++    for (locals.items) |l| {
++        if (l.frame != depth) continue;
++        const v: ?Value = if (l.ptr_ty) |pt| (if (l.val) |pv| l.sema.zctDeref(l.block, pv, pt) else null) else l.val;
++        const text = fmtValue(l.sema, v);
++        defer gpa.free(text);
++        std.debug.print("{s}{s}={s}", .{ if (first) " | " else ", ", l.name, text });
++        first = false;
++    }
++    std.debug.print("\n", .{});
++}
++
++pub fn onBranch(sema: *Sema) void {
++    branch_count += 1;
++    std.debug.print("[zct] backward branch {d}/{d}\n", .{ sema.branch_count, sema.branch_quota });
++}
++
++pub fn onError(sema: *Sema, msg: []const u8) void {
++    _ = sema;
++    std.debug.print("[zct] ERROR raised: {s}\n", .{msg});
++}
++
++pub fn summary() void {
++    std.debug.print("[zct] statements={d} branches={d}\n", .{ stmt_count, branch_count });
++}
