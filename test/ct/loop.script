@@ -1,0 +1,10 @@
+root loop.zig
+break loop.zig 10
+run
+in
+next
+out
+next
+continue
+continue
+continue

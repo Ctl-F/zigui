@@ -1,0 +1,9 @@
+stopped entry
+  inFn target_lib.zig:8
+stopped step
+  inFn target_lib.zig:9
+  | k = 5
+stopped step
+  inFn target_lib.zig:10
+  | k = 6
+terminated

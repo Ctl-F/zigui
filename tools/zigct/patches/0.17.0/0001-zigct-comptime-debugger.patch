@@ -1,0 +1,693 @@
+--- a/src/Sema.zig
++++ b/src/Sema.zig
+@@ -14,6 +14,7 @@
+ 
+ const Sema = @This();
+ const Value = @import("Value.zig");
++const zct = @import("zct_hook.zig");
+ const MutableValue = @import("mutable_value.zig").MutableValue;
+ const Type = @import("Type.zig");
+ const Air = @import("Air.zig");
+@@ -1125,6 +1126,8 @@
+     var crash_info: crash_report.AnalyzeBody = undefined;
+     crash_info.push(sema, block, body);
+     defer crash_info.pop();
++    const zct_mark = if (zct.enabled) zct.enterBody(sema, block) else 0;
++    defer if (zct.enabled) zct.exitBody(zct_mark);
+ 
+     // We use a while (true) loop here to avoid a redundant way of breaking out of
+     // the loop. The only way to break out of the loop is with a `noreturn`
+@@ -2702,6 +2705,7 @@
+     const io = comp.io;
+ 
+     assert(sema.err == null);
++    if (zct.enabled) zct.onError(sema, err_msg.msg);
+ 
+     if (build_options.enable_debug_extensions and comp.debug_compile_errors) {
+         var wip_errors = std.zig.ErrorBundle.Wip.init(gpa) catch @panic("out of memory");
+@@ -5839,9 +5843,9 @@
+ }
+ 
+ fn zirDbgStmt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!void {
+-    if (block.isComptime() or block.ownerModule().strip) return;
+-
+     const inst_data = sema.code.instructions.items(.data)[@backingInt(inst)].dbg_stmt;
++    if (zct.enabled and block.isComptime()) zct.onStmt(sema, block, inst_data.line, inst_data.column);
++    if (block.isComptime() or block.ownerModule().strip) return;
+ 
+     if (block.instructions.items.len != 0) {
+         const idx = block.instructions.items[block.instructions.items.len - 1];
+@@ -5864,6 +5868,11 @@
+     });
+ }
+ 
++/// zigct: read through a comptime pointer at the current moment (null when it cannot be read).
++pub fn zctDeref(sema: *Sema, block: *Block, ptr_val: Value, ptr_ty: Type) ?Value {
++    return sema.pointerDeref(block, .unneeded, ptr_val, ptr_ty) catch null;
++}
++
+ fn zirDbgEmptyStmt(_: *Sema, block: *Block, _: Zir.Inst.Index) CompileError!void {
+     if (block.isComptime() or block.ownerModule().strip) return;
+     _ = try block.addNoOp(.dbg_empty_stmt);
+@@ -5878,6 +5887,9 @@
+     const str_op = sema.code.instructions.items(.data)[@backingInt(inst)].str_op;
+     const operand = sema.resolveInst(str_op.operand);
+     const name = str_op.getStr(sema.code);
++    if (zct.enabled and block.isComptime()) {
++        zct.onVar(sema, block, name, sema.resolveValue(operand), if (air_tag == .dbg_var_ptr) sema.typeOf(operand) else null);
++    }
+     try sema.addDbgVar(block, operand, air_tag, name);
+ }
+ 
+@@ -26165,6 +26177,7 @@
+ 
+ fn emitBackwardBranch(sema: *Sema, block: *Block, src: LazySrcLoc) !void {
+     sema.branch_count += 1;
++    if (zct.enabled) zct.onBranch(sema);
+     if (sema.branch_count > sema.branch_quota) {
+         const msg = msg: {
+             const msg = try sema.errMsg(
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -32,6 +32,7 @@
+ const Zcu = @import("Zcu.zig");
+ const mingw = @import("libs/mingw.zig");
+ const dev = @import("dev.zig");
++const zct_hook = @import("zct_hook.zig");
+ const Module = @import("Module.zig");
+ 
+ test {
+@@ -229,6 +230,7 @@
+     @"build-exe",
+     @"build-lib",
+     @"build-obj",
++    @"dap-comptime",
+     @"test",
+     @"test-obj",
+     run,
+@@ -282,6 +284,10 @@
+     args: []const [:0]const u8,
+     environ_map: *process.Environ.Map,
+ ) !void {
++    if (environ_map.get("ZCT_TRACE") != null) {
++        zct_hook.enableTrace();
++        std.zig.AstGen.zct_emit_comptime_dbg = true;
++    }
+     if (process.can_replace and EnvVar.ZIG_IS_DETECTING_LIBC_PATHS.isSet(environ_map)) {
+         dev.check(.cc_command);
+         // In this case we have accidentally invoked ourselves as "the system C compiler"
+@@ -329,6 +335,23 @@
+             dev.check(.build_lib_command);
+             return buildOutputType(gpa, arena, io, args, .{ .build = .Lib }, environ_map);
+         },
++        .@"dap-comptime" => {
++            // zigct: a comptime debugger speaking DAP on stdin/stdout (see zct_hook.zig).
++            zct_hook.initDap(io);
++            std.zig.AstGen.zct_emit_comptime_dbg = true;
++            if (!zct_hook.handshake()) return;
++            var list: std.ArrayList([]const u8) = .empty;
++            try list.append(arena, args[0]);
++            try list.append(arena, "build-obj");
++            try list.appendSlice(arena, zct_hook.launch.zig_args);
++            try list.appendSlice(arena, &.{ "-fno-emit-bin", "-j1" });
++            if (zct_hook.launch.cache_dir.len > 0) {
++                try list.appendSlice(arena, &.{ "--cache-dir", zct_hook.launch.cache_dir, "--global-cache-dir", try std.fmt.allocPrint(arena, "{s}/global", .{zct_hook.launch.cache_dir}) });
++            }
++            const result = buildOutputType(gpa, arena, io, list.items, .{ .build = .Obj }, environ_map);
++            zct_hook.finish(if (result) |_| 0 else |_| 1);
++            return result;
++        },
+         .@"build-obj" => {
+             dev.check(.build_obj_command);
+             return buildOutputType(gpa, arena, io, args, .{ .build = .Obj }, environ_map);
+@@ -3866,6 +3889,7 @@
+             error.CompileErrorsReported => {
+                 assert(listen == .none);
+                 saveState(comp, incremental);
++                zct_hook.finish(1);
+                 process.exit(1);
+             },
+             else => |e| return e,
+@@ -3980,6 +4004,7 @@
+     }
+ 
+     // Skip resource deallocation in release builds; let the OS do it.
++    zct_hook.finish(0);
+     return cleanExit(io);
+ }
+ 
+--- a/lib/std/zig/AstGen.zig
++++ b/lib/std/zig/AstGen.zig
+@@ -3330,11 +3330,14 @@
+     }
+ }
+ 
++/// zigct: also emit `dbg_stmt` / `dbg_var_*` in comptime scopes (set by the compiler's main).
++pub var zct_emit_comptime_dbg: bool = false;
++
+ fn emitDbgNode(gz: *GenZir, node: Ast.Node.Index) !void {
+     // The instruction emitted here is for debugging runtime code.
+     // If the current block will be evaluated only during semantic analysis
+     // then no dbg_stmt ZIR instruction is needed.
+-    if (gz.is_comptime) return;
++    if (gz.is_comptime and !zct_emit_comptime_dbg) return;
+     const astgen = gz.astgen;
+     astgen.advanceSourceCursorToNode(node);
+     const line = astgen.source_line - gz.decl_line;
+@@ -12767,7 +12770,7 @@
+     }
+ 
+     fn addDbgVar(gz: *GenZir, tag: Zir.Inst.Tag, name: Zir.NullTerminatedString, inst: Zir.Inst.Ref) !void {
+-        if (gz.is_comptime) return;
++        if (gz.is_comptime and !zct_emit_comptime_dbg) return;
+ 
+         _ = try gz.add(.{ .tag = tag, .data = .{
+             .str_op = .{
+@@ -13315,7 +13318,7 @@
+ }
+ 
+ fn emitDbgStmt(gz: *GenZir, lc: LineColumn) !void {
+-    if (gz.is_comptime) return;
++    if (gz.is_comptime and !zct_emit_comptime_dbg) return;
+     if (gz.instructions.items.len > gz.instructions_top) {
+         const astgen = gz.astgen;
+         const last = gz.instructions.items[gz.instructions.items.len - 1];
+--- /dev/null
++++ b/src/zct_hook.zig
+@@ -0,0 +1,516 @@
++//! zigct: a comptime debugger inside the compiler. Sema calls the entry points below while it
++//! evaluates comptime code (see the patch in tools/zigct/patches). Everything is a no-op unless
++//! `enabled`. Two modes:
++//!   - trace (`ZCT_TRACE` set): prints each statement and its locals to stderr (the CT-0 spike);
++//!   - dap (`zigct dap-comptime`): a Debug Adapter Protocol server on stdin/stdout. When a stop
++//!     is due, the compiler thread itself reads and answers requests until the client resumes,
++//!     so everything is read by the thread that owns it (single-threaded: `-j1`).
++const std = @import("std");
++const Io = std.Io;
++const Sema = @import("Sema.zig");
++const Zcu = @import("Zcu.zig");
++const Value = @import("Value.zig");
++const Type = @import("Type.zig");
++
++pub var enabled: bool = false;
++var dap: bool = false;
++var io: Io = undefined;
++
++const gpa = std.heap.page_allocator;
++
++// ---- frames and locals ----
++
++const Local = struct {
++    name: []const u8,
++    /// The value, or for `var` declarations a pointer to it (`ptr_ty` set): read at every stop.
++    val: ?Value,
++    ptr_ty: ?Type,
++    block: *Sema.Block,
++    /// The Sema that declared it: comptime allocations belong to one Sema instance.
++    sema: *Sema,
++    frame: usize,
++};
++
++const Frame = struct {
++    sema: *Sema,
++    inlining: ?*Sema.Block.Inlining,
++    name: []const u8,
++    /// Absolute path; empty until the first statement is seen.
++    file: []const u8 = "",
++    base_line: u32 = 0,
++    in_scope: bool = false,
++    resolved: bool = false,
++    line: u32 = 0,
++    col: u32 = 0,
++};
++
++const BodyMark = struct { locals: usize, pushed_frame: bool };
++
++var frames: std.ArrayList(Frame) = .empty;
++var bodies: std.ArrayList(BodyMark) = .empty;
++var locals: std.ArrayList(Local) = .empty;
++
++pub const Mark = usize;
++
++pub fn enterBody(sema: *Sema, block: *Sema.Block) Mark {
++    var push = true;
++    if (frames.items.len > 0) {
++        const top = frames.items[frames.items.len - 1];
++        push = top.sema != sema or top.inlining != block.inlining;
++    }
++    if (push) frames.append(gpa, .{ .sema = sema, .inlining = block.inlining, .name = frameName(sema, block) }) catch @panic("OOM");
++    bodies.append(gpa, .{ .locals = locals.items.len, .pushed_frame = push }) catch @panic("OOM");
++    return bodies.items.len;
++}
++
++pub fn exitBody(mark: Mark) void {
++    const b = bodies.items[mark - 1];
++    bodies.shrinkRetainingCapacity(mark - 1);
++    locals.shrinkRetainingCapacity(b.locals);
++    if (b.pushed_frame) {
++        if (target_active and frames.items.len == target_frame + 1) {
++            // The targeted block is done: the session ends here.
++            finish(0);
++            std.process.exit(0);
++        }
++        const f = frames.pop().?;
++        gpa.free(f.name);
++        gpa.free(f.file);
++    }
++}
++
++fn frameName(sema: *Sema, block: *Sema.Block) []const u8 {
++    const zcu = sema.pt.zcu;
++    const ip = &zcu.intern_pool;
++    const text: []const u8 = blk: {
++        if (block.inlining) |inl| {
++            if (!inl.is_generic_instantiation) {
++                const nav = ip.getNav(zcu.funcInfo(inl.func).owner_nav);
++                break :blk nav.name.toSlice(ip);
++            }
++            break :blk "generic instantiation";
++        }
++        if (sema.func_index != .none) break :blk ip.getNav(zcu.funcInfo(sema.func_index).owner_nav).name.toSlice(ip);
++        break :blk switch (sema.owner.unwrap()) {
++            .@"comptime" => "comptime",
++            .nav_val, .nav_ty => |nav| ip.getNav(nav).name.toSlice(ip),
++            else => "analysis",
++        };
++    };
++    return gpa.dupe(u8, text) catch @panic("OOM");
++}
++
++fn resolveFrame(f: *Frame) void {
++    f.resolved = true;
++    const sema = f.sema;
++    const zcu = sema.pt.zcu;
++    const ip = &zcu.intern_pool;
++    var file: ?*Zcu.File = null;
++    if (f.inlining) |inl| {
++        if (!inl.is_generic_instantiation) {
++            const nav = zcu.funcInfo(inl.func).owner_nav;
++            file = zcu.navFileScope(nav);
++            f.base_line = zcu.navSrcLine(nav) + zcu.funcInfo(inl.func).lbrace_line;
++        }
++    } else if (sema.func_index != .none) {
++        const info = zcu.funcInfo(sema.func_index);
++        file = zcu.navFileScope(info.owner_nav);
++        f.base_line = zcu.navSrcLine(info.owner_nav) + info.lbrace_line;
++    } else switch (sema.owner.unwrap()) {
++        .@"comptime" => |id| if (ip.getComptimeUnit(id).zir_index.resolveFull(ip)) |full| {
++            const fl = zcu.fileByIndex(full.file);
++            file = fl;
++            f.base_line = fl.zir.?.getDeclaration(full.inst).src_line;
++        },
++        .nav_val, .nav_ty => |nav| {
++            file = zcu.navFileScope(nav);
++            f.base_line = zcu.navSrcLine(nav);
++        },
++        else => {},
++    }
++    const fl = file orelse {
++        f.file = gpa.dupe(u8, "") catch @panic("OOM");
++        return;
++    };
++    f.file = fl.path.toAbsolute(&zcu.comp.dirs, gpa) catch @panic("OOM");
++    f.in_scope = (source_root.len == 0 or std.mem.startsWith(u8, f.file, source_root)) and
++        !(launch.cache_dir.len > 0 and std.mem.startsWith(u8, f.file, launch.cache_dir));
++}
++
++// ---- state shared with the protocol ----
++
++var source_root: []const u8 = "";
++var stop_on_entry = false;
++var target_file: []const u8 = "";
++var target_start: u32 = 0;
++var target_end: u32 = 0;
++var target_active = false;
++var target_frame: usize = 0;
++var entered = false;
++
++const StepKind = enum { run, in, over, out };
++var step: StepKind = .run;
++var step_depth: usize = 0;
++
++var break_compile_error = false;
++var break_quota = false;
++var branch_total: u64 = 0;
++
++/// file (absolute) -> sorted lines
++var breakpoints: std.StringHashMapUnmanaged(std.ArrayList(u32)) = .empty;
++
++var seq: i64 = 1;
++var terminated_sent = false;
++var stop_text: []const u8 = "";
++
++// ---- entry points called from Sema ----
++
++pub fn onVar(sema: *Sema, block: *Sema.Block, name: []const u8, val: ?Value, ptr_ty: ?Type) void {
++    if (frames.items.len == 0) return;
++    const f = &frames.items[frames.items.len - 1];
++    if (f.resolved and !f.in_scope) return;
++    locals.append(gpa, .{ .sema = sema, .name = name, .val = val, .ptr_ty = ptr_ty, .block = block, .frame = frames.items.len - 1 }) catch @panic("OOM");
++}
++
++pub fn onStmt(sema: *Sema, block: *Sema.Block, rel_line: u32, column: u32) void {
++    _ = sema;
++    _ = block;
++    if (frames.items.len == 0) return;
++    const f = &frames.items[frames.items.len - 1];
++    if (!f.resolved) resolveFrame(f);
++    if (!f.in_scope) return;
++    const line = f.base_line + rel_line + 1;
++    const col = column + 1;
++    // One source line often has several statement markers (a call has two): stop once per line.
++    const dup = f.line == line;
++    f.line = line;
++    f.col = col;
++    if (!dap) return traceStmt(f, line, col);
++
++    var reason: ?[]const u8 = null;
++    if (!entered) {
++        if (target_file.len > 0 and !(std.mem.eql(u8, f.file, target_file) and line >= target_start and line <= target_end)) return;
++        entered = true;
++        if (target_file.len > 0) {
++            target_active = true;
++            target_frame = frames.items.len - 1;
++        }
++        if (stop_on_entry) reason = "entry";
++    }
++    if (reason == null and !dup) {
++        if (breakpoints.get(f.file)) |lines| {
++            for (lines.items) |l| if (l == line) {
++                reason = "breakpoint";
++                break;
++            };
++        }
++        if (reason == null) switch (step) {
++            .run => {},
++            .in => reason = "step",
++            .over => if (frames.items.len <= step_depth) {
++                reason = "step";
++            },
++            .out => if (frames.items.len < step_depth) {
++                reason = "step";
++            },
++        };
++    }
++    if (reason) |r| stopHere(r, "");
++}
++
++pub fn onBranch(sema: *Sema) void {
++    branch_total += 1;
++    _ = sema;
++}
++
++pub fn onError(sema: *Sema, msg: []const u8) void {
++    _ = sema;
++    if (!dap) {
++        std.debug.print("[zct] ERROR raised: {s}\n", .{msg});
++        return;
++    }
++    if (break_compile_error and entered) stopHere("exception", msg);
++}
++
++// ---- trace mode ----
++
++var stmt_count: u64 = 0;
++
++fn traceStmt(f: *Frame, line: u32, col: u32) void {
++    stmt_count += 1;
++    std.debug.print("[zct] stmt #{d} {s}:{d}:{d} depth={d}", .{ stmt_count, f.file, line, col, frames.items.len });
++    std.debug.print("\n", .{});
++}
++
++// ---- values ----
++
++fn fmtValue(sema: *Sema, val: ?Value) []u8 {
++    const v = val orelse return gpa.dupe(u8, "<not comptime-known>") catch @panic("OOM");
++    var buf: [400]u8 = undefined;
++    var w = Io.Writer.fixed(&buf);
++    w.print("{f}", .{v.fmtValueSema(sema)}) catch {};
++    return gpa.dupe(u8, w.buffered()) catch @panic("OOM");
++}
++
++fn localText(l: Local) []u8 {
++    const v: ?Value = if (l.ptr_ty) |pt| (if (l.val) |pv| l.sema.zctDeref(l.block, pv, pt) else null) else l.val;
++    return fmtValue(l.sema, v);
++}
++
++// ---- protocol ----
++
++var in_buf: [64 * 1024]u8 = undefined;
++var in_reader: Io.File.Reader = undefined;
++var out_buf: [16 * 1024]u8 = undefined;
++var out_writer: Io.File.Writer = undefined;
++
++/// Zigct's own start-up options, from `launch`.
++pub const Launch = struct {
++    /// Arguments for `zig build-obj` (root file, modules, flags).
++    zig_args: []const []const u8 = &.{},
++    cache_dir: []const u8 = "",
++};
++pub var launch: Launch = .{};
++
++pub fn initDap(io_: Io) void {
++    io = io_;
++    enabled = true;
++    dap = true;
++    in_reader = Io.File.stdin().readerStreaming(io, &in_buf);
++    out_writer = Io.File.stdout().writer(io, &out_buf);
++}
++
++pub fn enableTrace() void {
++    enabled = true;
++}
++
++fn readMessage() ?std.json.Parsed(std.json.Value) {
++    const in = &in_reader.interface;
++    var len: usize = 0;
++    while (true) {
++        const line = in.takeDelimiterInclusive('\n') catch return null;
++        const t = std.mem.trim(u8, line, "\r\n");
++        if (t.len == 0) break;
++        const prefix = "Content-Length:";
++        if (std.ascii.startsWithIgnoreCase(t, prefix)) len = std.fmt.parseInt(usize, std.mem.trim(u8, t[prefix.len..], " "), 10) catch return null;
++    }
++    if (len == 0) return null;
++    const body = in.readAlloc(gpa, len) catch return null;
++    defer gpa.free(body);
++    return std.json.parseFromSlice(std.json.Value, gpa, body, .{ .allocate = .alloc_always }) catch null;
++}
++
++fn sendRaw(json: []const u8) void {
++    const out = &out_writer.interface;
++    out.print("Content-Length: {d}\r\n\r\n", .{json.len}) catch return;
++    out.writeAll(json) catch return;
++    out.flush() catch return;
++}
++
++fn send(msg: anytype) void {
++    const json = std.json.Stringify.valueAlloc(gpa, msg, .{ .emit_null_optional_fields = false }) catch return;
++    defer gpa.free(json);
++    sendRaw(json);
++}
++
++fn event(name: []const u8, body: anytype) void {
++    seq += 1;
++    send(.{ .seq = seq, .type = "event", .event = name, .body = body });
++}
++
++fn respond(req_seq: i64, command: []const u8, ok: bool, body: anytype, message: ?[]const u8) void {
++    seq += 1;
++    send(.{ .seq = seq, .type = "response", .request_seq = req_seq, .success = ok, .command = command, .message = message, .body = body });
++}
++
++fn str(v: std.json.Value, key: []const u8) ?[]const u8 {
++    if (v != .object) return null;
++    const x = v.object.get(key) orelse return null;
++    return if (x == .string) x.string else null;
++}
++
++fn int(v: std.json.Value, key: []const u8) ?i64 {
++    if (v != .object) return null;
++    const x = v.object.get(key) orelse return null;
++    return if (x == .integer) x.integer else null;
++}
++
++fn boolean(v: std.json.Value, key: []const u8) ?bool {
++    if (v != .object) return null;
++    const x = v.object.get(key) orelse return null;
++    return if (x == .bool) x.bool else null;
++}
++
++fn field(v: std.json.Value, key: []const u8) ?std.json.Value {
++    if (v != .object) return null;
++    return v.object.get(key);
++}
++
++fn setBreakpoints(args: std.json.Value) []const u32 {
++    const path = if (field(args, "source")) |s| str(s, "path") orelse "" else "";
++    var lines: std.ArrayList(u32) = .empty;
++    if (field(args, "breakpoints")) |list| if (list == .array) for (list.array.items) |b| {
++        if (int(b, "line")) |l| if (l > 0) lines.append(gpa, @intCast(l)) catch {};
++    };
++    if (path.len > 0) {
++        const key = gpa.dupe(u8, path) catch return &.{};
++        if (breakpoints.fetchRemove(key)) |old| {
++            gpa.free(old.key);
++            var o = old.value;
++            o.deinit(gpa);
++        }
++        breakpoints.put(gpa, key, lines) catch {};
++        return lines.items;
++    }
++    return &.{};
++}
++
++const Done = enum { configured, resume_run, disconnect };
++
++/// Answer requests until the client lets the compiler go on. `stopped` is false while setting up.
++fn serve(stopped: bool) Done {
++    while (true) {
++        const parsed = readMessage() orelse return .disconnect;
++        defer parsed.deinit();
++        const m = parsed.value;
++        const cmd = str(m, "command") orelse continue;
++        const rs: i64 = int(m, "seq") orelse 0;
++        const args = field(m, "arguments") orelse .null;
++        if (eq(cmd, "initialize")) {
++            respond(rs, cmd, true, .{
++                .supportsConfigurationDoneRequest = true,
++                .supportsExceptionInfoRequest = true,
++                .exceptionBreakpointFilters = [_]struct { filter: []const u8, label: []const u8, default: bool }{
++                    .{ .filter = "compile_error", .label = "Compile errors", .default = false },
++                },
++            }, null);
++        } else if (eq(cmd, "launch")) {
++            applyLaunch(args);
++            respond(rs, cmd, true, null, null);
++            event("initialized", null);
++        } else if (eq(cmd, "setBreakpoints")) {
++            const lines = setBreakpoints(args);
++            var out: std.ArrayList(struct { verified: bool, line: u32 }) = .empty;
++            defer out.deinit(gpa);
++            for (lines) |l| out.append(gpa, .{ .verified = true, .line = l }) catch {};
++            respond(rs, cmd, true, .{ .breakpoints = out.items }, null);
++        } else if (eq(cmd, "setExceptionBreakpoints")) {
++            break_compile_error = false;
++            if (field(args, "filters")) |fl| if (fl == .array) for (fl.array.items) |x| {
++                if (x == .string and eq(x.string, "compile_error")) break_compile_error = true;
++            };
++            respond(rs, cmd, true, .{}, null);
++        } else if (eq(cmd, "configurationDone")) {
++            respond(rs, cmd, true, null, null);
++            return .configured;
++        } else if (eq(cmd, "threads")) {
++            respond(rs, cmd, true, .{ .threads = [_]struct { id: i64, name: []const u8 }{.{ .id = 1, .name = "semantic analysis" }} }, null);
++        } else if (eq(cmd, "stackTrace")) {
++            stackTrace(rs, cmd);
++        } else if (eq(cmd, "scopes")) {
++            const fid = int(args, "frameId") orelse 0;
++            respond(rs, cmd, true, .{ .scopes = [_]struct { name: []const u8, variablesReference: i64, expensive: bool }{
++                .{ .name = "Locals", .variablesReference = fid + 1, .expensive = false },
++            } }, null);
++        } else if (eq(cmd, "variables")) {
++            variablesOf(rs, cmd, (int(args, "variablesReference") orelse 1) - 1);
++        } else if (eq(cmd, "exceptionInfo")) {
++            respond(rs, cmd, true, .{ .exceptionId = "compile_error", .description = stop_text, .breakMode = "always" }, null);
++        } else if (eq(cmd, "continue")) {
++            respond(rs, cmd, true, .{ .allThreadsContinued = true }, null);
++            step = .run;
++            if (stopped) return .resume_run;
++        } else if (eq(cmd, "next") or eq(cmd, "stepIn") or eq(cmd, "stepOut")) {
++            respond(rs, cmd, true, null, null);
++            step = if (eq(cmd, "next")) .over else if (eq(cmd, "stepIn")) .in else .out;
++            step_depth = frames.items.len;
++            if (stopped) return .resume_run;
++        } else if (eq(cmd, "disconnect") or eq(cmd, "terminate")) {
++            respond(rs, cmd, true, null, null);
++            return .disconnect;
++        } else {
++            respond(rs, cmd, false, null, "unsupported request");
++        }
++    }
++}
++
++fn eq(a: []const u8, b: []const u8) bool {
++    return std.mem.eql(u8, a, b);
++}
++
++fn applyLaunch(args: std.json.Value) void {
++    if (str(args, "sourceRoot")) |s| source_root = gpa.dupe(u8, s) catch "";
++    stop_on_entry = boolean(args, "stopOnEntry") orelse false;
++    if (str(args, "cacheDir")) |s| launch.cache_dir = gpa.dupe(u8, s) catch "";
++    if (field(args, "target")) |t| {
++        if (str(t, "file")) |f| target_file = gpa.dupe(u8, f) catch "";
++        target_start = @intCast(@max(int(t, "startLine") orelse 0, 0));
++        target_end = @intCast(@max(int(t, "endLine") orelse std.math.maxInt(i32), 0));
++    }
++    if (field(args, "zigArgs")) |za| if (za == .array) {
++        var list: std.ArrayList([]const u8) = .empty;
++        for (za.array.items) |x| if (x == .string) list.append(gpa, gpa.dupe(u8, x.string) catch continue) catch {};
++        launch.zig_args = list.items;
++    };
++}
++
++fn stackTrace(rs: i64, cmd: []const u8) void {
++    const Out = struct {
++        id: i64,
++        name: []const u8,
++        source: struct { path: []const u8 },
++        line: u32,
++        column: u32,
++        presentationHint: ?[]const u8 = null,
++    };
++    var out: std.ArrayList(Out) = .empty;
++    defer out.deinit(gpa);
++    var i = frames.items.len;
++    while (i > 0) {
++        i -= 1;
++        const f = frames.items[i];
++        if (!f.resolved or f.line == 0) continue;
++        out.append(gpa, .{ .id = @intCast(i), .name = f.name, .source = .{ .path = f.file }, .line = f.line, .column = f.col, .presentationHint = if (f.in_scope) null else "subtle" }) catch {};
++    }
++    respond(rs, cmd, true, .{ .stackFrames = out.items, .totalFrames = out.items.len }, null);
++}
++
++fn variablesOf(rs: i64, cmd: []const u8, frame: i64) void {
++    const Out = struct { name: []const u8, value: []const u8, variablesReference: i64 = 0 };
++    var out: std.ArrayList(Out) = .empty;
++    defer {
++        for (out.items) |o| gpa.free(o.value);
++        out.deinit(gpa);
++    }
++    for (locals.items) |l| {
++        if (l.frame != frame) continue;
++        out.append(gpa, .{ .name = l.name, .value = localText(l) }) catch {};
++    }
++    respond(rs, cmd, true, .{ .variables = out.items }, null);
++}
++
++/// Pause the compiler here: tell the client, then serve requests until it resumes.
++fn stopHere(reason: []const u8, text: []const u8) void {
++    stop_text = text;
++    event("stopped", .{ .reason = reason, .threadId = 1, .allThreadsStopped = true, .text = text });
++    switch (serve(true)) {
++        .resume_run => {},
++        else => {
++            finish(0);
++            std.process.exit(0);
++        },
++    }
++}
++
++/// Before the compilation starts: run the set-up handshake. Returns false when the client left.
++pub fn handshake() bool {
++    return serve(false) == .configured;
++}
++
++/// The compilation ended (or the session did): tell the client.
++pub fn finish(code: u8) void {
++    if (!dap or terminated_sent) return;
++    terminated_sent = true;
++    event("exited", .{ .exitCode = code });
++    event("terminated", .{});
++}

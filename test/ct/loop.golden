@@ -1,0 +1,23 @@
+stopped breakpoint
+  comptime loop.zig:10
+  | total = 0, i = 0
+stopped step
+  square loop.zig:2
+  comptime loop.zig:10
+stopped step
+  square loop.zig:3
+  comptime loop.zig:10
+  | y = 0
+stopped step
+  comptime loop.zig:11
+  | total = 0, i = 0, s = 1
+stopped step
+  comptime loop.zig:12
+  | total = 1, i = 0, s = 1
+stopped breakpoint
+  comptime loop.zig:10
+  | total = 1, i = 1
+stopped breakpoint
+  comptime loop.zig:10
+  | total = 3, i = 2
+terminated

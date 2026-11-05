@@ -44,6 +44,7 @@ pub const TestPanel = test_panel.TestPanel;
 pub const dap_client = @import("ide/dap/client.zig");
 pub const dap_session = @import("ide/dap/session.zig");
 pub const dap_adapters = @import("ide/dap/adapters.zig");
+pub const dap_zigct = @import("ide/dap/zigct.zig");
 pub const debugger = @import("ide/debugger.zig");
 pub const debug_marks = @import("ide/debug_marks.zig");
 pub const debug_panel = @import("ide/debug_panel.zig");
@@ -81,6 +82,7 @@ test {
     _ = dap_client;
     _ = dap_session;
     _ = dap_adapters;
+    _ = dap_zigct;
     _ = debugger;
     _ = debug_marks;
     _ = debug_panel;

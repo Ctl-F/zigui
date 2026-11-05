@@ -1,0 +1,18 @@
+stopped entry
+  comptime values.zig:5
+stopped step
+  comptime values.zig:6
+  | p = .{ .x = 1, .y = 2, .c = .green }
+stopped step
+  comptime values.zig:7
+  | p = .{ .x = 1, .y = 2, .c = .green }, arr = "\x01\x02\x03".*
+stopped step
+  comptime values.zig:8
+  | p = .{ .x = 1, .y = 2, .c = .green }, arr = "\x01\x02\x03".*, sl = "\x01\x02\x03"[0..3]
+stopped step
+  comptime values.zig:9
+  | p = .{ .x = 1, .y = 2, .c = .green }, arr = "\x01\x02\x03".*, sl = "\x01\x02\x03"[0..3], q = .{ .x = 1, .y = 2, .c = .green }
+stopped step
+  comptime values.zig:10
+  | p = .{ .x = 1, .y = 2, .c = .green }, arr = "\x01\x02\x03".*, sl = "\x01\x02\x03"[0..3], q = .{ .x = 11, .y = 2, .c = .green }
+terminated

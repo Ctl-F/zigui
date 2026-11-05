@@ -480,6 +480,13 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   Editor gutter marks plus an `exec_line` decoration; invisible `tracker`
   decorations keep breakpoints on their code lines. F5 debugs, Ctrl+F5 runs.
   Zig's self-hosted backend has no locals under lldb: build with `use_llvm`.
+- Comptime debugger (`tools/zigct`, `ide/dap/zigct.zig`): `zigct` is the Zig 0.17.0
+  compiler built from the official tarball plus a patch (`build.sh` downloads, verifies
+  the sha256, patches, builds; nothing is vendored). The compiler thread serves DAP
+  itself while it is paused inside Sema (no threads), with hooks at statement
+  boundaries, local declarations, body entry/exit (frames) and errors; AstGen is
+  patched to emit `dbg_stmt`/`dbg_var` in comptime scopes, so zigct always uses its
+  own cache. Golden transcripts in `test/ct/` (skipped when zigct is not built).
 - Move lines: `Editor.moveLines(delta, now)` swaps the lines of a single selection with
   its neighbour (Alt+Up/Down, also Ctrl+Alt); adding a cursor moved to
   Ctrl+Alt+Shift+Up/Down. Handles a last line without a terminator and CRLF.
