@@ -4,10 +4,11 @@ stopped breakpoint
 stopped step
   square loop.zig:2
   comptime loop.zig:10
+  | x = 0
 stopped step
   square loop.zig:3
   comptime loop.zig:10
-  | y = 0
+  | x = 0, y = 0
 stopped step
   comptime loop.zig:11
   | total = 0, i = 0, s = 1

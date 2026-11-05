@@ -67,7 +67,30 @@
      try sema.addDbgVar(block, operand, air_tag, name);
  }
  
-@@ -26165,6 +26178,7 @@
+@@ -7334,6 +7347,22 @@
+         }
+     }
+ 
++    if (zct.enabled and block.isComptime()) {
++        // zigct: the arguments of a comptime call are the new frame's first locals.
++        const zir_tags = sema.code.instructions.items(.tag);
++        const zir_datas = sema.code.instructions.items(.data);
++        for (fn_zir_info.param_body) |inst| switch (zir_tags[@backingInt(inst)]) {
++            .param, .param_comptime => {
++                const extra = sema.code.extraData(Zir.Inst.Param, zir_datas[@backingInt(inst)].pl_tok.payload_index);
++                zct.pendingParam(sema.code.nullTerminatedString(extra.data.name), sema.resolveValue(sema.inst_map.get(inst).?));
++            },
++            .param_anytype, .param_anytype_comptime => {
++                zct.pendingParam(zir_datas[@backingInt(inst)].str_tok.get(sema.code), sema.resolveValue(sema.inst_map.get(inst).?));
++            },
++            else => {},
++        };
++    }
++
+     if (!block.isComptime() and !block.is_typeof) {
+         const zir_tags = sema.code.instructions.items(.tag);
+         const zir_datas = sema.code.instructions.items(.data);
+@@ -26165,6 +26194,7 @@
  
  fn emitBackwardBranch(sema: *Sema, block: *Block, src: LazySrcLoc) !void {
      sema.branch_count += 1;
@@ -75,7 +98,7 @@
      if (sema.branch_count > sema.branch_quota) {
          const msg = msg: {
              const msg = try sema.errMsg(
-@@ -35395,6 +35409,7 @@
+@@ -35395,6 +35425,7 @@
          else => |e| return e,
      };
  
@@ -83,7 +106,7 @@
      return .fromType(ty);
  }
  fn zirUnionDecl(
-@@ -35471,6 +35486,7 @@
+@@ -35471,6 +35502,7 @@
          else => |e| return e,
      };
  
@@ -91,7 +114,7 @@
      return .fromType(ty);
  }
  fn zirEnumDecl(
-@@ -35526,6 +35542,7 @@
+@@ -35526,6 +35558,7 @@
          else => |e| return e,
      };
  
@@ -99,7 +122,7 @@
      return .fromType(ty);
  }
  fn zirOpaqueDecl(
-@@ -35578,6 +35595,7 @@
+@@ -35578,6 +35611,7 @@
          else => |e| return e,
      };
  
@@ -240,7 +263,7 @@
          const last = gz.instructions.items[gz.instructions.items.len - 1];
 --- /dev/null
 +++ b/src/zct_hook.zig
-@@ -0,0 +1,829 @@
+@@ -0,0 +1,844 @@
 +//! zigct: a comptime debugger inside the compiler. Sema calls the entry points below while it
 +//! evaluates comptime code (see the patch in tools/zigct/patches). Everything is a no-op unless
 +//! `enabled`. Two modes:
@@ -295,6 +318,14 @@
 +
 +pub const Mark = usize;
 +
++const Pending = struct { name: []const u8, val: ?Value };
++/// Arguments of a comptime call, noted before the callee's body is entered.
++var pending: std.ArrayList(Pending) = .empty;
++
++pub fn pendingParam(name: []const u8, val: ?Value) void {
++    pending.append(gpa, .{ .name = name, .val = val }) catch {};
++}
++
 +pub fn enterBody(sema: *Sema, block: *Sema.Block) Mark {
 +    var push = true;
 +    if (frames.items.len > 0) {
@@ -303,6 +334,13 @@
 +    }
 +    if (push) frames.append(gpa, .{ .sema = sema, .inlining = block.inlining, .name = frameName(sema, block) }) catch @panic("OOM");
 +    bodies.append(gpa, .{ .locals = locals.items.len, .pushed_frame = push }) catch @panic("OOM");
++    if (pending.items.len > 0) {
++        // Only a new inline-call frame takes them (a lexical body inside it has none pending).
++        if (push) for (pending.items) |p| {
++            locals.append(gpa, .{ .sema = sema, .name = p.name, .val = p.val, .ptr_ty = null, .block = block, .frame = frames.items.len - 1 }) catch {};
++        };
++        pending.clearRetainingCapacity();
++    }
 +    return bodies.items.len;
 +}
 +

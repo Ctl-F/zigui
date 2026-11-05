@@ -1,4 +1,5 @@
 stopped exception: too big
   bad error.zig:2
   comptime error.zig:8
+  | v = 2
 terminated
