@@ -112,6 +112,8 @@ pub const Session = struct {
     stop_reason: []u8 = &.{},
     stop_text: []u8 = &.{},
     thread_id: i64 = 0,
+    /// Counts up at every stop (the UI opens the stop's file when it changes).
+    stop_count: u32 = 0,
     /// The stack of the stopped thread, innermost first; `selected` is the frame the panels show.
     frames: []Frame = &.{},
     selected: usize = 0,
@@ -301,7 +303,7 @@ pub const Session = struct {
             done.append(self.gpa, b.file) catch {};
             self.sendFile(b.file);
         }
-        _ = self.client.request("configurationDone", .{}, client_mod.ResponseHook.bind(self, onConfigured)) catch {};
+        _ = self.client.request("configurationDone", struct {}{}, client_mod.ResponseHook.bind(self, onConfigured)) catch {};
     }
 
     fn onConfigured(self: *Session, res: *const client_mod.Response) void {
@@ -402,6 +404,7 @@ pub const Session = struct {
         if (body != .object) return;
         self.dropSnapshot();
         self.state = .stopped;
+        self.stop_count +%= 1;
         self.thread_id = intOf(body.object.get("threadId")) orelse self.thread_id;
         self.replace(&self.stop_reason, strOf(body.object.get("reason")) orelse "");
         self.replace(&self.stop_text, strOf(body.object.get("description")) orelse strOf(body.object.get("text")) orelse "");

@@ -25,7 +25,13 @@ const ide = zigui.ide;
 
 /// The IDE's key bindings (the `mod` key is Ctrl, or Cmd on macOS); users change them in a keymap file.
 const default_bindings = [_][2][]const u8{
-    .{ "f5", "ide.run" },
+    .{ "f5", "debug.start" },
+    .{ "mod+f5", "ide.run" },
+    .{ "shift+f5", "debug.stop" },
+    .{ "f9", "debug.toggle_breakpoint" },
+    .{ "f10", "debug.step_over" },
+    .{ "f11", "debug.step_in" },
+    .{ "shift+f11", "debug.step_out" },
     .{ "mod+b", "ide.build" },
     .{ "ctrl+shift+f6", "ide.restart" },
     .{ "ctrl+shift+f5", "ide.build_restart" },
@@ -126,6 +132,13 @@ const App = struct {
     session_enabled: bool = true,
     /// A build was started to be followed by a restart if it succeeds.
     restart_after_build: bool = false,
+    dbg: *ide.debugger.Debugger = undefined,
+    dbgp: *ide.DebugPanel = undefined,
+    debug_dock_panel: *zigui.dock.Panel = undefined,
+    /// Start the debugger when the build that is running succeeds.
+    debug_after_build: bool = false,
+    debug_stop_seen: u32 = 0,
+    debug_ready: bool = false,
     terminal_panel: *zigui.dock.Panel = undefined,
     files_panel: *zigui.dock.Panel = undefined,
     search_panel: *zigui.dock.Panel = undefined,
@@ -181,6 +194,108 @@ const App = struct {
             var buf: [200]u8 = undefined;
             self.status.setText(std.fmt.bufPrint(&buf, "could not open {s}: {s}", .{ rel, @errorName(err) }) catch "could not open file") catch {};
         };
+    }
+
+    // ---- debugging ----
+
+    /// The absolute path of a document.
+    fn docAbs(self: *App, path: []const u8) ?[]u8 {
+        if (std.fs.path.isAbsolute(path)) return self.gpa.dupe(u8, path) catch null;
+        return self.project.absPath(self.gpa, path) catch null;
+    }
+
+    fn onGutter(self: *App, doc: *ide.documents.Doc, line: usize) void {
+        const abs = self.docAbs(doc.path) orelse return;
+        defer self.gpa.free(abs);
+        _ = self.dbg.session.toggleBreakpoint(abs, @intCast(line + 1)) catch {};
+    }
+
+    /// What changed in the debugger: redraw marks, open the file where the program stopped.
+    fn debugChanged(self: *App) void {
+        if (!self.debug_ready) return;
+        ide.debug_marks.sync(self.gpa, self.docs, self.project, self.dbg.session);
+        const s = self.dbg.session;
+        if (s.state == .stopped and s.stop_count != self.debug_stop_seen and s.frames.len > 0) {
+            const f = s.frames[0];
+            if (f.path.len > 0 and f.line > 0) {
+                self.debug_stop_seen = s.stop_count;
+                const rel = self.project.relPath(f.path) orelse f.path;
+                _ = self.docs.open(rel, f.line, @max(f.column, 1)) catch {};
+                ide.debug_marks.sync(self.gpa, self.docs, self.project, s);
+            }
+        }
+        self.dbgp.refresh();
+    }
+
+    fn pollDebug(self: *App) void {
+        if (!self.debug_ready) return;
+        self.dbg.poll(self.ui.now_ms);
+        if (ide.debug_marks.drift(self.gpa, self.docs, self.project, self.dbg.session)) self.debugChanged();
+        if (self.debug_after_build and !self.output.running) {
+            self.debug_after_build = false;
+            if (self.output.exit_code == 0) self.debugLaunch() else self.setStatus("build failed: not debugging", .{});
+        }
+    }
+
+    /// F5: continue when stopped, else build and start.
+    fn debugStart(self: *App) void {
+        const s = self.dbg.session;
+        if (s.state == .stopped) return s.continueRun();
+        if (s.active() or self.debug_after_build) return;
+        self.showPanel(self.debug_dock_panel);
+        if (self.dbg.adapter() == null) {
+            const note = self.dbg.missingNote();
+            defer self.gpa.free(note);
+            self.dbgp.clearConsole();
+            s.say(note);
+            self.setStatus("{s}", .{note});
+            self.dbgp.refresh();
+            return;
+        }
+        if (self.dbg.config.program.len > 0 and !self.project.hasBuildZig()) return self.debugLaunch();
+        self.runBuild("");
+        self.debug_after_build = self.output.running;
+        if (!self.debug_after_build) self.setStatus("could not start the build", .{});
+    }
+
+    fn debugLaunch(self: *App) void {
+        var why: []const u8 = "";
+        const program = self.dbg.findProgram(&why) orelse return self.setStatus("cannot debug: {s}", .{why});
+        defer self.gpa.free(program);
+        self.dbgp.clearConsole();
+        self.setStatus("debugging {s}", .{program});
+        self.dbg.start(.{ .program = program, .args = self.dbg.config.args, .cwd = self.dbg.config.cwd, .stop_on_entry = self.dbg.config.stop_on_entry }) catch |err| {
+            self.setStatus("could not start debugging: {s}", .{@errorName(err)});
+        };
+    }
+
+    fn debugCommand(self: *App, name: []const u8) void {
+        const eq = std.mem.eql;
+        const s = self.dbg.session;
+        if (eq(u8, name, "debug.start")) {
+            self.debugStart();
+        } else if (eq(u8, name, "debug.stop")) {
+            self.debug_after_build = false;
+            self.dbg.stop();
+        } else if (eq(u8, name, "debug.step_over")) {
+            s.stepOver();
+        } else if (eq(u8, name, "debug.step_in")) {
+            s.stepIn();
+        } else if (eq(u8, name, "debug.step_out")) {
+            s.stepOut();
+        } else if (eq(u8, name, "debug.toggle_breakpoint")) {
+            const d = self.docs.active() orelse return;
+            const ed = d.editor.core();
+            const line = ed.doc.lineOfOffset(ed.primaryHead());
+            self.onGutter(d, line);
+        } else if (eq(u8, name, "debug.remove_breakpoints")) {
+            while (s.breakpoints.items.len > 0) {
+                const b = s.breakpoints.items[s.breakpoints.items.len - 1];
+                const file = self.gpa.dupe(u8, b.file) catch return;
+                defer self.gpa.free(file);
+                s.removeBreakpoint(file, b.line);
+            }
+        }
     }
 
     fn runBuild(self: *App, step: []const u8) void {
@@ -394,6 +509,11 @@ const App = struct {
     }
 
     /// A document was saved: reread the settings or keymap if that is what it was.
+    fn gutterThunk(ctx: ?*anyopaque, doc: *ide.documents.Doc, line: usize) void {
+        const self: *App = @ptrCast(@alignCast(ctx.?));
+        self.onGutter(doc, line);
+    }
+
     fn savedThunk(ctx: ?*anyopaque, doc: *ide.documents.Doc) void {
         const self: *App = @ptrCast(@alignCast(ctx.?));
         self.onSaved(doc);
@@ -425,6 +545,8 @@ const App = struct {
             self.restart_after_build = self.output.running;
         } else if (eq(u8, name, "ide.build")) {
             self.runBuild("");
+        } else if (std.mem.startsWith(u8, name, "debug.")) {
+            self.debugCommand(name);
         } else if (eq(u8, name, "ide.run")) {
             self.runBuild("run");
         } else if (eq(u8, name, "ide.test")) {
@@ -465,6 +587,8 @@ const App = struct {
             self.showPanel(self.files_panel);
         } else if (eq(u8, name, "view.search")) {
             self.showPanel(self.search_panel);
+        } else if (eq(u8, name, "view.debug")) {
+            self.showPanel(self.debug_dock_panel);
         } else if (eq(u8, name, "view.tests")) {
             self.showPanel(self.tests_panel);
             self.testp.refresh();
@@ -714,6 +838,7 @@ const App = struct {
         self.zv.poll();
         self.gitp.poll();
         self.testp.poll();
+        self.pollDebug();
         self.watch.poll();
         self.docs.poll();
         self.lsp.poll();
@@ -728,8 +853,15 @@ const App = struct {
 fn runCommand(app: *App, ui: *Ui, cmd: []const u8) void {
     if (std.mem.startsWith(u8, cmd, "sleep ")) {
         const ms = std.fmt.parseInt(u64, cmd["sleep ".len..], 10) catch 0;
-        var ts: std.os.linux.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) };
-        _ = std.os.linux.nanosleep(&ts, null);
+        // Sleep in slices, polling workers (debugger, build...) as the real loop would.
+        var left = ms;
+        while (left > 0) {
+            const slice: u64 = @min(left, 50);
+            var ts: std.os.linux.timespec = .{ .sec = 0, .nsec = @intCast(@as(u64, slice) * 1_000_000) };
+            _ = std.os.linux.nanosleep(&ts, null);
+            app.poll();
+            left -= slice;
+        }
         app.poll();
         return;
     }
@@ -1083,6 +1215,19 @@ pub fn main(init: std.process.Init) !void {
     });
     defer app.testp.destroy();
     try dock.dockTab(tests_panel, output_panel);
+    // The debugger: the adapter, the session, breakpoints from .zigide/debug.zon, the panel and the editor marks.
+    app.dbg = try ide.debugger.Debugger.create(gpa, io, &project, init.environ_map, .{ .wake = sdl.wake, .adapter_path = app.loaded.settings.debug_adapter_path });
+    defer app.dbg.destroy();
+    const debug_panel = try dock.addPanel("Debug");
+    app.debug_dock_panel = debug_panel;
+    app.dbgp = try ide.DebugPanel.create(&ui, debug_panel.content, app.dbg, .{ .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt) });
+    defer app.dbgp.destroy();
+    try dock.dockTab(debug_panel, output_panel);
+    dock.activatePanel(output_panel);
+    app.dbg.on_change = ide.dap_session.ChangeHook.bind(&app, App.debugChanged);
+    app.docs.on_gutter = .{ .ctx = &app, .call = App.gutterThunk };
+    app.debug_ready = true;
+    app.debugChanged();
     dock.activatePanel(output_panel);
     if (app.loaded.settings.build_watch) {
         app.prev_build_watch = true;
@@ -1148,7 +1293,15 @@ pub fn main(init: std.process.Init) !void {
         .{ "nav.forward", "Go Forward" },
         .{ "build.watch_toggle", "Check Errors Continuously (zig build --watch)" },
         .{ "ide.build", "Build" },
-        .{ "ide.run", "Run" },
+        .{ "ide.run", "Run Without Debugging" },
+        .{ "debug.start", "Start Debugging / Continue" },
+        .{ "debug.stop", "Stop Debugging" },
+        .{ "debug.toggle_breakpoint", "Toggle Breakpoint" },
+        .{ "debug.step_over", "Step Over" },
+        .{ "debug.step_in", "Step Into" },
+        .{ "debug.step_out", "Step Out" },
+        .{ "debug.remove_breakpoints", "Remove All Breakpoints" },
+        .{ "view.debug", "Debug" },
         .{ "ide.test", "Run Tests" },
         .{ "ide.build_restart", "Build and Restart the IDE" },
         .{ "ide.restart", "Restart the IDE" },
@@ -1226,6 +1379,19 @@ pub fn main(init: std.process.Init) !void {
         .{ .separator = true },
         .{ .label = "Reset Panel Layout", .command = "view.reset_layout" },
     }, null);
+    try bar.addMenu("Debug", &.{
+        .{ .label = "Start Debugging / Continue", .command = "debug.start" },
+        .{ .label = "Run Without Debugging", .command = "ide.run" },
+        .{ .label = "Stop Debugging", .command = "debug.stop" },
+        .{ .separator = true },
+        .{ .label = "Step Over", .command = "debug.step_over" },
+        .{ .label = "Step Into", .command = "debug.step_in" },
+        .{ .label = "Step Out", .command = "debug.step_out" },
+        .{ .separator = true },
+        .{ .label = "Toggle Breakpoint", .command = "debug.toggle_breakpoint" },
+        .{ .label = "Remove All Breakpoints", .command = "debug.remove_breakpoints" },
+        .{ .label = "Debug Panel", .command = "view.debug" },
+    }, null);
     try bar.addMenu("Zig", &.{
         .{ .label = "Switch Zig Version...", .command = "zig.switch_version" },
         .{ .label = "Install Zig Version...", .command = "zig.install_version" },
@@ -1235,7 +1401,7 @@ pub fn main(init: std.process.Init) !void {
     }, null);
     try bar.addMenu("Build", &.{
         .{ .label = "Build", .command = "ide.build" },
-        .{ .label = "Run", .command = "ide.run" },
+        .{ .label = "Run Without Debugging", .command = "ide.run" },
         .{ .label = "Run Tests", .command = "ide.test" },
         .{ .separator = true },
         .{ .label = "Build and Restart the IDE", .command = "ide.build_restart" },

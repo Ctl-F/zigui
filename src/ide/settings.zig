@@ -41,6 +41,8 @@ pub const Settings = struct {
     build_watch_step: []const u8 = "",
     /// Pass -fincremental, so a rebuild recompiles only what an edit touched.
     build_watch_incremental: bool = true,
+    /// The debug adapter program ("" = look for lldb-dap, then GDB's DAP mode). See debugger docs.
+    debug_adapter_path: []const u8 = "",
     /// Index the packages and C headers `build.zig` brings in, so Ctrl+, finds their names
     /// (headers are translated with `zig translate-c` and cached; see build_modules.zig).
     index_dependencies: bool = true,
@@ -97,6 +99,9 @@ pub const Settings = struct {
         } else if (eq(u8, name, "build_watch")) {
             if (v != .bool) return false;
             self.build_watch = v.bool;
+        } else if (eq(u8, name, "debug_adapter_path")) {
+            if (v != .string) return false;
+            self.debug_adapter_path = arena.dupe(u8, v.string) catch return false;
         } else if (eq(u8, name, "build_watch_incremental")) {
             if (v != .bool) return false;
             self.build_watch_incremental = v.bool;
@@ -134,6 +139,8 @@ pub const template =
     \\    .build_watch_incremental = true,
     \\    // Ctrl+, also searches the packages and C headers the build brings in (read from build.zig and build.zig.zon).
     \\    .index_dependencies = true,
+    \\    // The debugger: the adapter program ("" = lldb-dap, else gdb with DAP).
+    \\    .debug_adapter_path = "",
     \\    // Reopen the last session's files and layout at startup.
     \\    .restore_session = true,
     \\    // Read at startup: the Zig language server ("" = $ZIGUI_ZLS or zls) and the terminal's shell ("" = $SHELL).

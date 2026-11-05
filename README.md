@@ -472,6 +472,14 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   --branch`; the panel lists staged/changes/untracked, shows the diff with
   `added_line` tints, and stages, unstages, discards (confirmed), commits,
   stashes and pushes. Refreshes after actions, saves and every 5 s.
+- Debugger (`ide/dap/{client,session,adapters}.zig`, `ide/debugger.zig`,
+  `ide/debug_marks.zig`, `ide/debug_panel.zig`): a DAP client over the LSP
+  framing (`Content-Length`), a `Session` state machine (frames, lazy variables,
+  breakpoints, stop events; tested against a fake adapter), `lldb-dap` first and
+  `gdb --interpreter=dap` as fallback, breakpoints in `.zigide/debug.zon`.
+  Editor gutter marks plus an `exec_line` decoration; invisible `tracker`
+  decorations keep breakpoints on their code lines. F5 debugs, Ctrl+F5 runs.
+  Zig's self-hosted backend has no locals under lldb: build with `use_llvm`.
 - Move lines: `Editor.moveLines(delta, now)` swaps the lines of a single selection with
   its neighbour (Alt+Up/Down, also Ctrl+Alt); adding a cursor moved to
   Ctrl+Alt+Shift+Up/Down. Handles a last line without a terminator and CRLF.

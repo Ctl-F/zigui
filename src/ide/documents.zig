@@ -69,6 +69,12 @@ pub const SavedHook = struct {
     call: *const fn (ctx: ?*anyopaque, doc: *Doc) void,
 };
 
+/// Called when the gutter's marks column of `doc` is clicked: the 0-based line.
+pub const GutterHook = struct {
+    ctx: ?*anyopaque = null,
+    call: *const fn (ctx: ?*anyopaque, doc: *Doc, line: usize) void,
+};
+
 pub const Options = struct {
     /// A panel to open the first document beside (and when no document is open).
     anchor: ?*Panel = null,
@@ -85,6 +91,8 @@ pub const Documents = struct {
     last_opened: ?*Doc = null,
     defaults: EditorDefaults = .{},
     on_saved: ?SavedHook = null,
+    /// A click on the marks column of an editor (breakpoints).
+    on_gutter: ?GutterHook = null,
     /// Suggestions for every editor opened from now on (see `enableCompletion`).
     completion: ?*Completion = null,
     zig: ?*ZigCompleter = null,
@@ -214,6 +222,13 @@ pub const Documents = struct {
         return self.project.absPath(self.gpa, path);
     }
 
+    fn onGutter(self: *Documents, ev: *@import("../core/event.zig").Event) void {
+        const h = self.on_gutter orelse return;
+        for (self.docs.items) |d| {
+            if (d.editor.node.eql(ev.current)) return h.call(h.ctx, d, d.editor.gutter_click_line);
+        }
+    }
+
     pub fn find(self: *const Documents, path: []const u8) ?*Doc {
         for (self.docs.items) |d| {
             if (std.mem.eql(u8, d.path, path)) return d;
@@ -272,6 +287,8 @@ pub const Documents = struct {
             .tab_width = self.defaults.tab_width,
             .size = self.defaults.size,
             .read_only = read_only,
+            .gutter_marks = true,
+            .on_gutter = .bind(self, onGutter),
         });
         find_bar.attach(ed);
         if (self.hover) |h| try h.attach(ed);

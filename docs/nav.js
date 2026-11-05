@@ -53,6 +53,7 @@
       ["modules.html", "Dependencies and C modules"],
       ["git.html", "Git panel"],
       ["tests.html", "Tests panel"],
+      ["debugging.html", "Debugging"],
       ["designer.html", "UI designer and handlers"],
       ["settings.html", "Settings, keys, sessions"],
       ["projects.html", "Projects: open and create"],

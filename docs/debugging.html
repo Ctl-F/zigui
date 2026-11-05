@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Debugging - zigui</title><link rel="stylesheet" href="style.css"></head>
+<body data-root=""><nav id="nav"></nav><main>
+<h1>Debugging</h1>
+<p>The IDE debugs your program through a <b>debug adapter</b> that speaks the Debug Adapter Protocol (DAP). It looks for <code>lldb-dap</code> first (also <code>lldb-vscode</code>, <code>lldb-dap-NN</code>, and the usual LLVM install folders) and falls back to <code>gdb --interpreter=dap</code> (gdb 14 or newer; best effort). If neither is found, the Debug console says what to install. Set <code>debug.adapter_path</code> in the <a href="settings.html">settings</a> to use a specific adapter.</p>
+
+<h2>Keys</h2>
+<table>
+<tr><th>Key</th><th>Does</th></tr>
+<tr><td>F5</td><td>Start debugging (saves all, runs <code>zig build</code>, launches the program under the adapter); when stopped, continue</td></tr>
+<tr><td>Ctrl+F5</td><td>Run without debugging (save all and <code>zig build run</code>, the old F5)</td></tr>
+<tr><td>Shift+F5</td><td>Stop</td></tr>
+<tr><td>F9</td><td>Toggle a breakpoint on the cursor line (or click the gutter beside the line number)</td></tr>
+<tr><td>F10 / F11 / Shift+F11</td><td>Step over / step in / step out</td></tr>
+</table>
+<p>All are commands (<code>debug.start</code>, <code>debug.stop</code>, <code>debug.toggle_breakpoint</code>, <code>debug.step_over</code>, <code>debug.step_in</code>, <code>debug.step_out</code>, <code>view.debug</code>) in the <b>Debug</b> menu and can be rebound.</p>
+
+<h2>The Debug panel</h2>
+<p><b>View &gt; Debug</b> (a tab beside Output) has a toolbar (Continue, Step Over, Step In, Step Out, Stop), the state, and: <b>Call Stack</b> (select a frame to see its locals and open its line), <b>Breakpoints</b> (double-click to open), <b>Variables</b> (Locals, Globals, Registers; children load when expanded and stay open across steps) and the <b>Debug Console</b> (the program's output, the adapter's messages and an expression box: type an expression and press Enter). The editor shows a red dot for a breakpoint (hollow = disabled, grey = not verified by the adapter, a different dot = conditional), a yellow arrow and a tinted line at the current line. Breakpoints follow their code when you edit the file above them.</p>
+
+<h2>Where things are kept</h2>
+<p>Breakpoints (and an optional run configuration) are saved in <code>.zigide/debug.zon</code>, with paths relative to the project:</p>
+<pre>.{
+    .breakpoints = .{
+        .{ .file = "src/main.zig", .line = 6 },
+    },
+    // optional; without it the IDE debugs the executable that `zig build` installed
+    // .program = "zig-out/bin/app", .args = .{ "--flag" }, .cwd = ".", .stop_on_entry = false,
+}</pre>
+<p>Without <code>.program</code> the IDE debugs the single executable in <code>zig-out/bin</code>.</p>
+
+<h2>Zig and variables</h2>
+<p>Stepping, breakpoints and call stacks work with any build. <b>Locals do not</b> with Zig's self-hosted x86_64 backend: lldb cannot read its DWARF variable locations, so the Locals scope is empty (the panel says so). Build the program with LLVM: in <code>build.zig</code> give the executable <code>.use_llvm = true</code>, or run <code>zig build -fllvm</code>.</p>
+
+<h2>Limits</h2>
+<ul>
+<li>Linux is the tested platform; macOS and Windows use the same code paths but are untested (on Windows use an lldb-dap or gdb build and set <code>debug.adapter_path</code> if it is not on PATH).</li>
+<li>No conditional-breakpoint editor yet (the file format and adapter support exist), no watch list, no comptime debugging.</li>
+<li>The adapter's requests to the client (run in terminal, ...) are answered with a failure, so the program's output appears in the Debug Console.</li>
+</ul>
+
+<h2>Code</h2>
+<p><code>ide.dap.client</code> (framing, requests, events), <code>ide.dap.session</code> (state, frames, variables, breakpoints; tested with a fake adapter), <code>ide.dap.adapters</code> (discovery), <code>ide.debugger.Debugger</code> (spawns the adapter, owns <code>debug.zon</code>; <code>poll</code> every loop), <code>ide.debug_marks</code> (editor marks) and <code>ide.DebugPanel</code>. One end-to-end test runs a real <code>lldb-dap</code> when it is installed. Headless: <code>cmd debug.toggle_breakpoint</code>, <code>cmd debug.start</code>.</p>
+</main><script src="nav.js"></script></body></html>

@@ -86,6 +86,8 @@ pub const DecorationKind = enum {
     added_line,
     /// Whole-line tint of the line a debugger is stopped on.
     exec_line,
+    /// Not drawn: a range that follows edits, so the host can ask where its text went.
+    tracker,
 };
 
 /// A byte range of the text with a look. Ranges follow edits: text before
@@ -1207,7 +1209,7 @@ pub const CodeEditor = struct {
             var i = lo;
             while (i < ds.items.len and ds.items[i].start <= le) : (i += 1) {
                 const d = ds.items[i];
-                if (d.end < ls or d.end == d.start) continue;
+                if (d.kind == .tracker or d.end < ls or d.end == d.start) continue;
                 const is_bg = switch (d.kind) {
                     .highlight, .current, .error_line, .warning_line, .note_line, .added_line, .exec_line => true,
                     else => false,
@@ -1219,6 +1221,7 @@ pub const CodeEditor = struct {
                 const x0 = origin_x + self.xOfOffset(ls, a);
                 const x1 = origin_x + self.xOfOffset(ls, b);
                 switch (d.kind) {
+                    .tracker => {},
                     .highlight => try list.fillRect(.{ .x = x0, .y = row_y, .w = x1 - x0, .h = m.line_h }, Paint.solid(colors.find_match)),
                     .current => try list.fillRect(.{ .x = x0, .y = row_y, .w = x1 - x0, .h = m.line_h }, Paint.solid(colors.find_current)),
                     .error_line, .warning_line, .note_line, .added_line, .exec_line => {
