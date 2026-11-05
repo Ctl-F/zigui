@@ -170,6 +170,7 @@ pub const DebugPanel = struct {
 
     fn updateStatus(self: *DebugPanel) void {
         const s = self.session();
+        if (self.debugger.preparing()) return self.status.setText("Compile-time debug (zigct): reading the build for the module graph...") catch {};
         var buf: [300]u8 = undefined;
         var buf2: [340]u8 = undefined;
         const text0: []const u8 = switch (s.state) {
@@ -198,7 +199,7 @@ pub const DebugPanel = struct {
         self.over_btn.setEnabled(stopped);
         self.into_btn.setEnabled(stopped);
         self.out_btn.setEnabled(stopped);
-        self.stop_btn.setEnabled(self.session().active());
+        self.stop_btn.setEnabled(self.session().active() or self.debugger.preparing());
     }
 
     // ---- stack and breakpoints ----

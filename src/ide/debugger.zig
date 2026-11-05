@@ -30,6 +30,8 @@ const project_mod = @import("project.zig");
 const adapters = @import("dap/adapters.zig");
 const zigct = @import("dap/zigct.zig");
 const comptime_scan = @import("comptime_scan.zig");
+const comptime_graph = @import("comptime_graph.zig");
+const builtin = @import("builtin");
 const session_mod = @import("dap/session.zig");
 const Session = session_mod.Session;
 
@@ -40,6 +42,9 @@ pub const config_path = ".zigide/debug.zon";
 pub const comptime_root = ".zigct-root.zig";
 
 pub const ComptimeOptions = struct {
+    /// Read the project's build for its module graph (a `build.zig` is needed); false evaluates
+    /// the file as a standalone one in the project folder.
+    read_build: bool = true,
     /// The file with the block (absolute) and the block's 1-based lines.
     file: []const u8,
     start_line: u32,
@@ -49,6 +54,14 @@ pub const ComptimeOptions = struct {
     /// The Zig installation's `lib` directory (the compiler reads `std` from there).
     zig_lib_dir: []const u8,
     stop_on_entry: bool = true,
+};
+
+const Prep = struct {
+    runner: *process.Runner,
+    text: std.ArrayListUnmanaged(u8) = .empty,
+    started_ms: u64,
+    last_data_ms: u64,
+    opts: ComptimeOptions,
 };
 
 pub const Options = struct {
@@ -94,8 +107,10 @@ pub const Debugger = struct {
     now_ms: u64 = 0,
     batch: std.ArrayListUnmanaged(process.Event) = .empty,
     on_change: ?session_mod.ChangeHook = null,
-    /// The synthetic root of a comptime session, removed when it ends.
-    ct_root_written: bool = false,
+    /// The files written for a comptime session (wrappers in the modules' folders), removed when it ends.
+    ct_files: std.ArrayListUnmanaged([]u8) = .empty,
+    /// Reading the build for a comptime session.
+    prep: ?*Prep = null,
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, project: *const project_mod.Project, environ: ?*const std.process.Environ.Map, opts: Options) !*Debugger {
         const self = try gpa.create(Debugger);
@@ -121,7 +136,9 @@ pub const Debugger = struct {
 
     pub fn destroy(self: *Debugger) void {
         self.save();
-        self.removeComptimeRoot();
+        self.cancelPrep();
+        self.removeComptimeFiles();
+        self.ct_files.deinit(self.gpa);
         if (self.runner) |r| r.destroy();
         for (self.batch.items) |*e| e.deinit(self.gpa);
         self.batch.deinit(self.gpa);
@@ -197,44 +214,166 @@ pub const Debugger = struct {
         try self.session.start(.{ .program = program, .args = opts.args, .cwd = cwd, .env = opts.env, .stop_on_entry = opts.stop_on_entry, .gdb = a.kind == .gdb });
     }
 
-    /// Debug one `comptime` block with zigct (see `dap/zigct.zig`). Problems are put in the console
-    /// and `failure`, and returned.
+    /// Debug one `comptime` block with zigct (see `dap/zigct.zig`). When the project has a
+    /// `build.zig` the module graph is read from it first (`comptime_graph.zig`; this takes a
+    /// moment: `preparing()` is true, `poll` continues), so `@import("dependency")` works.
+    /// Problems are put in the console and `failure`, and returned.
     pub fn startComptime(self: *Debugger, opts: ComptimeOptions) !void {
-        if (self.session.active()) return;
+        if (self.session.active() or self.prep != null) return;
         const ct = zigct.find(self.gpa, self.io, self.environ) orelse {
             self.refuse("the comptime debugger (zigct) is not built: use Zig > Build Comptime Debugger, or run tools/zigct/build.sh");
             return error.NoZigct;
         };
         defer self.gpa.free(ct);
-        const rel = self.project.relPath(opts.file) orelse {
+        if (self.project.relPath(opts.file) == null) {
             self.refuse("the block is outside the project");
             return error.OutsideProject;
-        };
-        const root_src = try comptime_scan.rootSource(self.gpa, rel, opts.fn_path);
-        defer self.gpa.free(root_src);
-        try self.project.writeFile(comptime_root, root_src);
-        self.ct_root_written = true;
-        const root_abs = try self.project.absPath(self.gpa, comptime_root);
-        defer self.gpa.free(root_abs);
-        const home = if (self.environ) |e| e.get("HOME") orelse "/tmp" else "/tmp";
-        const cache = try std.fmt.allocPrint(self.gpa, "{s}/.cache/zigui-ide/zigct/cache", .{home});
-        defer self.gpa.free(cache);
+        }
+        if (!self.project.hasBuildZig() or builtin.os.tag == .windows or !opts.read_build) return self.launchComptime(ct, opts, null);
 
-        const launch = try std.json.Stringify.valueAlloc(self.gpa, .{
-            .zigArgs = [_][]const u8{ root_abs, "--zig-lib-dir", opts.zig_lib_dir },
+        const home = if (self.environ) |e| e.get("HOME") orelse "/tmp" else "/tmp";
+        const cache = try std.fmt.allocPrint(self.gpa, "{s}/.cache/zigui-ide/zigct/graph-cache", .{home});
+        defer self.gpa.free(cache);
+        const lib_env = try std.fmt.allocPrint(self.gpa, "ZIG_LIB_DIR={s}", .{opts.zig_lib_dir});
+        defer self.gpa.free(lib_env);
+        const runner = process.Runner.start(self.gpa, self.io, .{
+            .argv = &.{ "env", "ZCT_DRYRUN=1", lib_env, ct, "build", "--verbose", "--cache-dir", cache },
+            .cwd = self.project.root,
+            .stdin = true,
+            .wake = self.wake,
+        }) catch |err| {
+            self.refuse("could not start zigct to read the build");
+            return err;
+        };
+        const p = try self.gpa.create(Prep);
+        p.* = .{
+            .runner = runner,
+            .started_ms = self.now_ms,
+            .last_data_ms = self.now_ms,
+            .opts = .{
+                .file = try self.gpa.dupe(u8, opts.file),
+                .start_line = opts.start_line,
+                .end_line = opts.end_line,
+                .fn_path = try self.gpa.dupe(u8, opts.fn_path),
+                .zig_lib_dir = try self.gpa.dupe(u8, opts.zig_lib_dir),
+                .stop_on_entry = opts.stop_on_entry,
+            },
+        };
+        self.prep = p;
+        self.session.say("reading the build to find the module graph...");
+        if (self.on_change) |h| h.call(h.ctx);
+    }
+
+    /// A comptime session is being prepared (the build is being read).
+    pub fn preparing(self: *const Debugger) bool {
+        return self.prep != null;
+    }
+
+    fn cancelPrep(self: *Debugger) void {
+        const p = self.prep orelse return;
+        self.prep = null;
+        p.runner.destroy();
+        p.text.deinit(self.gpa);
+        self.gpa.free(p.opts.file);
+        self.gpa.free(p.opts.fn_path);
+        self.gpa.free(p.opts.zig_lib_dir);
+        self.gpa.destroy(p);
+    }
+
+    fn pollPrep(self: *Debugger, now_ms: u64) void {
+        const p = self.prep orelse return;
+        var batch: std.ArrayListUnmanaged(process.Event) = .empty;
+        defer batch.deinit(self.gpa);
+        p.runner.drain(&batch);
+        var exited = false;
+        for (batch.items) |*e| {
+            switch (e.*) {
+                .chunk => |c| {
+                    p.text.appendSlice(self.gpa, c.bytes) catch {};
+                    p.last_data_ms = now_ms;
+                },
+                .exited => exited = true,
+            }
+            e.deinit(self.gpa);
+        }
+        const quiet = now_ms -% p.last_data_ms > 1500;
+        const long = now_ms -% p.started_ms > 300_000;
+        if (!exited and !long and !quiet) return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        // The parsed commands point into this copy: the build run's buffer is freed below.
+        const text = a.dupe(u8, p.text.items) catch return;
+        const compiles = comptime_graph.parse(a, text) catch &.{};
+        if (compiles.len == 0 and !exited and !long) return; // the build is still configuring
+        // Take over the options, then drop the build run.
+        const opts: ComptimeOptions = p.opts;
+        const file = a.dupe(u8, opts.file) catch return;
+        const fn_path = a.dupe(u8, opts.fn_path) catch return;
+        const lib = a.dupe(u8, opts.zig_lib_dir) catch return;
+        const text_tail = text[text.len -| 1500..];
+        var o2 = opts;
+        o2.file = file;
+        o2.fn_path = fn_path;
+        o2.zig_lib_dir = lib;
+        self.cancelPrep();
+
+        if (compiles.len == 0) {
+            self.session.say(text_tail);
+            return self.refuse("the build did not report any compile step: see the messages above");
+        }
+        const plan = comptime_graph.plan(a, compiles, self.project.root, file, fn_path) catch null;
+        if (plan == null) self.session.say("[this file is not in a module of the build: it is evaluated as a standalone file in the project folder]");
+        const ct = zigct.find(self.gpa, self.io, self.environ) orelse return self.refuse("zigct is not built");
+        defer self.gpa.free(ct);
+        self.launchComptime(ct, o2, plan) catch {};
+    }
+
+    fn launchComptime(self: *Debugger, ct: []const u8, opts: ComptimeOptions, plan: ?comptime_graph.Plan) !void {
+        const gpa = self.gpa;
+        var args: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer args.deinit(gpa);
+        var owned_root: ?[]u8 = null;
+        defer if (owned_root) |r| gpa.free(r);
+        if (plan) |pl| {
+            for (pl.files) |f| {
+                std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = f.path, .data = f.content }) catch |err| {
+                    self.removeComptimeFiles();
+                    self.refuse("could not write the files that make the compiler evaluate the block");
+                    return err;
+                };
+                try self.ct_files.append(gpa, try gpa.dupe(u8, f.path));
+            }
+            try args.appendSlice(gpa, pl.args);
+        } else {
+            const rel = self.project.relPath(opts.file).?;
+            const root_src = try comptime_scan.rootSource(gpa, rel, opts.fn_path);
+            defer gpa.free(root_src);
+            try self.project.writeFile(comptime_root, root_src);
+            owned_root = try self.project.absPath(gpa, comptime_root);
+            try self.ct_files.append(gpa, try gpa.dupe(u8, owned_root.?));
+            try args.append(gpa, owned_root.?);
+        }
+        try args.appendSlice(gpa, &.{ "--zig-lib-dir", opts.zig_lib_dir });
+
+        const home = if (self.environ) |e| e.get("HOME") orelse "/tmp" else "/tmp";
+        const cache = try std.fmt.allocPrint(gpa, "{s}/.cache/zigui-ide/zigct/cache", .{home});
+        defer gpa.free(cache);
+        const launch = try std.json.Stringify.valueAlloc(gpa, .{
+            .zigArgs = args.items,
             .sourceRoot = self.project.root,
             .cacheDir = cache,
             .stopOnEntry = opts.stop_on_entry,
             .target = .{ .file = opts.file, .startLine = opts.start_line, .endLine = opts.end_line },
         }, .{});
-        defer self.gpa.free(launch);
+        defer gpa.free(launch);
 
         if (self.runner) |r| {
             r.destroy();
             self.runner = null;
         }
-        self.runner = process.Runner.start(self.gpa, self.io, .{ .argv = &.{ ct, "dap-comptime" }, .cwd = self.project.root, .stdin = true, .wake = self.wake }) catch |err| {
-            self.removeComptimeRoot();
+        self.runner = process.Runner.start(gpa, self.io, .{ .argv = &.{ ct, "dap-comptime" }, .cwd = self.project.root, .stdin = true, .wake = self.wake }) catch |err| {
+            self.removeComptimeFiles();
             self.refuse("could not start zigct");
             return err;
         };
@@ -248,12 +387,12 @@ pub const Debugger = struct {
         if (self.on_change) |h| h.call(h.ctx);
     }
 
-    fn removeComptimeRoot(self: *Debugger) void {
-        if (!self.ct_root_written) return;
-        self.ct_root_written = false;
-        const abs = self.project.absPath(self.gpa, comptime_root) catch return;
-        defer self.gpa.free(abs);
-        std.Io.Dir.cwd().deleteFile(self.io, abs) catch {};
+    fn removeComptimeFiles(self: *Debugger) void {
+        for (self.ct_files.items) |path| {
+            std.Io.Dir.cwd().deleteFile(self.io, path) catch {};
+            self.gpa.free(path);
+        }
+        self.ct_files.clearRetainingCapacity();
     }
 
     /// Start with the run configuration from `debug.zon` (null `program` if there is none).
@@ -263,6 +402,12 @@ pub const Debugger = struct {
     }
 
     pub fn stop(self: *Debugger) void {
+        if (self.prep != null) {
+            self.cancelPrep();
+            self.session.say("[cancelled]");
+            if (self.on_change) |h| h.call(h.ctx);
+            return;
+        }
         self.session.stop();
     }
 
@@ -271,6 +416,7 @@ pub const Debugger = struct {
     /// Call every loop iteration with the UI's clock (`ui.now_ms`).
     pub fn poll(self: *Debugger, now_ms: u64) void {
         self.now_ms = now_ms;
+        self.pollPrep(now_ms);
         if (self.runner) |r| {
             r.drain(&self.batch);
             var ended = false;
@@ -299,7 +445,7 @@ pub const Debugger = struct {
                 self.runner = null;
             }
         }
-        if (self.ct_root_written and !self.session.active() and self.session.state != .starting) self.removeComptimeRoot();
+        if (self.ct_files.items.len > 0 and self.prep == null and !self.session.active()) self.removeComptimeFiles();
         if (self.dirty and now_ms -% self.dirty_since_ms > 800) self.save();
     }
 
@@ -428,7 +574,6 @@ pub const Debugger = struct {
 // ---- tests -----------------------------------------------------------------
 
 const testing = std.testing;
-const builtin = @import("builtin");
 const pty_common = @import("../platform/pty_common.zig");
 
 fn pumpUntil(d: *Debugger, tries: usize, comptime cond: fn (*Debugger) bool) !void {
@@ -617,7 +762,7 @@ test "comptime session end to end: a block in a function of an imported file, br
     const abs = try p.absPath(testing.allocator, "src/lib.zig");
     defer testing.allocator.free(abs);
     try d.session.setBreakpoint(abs, 6, true, "");
-    try d.startComptime(.{ .file = abs, .start_line = 4, .end_line = 8, .fn_path = "run", .zig_lib_dir = lib });
+    try d.startComptime(.{ .file = abs, .start_line = 4, .end_line = 8, .fn_path = "run", .zig_lib_dir = lib, .read_build = false });
     try testing.expect(d.session.isComptime());
     try pumpUntil(d, 30000, isStopped);
     const s = d.session;
@@ -647,4 +792,135 @@ test "comptime session end to end: a block in a function of an imported file, br
 
 fn isStoppedAgain(d: *Debugger) bool {
     return d.session.state == .stopped and d.session.stop_count >= 2 and isStopped(d);
+}
+
+fn stoppedAfter(d: *Debugger, count: u32) bool {
+    return d.session.state == .stopped and d.session.stop_count > count and isStopped(d);
+}
+
+test "comptime session in a project with a dependency: the build's module graph is used, so the block can import and step into the package" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var p = try project_mod.testProject(&tmp);
+    defer p.close();
+    try tmp.dir.createDirPath(testing.io, "mylib/src");
+    try p.writeFile("build.zig.zon",
+        \\.{
+        \\    .name = .depproj,
+        \\    .version = "0.0.1",
+        \\    .fingerprint = 0x30362a229c3f08a1,
+        \\    .minimum_zig_version = "0.17.0",
+        \\    .dependencies = .{ .mylib = .{ .path = "mylib" } },
+        \\    .paths = .{ "build.zig", "build.zig.zon", "src", "mylib" },
+        \\}
+        \\
+    );
+    try p.writeFile("mylib/build.zig.zon",
+        \\.{
+        \\    .name = .mylib,
+        \\    .version = "0.0.1",
+        \\    .fingerprint = 0xe7f9492974d36f0e,
+        \\    .paths = .{ "build.zig", "build.zig.zon", "src" },
+        \\}
+        \\
+    );
+    try p.writeFile("mylib/build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    _ = b.addModule("mylib", .{ .root_source_file = b.path("src/mylib.zig") });
+        \\}
+        \\
+    );
+    try p.writeFile("mylib/src/mylib.zig",
+        \\pub fn triple(x: u32) u32 {
+        \\    return x * 3;
+        \\}
+        \\
+    );
+    try p.writeFile("build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const mylib = b.dependency("mylib", .{}).module("mylib");
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "depproj",
+        \\        .root_module = b.createModule(.{
+        \\            .root_source_file = b.path("src/main.zig"),
+        \\            .target = b.standardTargetOptions(.{}),
+        \\            .optimize = b.standardOptimizeOption(.{}),
+        \\            .imports = &.{.{ .name = "mylib", .module = mylib }},
+        \\        }),
+        \\    });
+        \\    b.installArtifact(exe);
+        \\}
+        \\
+    );
+    try p.writeFile("src/main.zig",
+        \\const std = @import("std");
+        \\const mylib = @import("mylib");
+        \\
+        \\comptime {
+        \\    var t: u32 = 1;
+        \\    t = mylib.triple(t);
+        \\    if (t != 3) @compileError("bad");
+        \\}
+        \\
+        \\pub fn main() void {
+        \\    std.debug.print("{d}\n", .{mylib.triple(2)});
+        \\}
+        \\
+    );
+    var env = try testing.environ.createMap(testing.allocator);
+    defer env.deinit();
+    const d = try Debugger.create(testing.allocator, testing.io, &p, &env, .{});
+    defer d.destroy();
+    const ct = zigct.find(testing.allocator, testing.io, &env) orelse {
+        std.debug.print("zigct is not built: skipping (tools/zigct/build.sh)\n", .{});
+        return error.SkipZigTest;
+    };
+    testing.allocator.free(ct);
+    const lib = zigLibDir(testing.allocator, testing.io) orelse return error.SkipZigTest;
+    defer testing.allocator.free(lib);
+
+    const abs = try p.absPath(testing.allocator, "src/main.zig");
+    defer testing.allocator.free(abs);
+    try d.startComptime(.{ .file = abs, .start_line = 4, .end_line = 8, .zig_lib_dir = lib });
+    try testing.expect(d.preparing());
+    try pumpUntil(d, 120000, isStopped); // reading the build can take a while the first time
+    const s = d.session;
+    if (s.state != .stopped) {
+        for (s.console.items) |l| std.debug.print("console: {s}\n", .{l});
+        return error.TestUnexpectedResult;
+    }
+    try testing.expect(!d.preparing());
+    try testing.expectEqualStrings("entry", s.stop_reason);
+    try testing.expectEqual(@as(u32, 5), s.frames[0].line);
+    var count = s.stop_count;
+    s.stepOver();
+    try pumpUntil(d, 30000, struct {
+        fn f(dd: *Debugger) bool {
+            return dd.session.state == .stopped and dd.session.frames.len > 0 and dd.session.frames[0].line == 6 and isStopped(dd);
+        }
+    }.f);
+    try testing.expectEqual(@as(u32, 6), s.frames[0].line);
+    count = s.stop_count;
+    s.stepIn();
+    var tries: usize = 0;
+    while (tries < 15000 and !stoppedAfter(d, count)) : (tries += 1) {
+        d.poll(@intCast(tries * 2));
+        pty_common.sleepMs(2);
+    }
+    try testing.expect(std.mem.indexOf(u8, s.frames[0].name, "triple") != null);
+    try testing.expect(std.mem.endsWith(u8, s.frames[0].path, "mylib/src/mylib.zig"));
+    const locals = s.variables(s.scopes[0].reference).?;
+    try testing.expectEqualStrings("x", locals[0].name);
+    try testing.expectEqualStrings("1", locals[0].value);
+    // The wrapper files exist during the session and are gone after it.
+    try testing.expect(p.exists("src/.zigct-root.zig"));
+    try testing.expect(p.exists("src/.zigct-target.zig"));
+    s.continueRun();
+    try pumpUntil(d, 30000, isTerminated);
+    d.poll(0);
+    try testing.expect(!p.exists("src/.zigct-root.zig"));
+    try testing.expect(!p.exists("src/.zigct-target.zig"));
 }

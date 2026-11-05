@@ -493,6 +493,10 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   spawns zigct and starts a `Session` with raw launch arguments; the panels are shared.
   The build script and patch are embedded in the IDE (anonymous imports) and written out
   by Zig > Build Comptime Debugger. Alt+F5.
+  Module graph: `ZCT_DRYRUN=1 zigct build --verbose` (compile steps wait for their stdin to close,
+  so every artifact prints its command) is parsed by `comptime_graph.zig`; the artifact's root
+  module gets a wrapper root and a new `zct_target` module copies the settings/imports of the
+  module holding the block (wrappers are written in module folders and removed afterwards).
   CT-3: the hook keeps a handle table per stop so `variables` expands struct, array, slice,
   optional, union, pointer and `type` values lazily (readers only touch keys they have
   checked: Value accessors assert); `@compileLog` and errors become output events and

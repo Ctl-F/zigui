@@ -159,7 +159,38 @@
      if (process.can_replace and EnvVar.ZIG_IS_DETECTING_LIBC_PATHS.isSet(environ_map)) {
          dev.check(.cc_command);
          // In this case we have accidentally invoked ourselves as "the system C compiler"
-@@ -329,6 +335,23 @@
+@@ -317,6 +323,30 @@
+ 
+     const cmd = args[1];
+     const cmd_args = args[2..];
++    // zigct: `ZCT_DRYRUN=1 zigct build --verbose` prints the exact compile commands of a project's
++    // build (modules and dependencies included) without compiling anything: artifact compiles
++    // return at once, only the build script's own runner is compiled.
++    if (environ_map.get("ZCT_DRYRUN") != null) {
++        const is_compile = mem.eql(u8, cmd, "build-exe") or mem.eql(u8, cmd, "build-lib") or mem.eql(u8, cmd, "build-obj") or mem.eql(u8, cmd, "test") or mem.eql(u8, cmd, "test-obj");
++        if (is_compile) {
++            var runner = false;
++            for (cmd_args) |a| {
++                if (mem.indexOf(u8, a, "/compiler/configurer.zig") != null or mem.indexOf(u8, a, "build_runner.zig") != null) runner = true;
++            }
++            if (!runner) {
++                // Stay until the build ends (it closes our stdin), so that its other artifacts
++                // are started and print their commands too.
++                var buf: [256]u8 = undefined;
++                var rd = Io.File.stdin().readerStreaming(io, &buf);
++                while (true) {
++                    var sink: [256]u8 = undefined;
++                    const n = rd.interface.readSliceShort(&sink) catch break;
++                    if (n == 0) break;
++                }
++                process.exit(0);
++            }
++        }
++    }
+     switch (stringToEnum(Cmd, cmd) orelse {
+         std.log.info("{s}", .{usage});
+         fatal("unknown command: {s}", .{args[1]});
+@@ -329,6 +359,23 @@
              dev.check(.build_lib_command);
              return buildOutputType(gpa, arena, io, args, .{ .build = .Lib }, environ_map);
          },
@@ -183,7 +214,7 @@
          .@"build-obj" => {
              dev.check(.build_obj_command);
              return buildOutputType(gpa, arena, io, args, .{ .build = .Obj }, environ_map);
-@@ -3866,6 +3889,7 @@
+@@ -3866,6 +3913,7 @@
              error.CompileErrorsReported => {
                  assert(listen == .none);
                  saveState(comp, incremental);
@@ -191,7 +222,7 @@
                  process.exit(1);
              },
              else => |e| return e,
-@@ -3980,6 +4004,7 @@
+@@ -3980,6 +4028,7 @@
      }
  
      // Skip resource deallocation in release builds; let the OS do it.
@@ -263,7 +294,7 @@
          const last = gz.instructions.items[gz.instructions.items.len - 1];
 --- /dev/null
 +++ b/src/zct_hook.zig
-@@ -0,0 +1,844 @@
+@@ -0,0 +1,845 @@
 +//! zigct: a comptime debugger inside the compiler. Sema calls the entry points below while it
 +//! evaluates comptime code (see the patch in tools/zigct/patches). Everything is a no-op unless
 +//! `enabled`. Two modes:
@@ -458,6 +489,7 @@
 +pub fn onStmt(sema: *Sema, block: *Sema.Block, rel_line: u32, column: u32) void {
 +    _ = sema;
 +    _ = block;
++    pending.clearRetainingCapacity(); // arguments of a call whose body was never entered
 +    if (frames.items.len == 0) return;
 +    const f = &frames.items[frames.items.len - 1];
 +    if (!f.resolved) resolveFrame(f);

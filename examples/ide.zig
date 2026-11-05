@@ -279,7 +279,7 @@ const App = struct {
     /// Alt+F5: debug the `comptime` block under the cursor with zigct.
     fn debugComptime(self: *App) void {
         const s = self.dbg.session;
-        if (s.active()) return self.setStatus("a debug session is already running", .{});
+        if (s.active() or self.dbg.preparing()) return self.setStatus("a debug session is already running", .{});
         self.showPanel(self.debug_dock_panel);
         self.dbgp.clearConsole();
         const d = self.docs.active() orelse return self.refuseComptime("open a .zig file and put the cursor in a comptime block");

@@ -46,6 +46,7 @@ pub const dap_session = @import("ide/dap/session.zig");
 pub const dap_adapters = @import("ide/dap/adapters.zig");
 pub const dap_zigct = @import("ide/dap/zigct.zig");
 pub const comptime_scan = @import("ide/comptime_scan.zig");
+pub const comptime_graph = @import("ide/comptime_graph.zig");
 pub const debugger = @import("ide/debugger.zig");
 pub const debug_marks = @import("ide/debug_marks.zig");
 pub const types_panel = @import("ide/types_panel.zig");
@@ -87,6 +88,7 @@ test {
     _ = dap_adapters;
     _ = dap_zigct;
     _ = comptime_scan;
+    _ = comptime_graph;
     _ = debugger;
     _ = debug_marks;
     _ = debug_panel;
