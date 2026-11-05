@@ -25,7 +25,15 @@
  
      if (build_options.enable_debug_extensions and comp.debug_compile_errors) {
          var wip_errors = std.zig.ErrorBundle.Wip.init(gpa) catch @panic("out of memory");
-@@ -5839,9 +5843,9 @@
+@@ -5066,6 +5070,7 @@
+         }
+     }
+ 
++    if (zct.enabled) zct.onCompileLog(aw.written());
+     const line_data = try zcu.intern_pool.getOrPutString(gpa, io, pt.tid, aw.written(), .no_embedded_nulls);
+ 
+     const line_idx: Zcu.CompileLogLine.Index = if (zcu.free_compile_log_lines.pop()) |idx| idx: {
+@@ -5839,9 +5844,9 @@
  }
  
  fn zirDbgStmt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!void {
@@ -37,7 +45,7 @@
  
      if (block.instructions.items.len != 0) {
          const idx = block.instructions.items[block.instructions.items.len - 1];
-@@ -5864,6 +5868,11 @@
+@@ -5864,6 +5869,11 @@
      });
  }
  
@@ -49,7 +57,7 @@
  fn zirDbgEmptyStmt(_: *Sema, block: *Block, _: Zir.Inst.Index) CompileError!void {
      if (block.isComptime() or block.ownerModule().strip) return;
      _ = try block.addNoOp(.dbg_empty_stmt);
-@@ -5878,6 +5887,9 @@
+@@ -5878,6 +5888,9 @@
      const str_op = sema.code.instructions.items(.data)[@backingInt(inst)].str_op;
      const operand = sema.resolveInst(str_op.operand);
      const name = str_op.getStr(sema.code);
@@ -59,7 +67,7 @@
      try sema.addDbgVar(block, operand, air_tag, name);
  }
  
-@@ -26165,6 +26177,7 @@
+@@ -26165,6 +26178,7 @@
  
  fn emitBackwardBranch(sema: *Sema, block: *Block, src: LazySrcLoc) !void {
      sema.branch_count += 1;
@@ -67,6 +75,38 @@
      if (sema.branch_count > sema.branch_quota) {
          const msg = msg: {
              const msg = try sema.errMsg(
+@@ -35395,6 +35409,7 @@
+         else => |e| return e,
+     };
+ 
++    if (zct.enabled) zct.onType(sema, ty, .declared);
+     return .fromType(ty);
+ }
+ fn zirUnionDecl(
+@@ -35471,6 +35486,7 @@
+         else => |e| return e,
+     };
+ 
++    if (zct.enabled) zct.onType(sema, ty, .declared);
+     return .fromType(ty);
+ }
+ fn zirEnumDecl(
+@@ -35526,6 +35542,7 @@
+         else => |e| return e,
+     };
+ 
++    if (zct.enabled) zct.onType(sema, ty, .declared);
+     return .fromType(ty);
+ }
+ fn zirOpaqueDecl(
+@@ -35578,6 +35595,7 @@
+         else => |e| return e,
+     };
+ 
++    if (zct.enabled) zct.onType(sema, ty, .declared);
+     return .fromType(ty);
+ }
+ 
 --- a/src/main.zig
 +++ b/src/main.zig
 @@ -32,6 +32,7 @@
@@ -136,6 +176,32 @@
      return cleanExit(io);
  }
  
+--- a/src/Sema/type_resolution.zig
++++ b/src/Sema/type_resolution.zig
+@@ -14,6 +14,7 @@
+ const Alignment = InternPool.Alignment;
+ const arith = @import("arith.zig");
+ const trace = @import("../tracy.zig").trace;
++const zct = @import("../zct_hook.zig");
+ 
+ pub const LayoutResolveReason = enum {
+     variable,
+@@ -120,6 +121,7 @@
+                 error.AnalysisFail => return sema.failTransitive(.{ .failed_unit = .wrap(.{ .type_layout = ty.toIntern() }) }),
+                 else => |e| return e,
+             };
++            if (zct.enabled) zct.onType(sema, ty, .layout);
+         },
+ 
+         // values, not types
+@@ -173,6 +175,7 @@
+         error.AnalysisFail => return sema.failTransitive(.{ .failed_unit = .wrap(.{ .struct_defaults = ty.toIntern() }) }),
+         else => |e| return e,
+     };
++    if (zct.enabled) zct.onType(sema, ty, .defaults);
+ }
+ 
+ /// Asserts that `struct_ty` is a non-packed non-tuple struct, and that `sema.owner` is that type.
 --- a/lib/std/zig/AstGen.zig
 +++ b/lib/std/zig/AstGen.zig
 @@ -3330,11 +3330,14 @@
@@ -174,7 +240,7 @@
          const last = gz.instructions.items[gz.instructions.items.len - 1];
 --- /dev/null
 +++ b/src/zct_hook.zig
-@@ -0,0 +1,516 @@
+@@ -0,0 +1,829 @@
 +//! zigct: a comptime debugger inside the compiler. Sema calls the entry points below while it
 +//! evaluates comptime code (see the patch in tools/zigct/patches). Everything is a no-op unless
 +//! `enabled`. Two modes:
@@ -330,6 +396,8 @@
 +var step_depth: usize = 0;
 +
 +var break_compile_error = false;
++var break_compile_log = false;
++var exception_id: []const u8 = "compile_error";
 +var break_quota = false;
 +var branch_total: u64 = 0;
 +
@@ -400,13 +468,168 @@
 +    _ = sema;
 +}
 +
++/// `@compileLog(...)`: shown in the debug console; stops when asked to.
++pub fn onCompileLog(text: []const u8) void {
++    if (!dap) {
++        std.debug.print("[zct] @compileLog: {s}\n", .{text});
++        return;
++    }
++    if (!entered) return;
++    const line = std.fmt.allocPrint(gpa, "@compileLog: {s}\n", .{text}) catch return;
++    defer gpa.free(line);
++    event("output", .{ .category = "console", .output = line });
++    if (break_compile_log) {
++        exception_id = "compile_log";
++        stopHere("exception", std.mem.trimEnd(u8, line, "\n"));
++    }
++}
++
 +pub fn onError(sema: *Sema, msg: []const u8) void {
 +    _ = sema;
 +    if (!dap) {
 +        std.debug.print("[zct] ERROR raised: {s}\n", .{msg});
 +        return;
 +    }
-+    if (break_compile_error and entered) stopHere("exception", msg);
++    if (break_compile_error and entered) {
++        exception_id = "compile_error";
++        stopHere("exception", msg);
++    }
++}
++
++// ---- types ----
++
++pub const TypePhase = enum { declared, layout, defaults };
++var types_seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
++var types_layout: std.AutoHashMapUnmanaged(u32, void) = .empty;
++var types_known: std.AutoHashMapUnmanaged(u32, void) = .empty;
++
++fn anyInScope() bool {
++    for (frames.items) |f| if (f.resolved and f.in_scope) return true;
++    return false;
++}
++
++fn kindName(zcu: *Zcu, ty: Type) ?[]const u8 {
++    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
++        .struct_type => "struct",
++        .union_type => "union",
++        .enum_type => "enum",
++        .opaque_type => "opaque",
++        else => null,
++    };
++}
++
++fn fieldCount(zcu: *Zcu, ty: Type) usize {
++    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
++        .struct_type => ty.structFieldCount(zcu),
++        .enum_type => ty.enumFieldCount(zcu),
++        .union_type => ty.unionTagTypeHypothetical(zcu).enumFieldCount(zcu),
++        else => 0,
++    };
++}
++
++fn typeName(zcu: *Zcu, ty: Type) []u8 {
++    var buf: [300]u8 = undefined;
++    var w = Io.Writer.fixed(&buf);
++    w.print("{f}", .{ty.fmt(zcu)}) catch {};
++    return gpa.dupe(u8, w.buffered()) catch @panic("OOM");
++}
++
++/// A struct, union, enum or opaque type reached a new stage: declared (created), layout
++/// resolved (fields and size known), defaults resolved. Reported once per stage, only while
++/// something of the project is on the stack (so the standard library's own types show up
++/// when your code asks for them).
++pub fn onType(sema: *Sema, ty: Type, phase: TypePhase) void {
++    if (!dap or !entered) return;
++    const zcu = sema.pt.zcu;
++    const kind = kindName(zcu, ty) orelse return;
++    if (!anyInScope()) return;
++    const key = (@as(u64, @intFromEnum(ty.toIntern())) << 2) | @intFromEnum(phase);
++    const gop = types_seen.getOrPut(gpa, key) catch return;
++    if (gop.found_existing) return;
++    types_known.put(gpa, @intFromEnum(ty.toIntern()), {}) catch {};
++    if (phase == .layout) types_layout.put(gpa, @intFromEnum(ty.toIntern()), {}) catch {};
++    const name = typeName(zcu, ty);
++    defer gpa.free(name);
++    var file: []const u8 = "";
++    var file_owned: ?[]u8 = null;
++    defer if (file_owned) |f| gpa.free(f);
++    if (ty.typeDeclSrcLine(zcu)) |_| {
++        const ns = zcu.namespacePtr(ty.getNamespaceIndex(zcu));
++        if (ns.fileScope(zcu).path.toAbsolute(&zcu.comp.dirs, gpa)) |abs| {
++            file_owned = abs;
++            file = abs;
++        } else |_| {}
++    }
++    const top = if (frames.items.len > 0) frames.items[frames.items.len - 1] else null;
++    event("zigct/typeEvent", .{
++        .id = @intFromEnum(ty.toIntern()),
++        .name = name,
++        .kind = kind,
++        .phase = @tagName(phase),
++        // Field queries need the layout; before that the count is unknown (-1).
++        .fieldCount = if (phase == .declared) @as(i64, -1) else @as(i64, @intCast(fieldCount(zcu, ty))),
++        .file = file,
++        .line = ty.typeDeclSrcLine(zcu) orelse 0,
++        .requestedBy = if (top) |t| t.name else "",
++    });
++}
++
++/// `zigct/typeInfo {id}`: the fields of one type.
++fn typeInfo(rs: i64, cmd: []const u8, id: i64) void {
++    const sema = blk: {
++        // Any live Sema will do to reach the Zcu.
++        if (frames.items.len > 0) break :blk frames.items[0].sema;
++        respond(rs, cmd, false, null, "no analysis is running");
++        return;
++    };
++    const zcu = sema.pt.zcu;
++    const ip = &zcu.intern_pool;
++    // Only ids that were reported in a typeEvent: anything else may not be a type at all.
++    if (id < 0 or !types_known.contains(@intCast(id))) return respond(rs, cmd, false, null, "no such type");
++    const ty: Type = .fromInterned(@enumFromInt(@as(u32, @intCast(id))));
++    const kind = kindName(zcu, ty) orelse return respond(rs, cmd, false, null, "not a struct, union, enum or opaque type");
++    const has_layout = types_layout.contains(@intCast(id));
++    if (!has_layout) return respond(rs, cmd, false, null, "the fields are known once the type's layout is resolved");
++    const Field = struct { name: []const u8, type: []const u8, typeId: i64 = -1 };
++    var out: std.ArrayList(Field) = .empty;
++    defer {
++        for (out.items) |f| {
++            gpa.free(f.type);
++            gpa.free(@constCast(f.name));
++        }
++        out.deinit(gpa);
++    }
++    const n = fieldCount(zcu, ty);
++    for (0..@min(n, 500)) |i| {
++        switch (ip.indexToKey(ty.toIntern())) {
++            .struct_type => {
++                const ft = ty.fieldType(i, zcu);
++                const name = if (ty.structFieldName(i, zcu).unwrap()) |nm| gpa.dupe(u8, nm.toSlice(ip)) catch continue else std.fmt.allocPrint(gpa, "[{d}]", .{i}) catch continue;
++                out.append(gpa, .{ .name = name, .type = typeName(zcu, ft), .typeId = @intFromEnum(ft.toIntern()) }) catch {};
++            },
++            .enum_type => {
++                const name = gpa.dupe(u8, ty.enumFieldName(i, zcu).toSlice(ip)) catch continue;
++                out.append(gpa, .{ .name = name, .type = gpa.dupe(u8, "") catch continue }) catch {};
++            },
++            .union_type => {
++                const tag_ty = ty.unionTagTypeHypothetical(zcu);
++                const name = gpa.dupe(u8, tag_ty.enumFieldName(i, zcu).toSlice(ip)) catch continue;
++                const ft = ty.unionFieldTypeByIndex(i, zcu);
++                out.append(gpa, .{ .name = name, .type = typeName(zcu, ft), .typeId = @intFromEnum(ft.toIntern()) }) catch {};
++            },
++            else => {},
++        }
++    }
++    const name = typeName(zcu, ty);
++    defer gpa.free(name);
++    respond(rs, cmd, true, .{
++        .id = id,
++        .name = name,
++        .kind = kind,
++        .fields = out.items,
++        .size = if (has_layout) @as(i64, @intCast(ty.abiSize(zcu))) else -1,
++        .alignment = if (has_layout) @as(i64, @intCast(ty.abiAlignment(zcu).toByteUnits() orelse 0)) else -1,
++    }, null);
 +}
 +
 +// ---- trace mode ----
@@ -429,9 +652,139 @@
 +    return gpa.dupe(u8, w.buffered()) catch @panic("OOM");
 +}
 +
-+fn localText(l: Local) []u8 {
-+    const v: ?Value = if (l.ptr_ty) |pt| (if (l.val) |pv| l.sema.zctDeref(l.block, pv, pt) else null) else l.val;
-+    return fmtValue(l.sema, v);
++fn localValue(l: Local) ?Value {
++    return if (l.ptr_ty) |pt| (if (l.val) |pv| l.sema.zctDeref(l.block, pv, pt) else null) else l.val;
++}
++
++// ---- structured values ----
++
++/// A value the client may expand: `variablesReference = handle_base + index`. Cleared on resume.
++const Handle = struct { val: Value, sema: *Sema, block: *Sema.Block };
++var handles: std.ArrayList(Handle) = .empty;
++const handle_base: i64 = 1_000_000;
++const max_children = 200;
++
++const Child = struct {
++    name: []const u8,
++    /// Owned.
++    text: []u8,
++    ref: i64 = 0,
++    owned_name: bool = false,
++};
++
++fn freeChildren(list: *std.ArrayList(Child)) void {
++    for (list.items) |c| {
++        gpa.free(c.text);
++        if (c.owned_name) gpa.free(@constCast(c.name));
++    }
++    list.deinit(gpa);
++}
++
++/// Can `val` be opened? (Cheap: looks at the kind only.)
++fn expandable(sema: *Sema, block: *Sema.Block, val: Value) bool {
++    const zcu = sema.pt.zcu;
++    const ip = &zcu.intern_pool;
++    return switch (ip.indexToKey(val.toIntern())) {
++        .aggregate => |agg| ip.aggregateTypeLen(agg.ty) > 0,
++        .un => true,
++        .opt => |o| o.val != .none,
++        .slice => Value.fromInterned(ip.sliceLen(val.toIntern())).toUnsignedInt(zcu) > 0,
++        .ptr => blk: {
++            const ty = val.typeOf(zcu);
++            if (ty.zigTypeTag(zcu) != .pointer or ty.ptrSize(zcu) != .one) break :blk false;
++            const pointee = sema.zctDeref(block, val, ty) orelse break :blk false;
++            break :blk switch (ip.indexToKey(pointee.toIntern())) {
++                .aggregate, .un, .opt, .slice, .ptr => true,
++                else => false,
++            };
++        },
++        .struct_type => true,
++        else => false,
++    };
++}
++
++fn makeHandle(sema: *Sema, block: *Sema.Block, val: Value) i64 {
++    if (!expandable(sema, block, val)) return 0;
++    handles.append(gpa, .{ .val = val, .sema = sema, .block = block }) catch return 0;
++    return handle_base + @as(i64, @intCast(handles.items.len - 1));
++}
++
++fn addChild(list: *std.ArrayList(Child), sema: *Sema, block: *Sema.Block, name: []const u8, owned: bool, val: ?Value) void {
++    const text = fmtValue(sema, val);
++    const ref = if (val) |v| makeHandle(sema, block, v) else 0;
++    list.append(gpa, .{ .name = name, .text = text, .ref = ref, .owned_name = owned }) catch {
++        gpa.free(text);
++        if (owned) gpa.free(@constCast(name));
++    };
++}
++
++fn indexName(i: usize) []const u8 {
++    return std.fmt.allocPrint(gpa, "[{d}]", .{i}) catch "[?]";
++}
++
++fn childrenOf(h: Handle, list: *std.ArrayList(Child)) void {
++    const sema = h.sema;
++    const pt = sema.pt;
++    const zcu = pt.zcu;
++    const ip = &zcu.intern_pool;
++    const val = h.val;
++    switch (ip.indexToKey(val.toIntern())) {
++        .aggregate => |agg| {
++            const t = Type.fromInterned(agg.ty);
++            const n: usize = @intCast(ip.aggregateTypeLen(agg.ty));
++            const is_struct = t.zigTypeTag(zcu) == .@"struct";
++            for (0..@min(n, max_children)) |i| {
++                const v = (if (is_struct) val.fieldValue(pt, i) else val.elemValue(pt, i)) catch continue;
++                if (is_struct) {
++                    if (t.structFieldName(i, zcu).unwrap()) |nm| {
++                        addChild(list, sema, h.block, gpa.dupe(u8, nm.toSlice(ip)) catch continue, true, v);
++                        continue;
++                    }
++                }
++                addChild(list, sema, h.block, indexName(i), true, v);
++            }
++        },
++        .opt => |o| if (o.val != .none) addChild(list, sema, h.block, "payload", false, Value.fromInterned(o.val)),
++        .un => |u| {
++            if (u.tag != .none) {
++                const tag_text = fmtValue(sema, Value.fromInterned(u.tag));
++                defer gpa.free(tag_text);
++                const name = std.mem.trimStart(u8, tag_text, ".");
++                addChild(list, sema, h.block, gpa.dupe(u8, name) catch return, true, Value.fromInterned(u.val));
++            } else addChild(list, sema, h.block, "value", false, Value.fromInterned(u.val));
++        },
++        .slice => |sl| {
++            const ty = Type.fromInterned(sl.ty);
++            const len: u64 = Value.fromInterned(sl.len).toUnsignedInt(zcu);
++            const elem = ty.childType(zcu);
++            const arr_ty = pt.arrayType(.{ .len = len, .child = elem.toIntern() }) catch return;
++            const pinfo = ip.indexToKey(ip.slicePtrType(sl.ty)).ptr_type;
++            const ptr_ty = pt.ptrType(.{ .child = arr_ty.toIntern(), .flags = .{ .size = .one, .is_const = pinfo.flags.is_const } }) catch return;
++            const pv = pt.getCoerced(Value.fromInterned(sl.ptr), ptr_ty) catch return;
++            const arr = sema.zctDeref(h.block, pv, ptr_ty) orelse return;
++            const n: usize = @intCast(@min(len, max_children));
++            for (0..n) |i| {
++                const v = arr.elemValue(pt, i) catch continue;
++                addChild(list, sema, h.block, indexName(i), true, v);
++            }
++        },
++        .ptr => {
++            const ty = val.typeOf(zcu);
++            if (ty.zigTypeTag(zcu) == .pointer and ty.ptrSize(zcu) == .one) {
++                addChild(list, sema, h.block, "*", false, sema.zctDeref(h.block, val, ty));
++            }
++        },
++        .struct_type => {
++            const ty = val.toType();
++            const n = ty.structFieldCount(zcu);
++            for (0..@min(n, max_children)) |i| {
++                const ft = ty.fieldType(i, zcu);
++                const name: []const u8 = if (ty.structFieldName(i, zcu).unwrap()) |nm| (gpa.dupe(u8, nm.toSlice(ip)) catch continue) else indexName(i);
++                addChild(list, sema, h.block, name, true, Value.fromInterned(ft.toIntern()));
++            }
++        },
++        else => {},
++    }
 +}
 +
 +// ---- protocol ----
@@ -559,6 +912,7 @@
 +                .supportsExceptionInfoRequest = true,
 +                .exceptionBreakpointFilters = [_]struct { filter: []const u8, label: []const u8, default: bool }{
 +                    .{ .filter = "compile_error", .label = "Compile errors", .default = false },
++                    .{ .filter = "compile_log", .label = "@compileLog calls", .default = false },
 +                },
 +            }, null);
 +        } else if (eq(cmd, "launch")) {
@@ -573,10 +927,13 @@
 +            respond(rs, cmd, true, .{ .breakpoints = out.items }, null);
 +        } else if (eq(cmd, "setExceptionBreakpoints")) {
 +            break_compile_error = false;
++            break_compile_log = false;
 +            if (field(args, "filters")) |fl| if (fl == .array) for (fl.array.items) |x| {
-+                if (x == .string and eq(x.string, "compile_error")) break_compile_error = true;
++                if (x != .string) continue;
++                if (eq(x.string, "compile_error")) break_compile_error = true;
++                if (eq(x.string, "compile_log")) break_compile_log = true;
 +            };
-+            respond(rs, cmd, true, .{}, null);
++            respond(rs, cmd, true, struct {}{}, null);
 +        } else if (eq(cmd, "configurationDone")) {
 +            respond(rs, cmd, true, null, null);
 +            return .configured;
@@ -588,11 +945,14 @@
 +            const fid = int(args, "frameId") orelse 0;
 +            respond(rs, cmd, true, .{ .scopes = [_]struct { name: []const u8, variablesReference: i64, expensive: bool }{
 +                .{ .name = "Locals", .variablesReference = fid + 1, .expensive = false },
++                .{ .name = "Compiler", .variablesReference = analysis_base + fid, .expensive = false },
 +            } }, null);
 +        } else if (eq(cmd, "variables")) {
-+            variablesOf(rs, cmd, (int(args, "variablesReference") orelse 1) - 1);
++            variablesOf(rs, cmd, int(args, "variablesReference") orelse 1);
++        } else if (eq(cmd, "zigct/typeInfo")) {
++            typeInfo(rs, cmd, int(args, "id") orelse -1);
 +        } else if (eq(cmd, "exceptionInfo")) {
-+            respond(rs, cmd, true, .{ .exceptionId = "compile_error", .description = stop_text, .breakMode = "always" }, null);
++            respond(rs, cmd, true, .{ .exceptionId = exception_id, .description = stop_text, .breakMode = "always" }, null);
 +        } else if (eq(cmd, "continue")) {
 +            respond(rs, cmd, true, .{ .allThreadsContinued = true }, null);
 +            step = .run;
@@ -652,24 +1012,43 @@
 +    respond(rs, cmd, true, .{ .stackFrames = out.items, .totalFrames = out.items.len }, null);
 +}
 +
-+fn variablesOf(rs: i64, cmd: []const u8, frame: i64) void {
++fn variablesOf(rs: i64, cmd: []const u8, reference: i64) void {
 +    const Out = struct { name: []const u8, value: []const u8, variablesReference: i64 = 0 };
 +    var out: std.ArrayList(Out) = .empty;
-+    defer {
-+        for (out.items) |o| gpa.free(o.value);
-+        out.deinit(gpa);
++    defer out.deinit(gpa);
++    var kids: std.ArrayList(Child) = .empty;
++    defer freeChildren(&kids);
++    if (reference >= handle_base) {
++        const i: usize = @intCast(reference - handle_base);
++        if (i < handles.items.len) childrenOf(handles.items[i], &kids);
++    } else if (reference >= analysis_base) {
++        const f: usize = @intCast(reference - analysis_base);
++        if (f < frames.items.len) analysisVars(frames.items[f].sema, &kids);
++    } else {
++        for (locals.items) |l| {
++            if (l.frame != reference - 1) continue;
++            addChild(&kids, l.sema, l.block, l.name, false, localValue(l));
++        }
 +    }
-+    for (locals.items) |l| {
-+        if (l.frame != frame) continue;
-+        out.append(gpa, .{ .name = l.name, .value = localText(l) }) catch {};
-+    }
++    for (kids.items) |c| out.append(gpa, .{ .name = c.name, .value = c.text, .variablesReference = c.ref }) catch {};
 +    respond(rs, cmd, true, .{ .variables = out.items }, null);
++}
++
++const analysis_base: i64 = 100_000;
++
++/// What the compiler is doing, as variables of the "Compiler" scope.
++fn analysisVars(sema: *Sema, list: *std.ArrayList(Child)) void {
++    const text = std.fmt.allocPrint(gpa, "{d} / {d}", .{ sema.branch_count, sema.branch_quota }) catch return;
++    list.append(gpa, .{ .name = "backward branches / quota", .text = text }) catch gpa.free(text);
++    const t2 = std.fmt.allocPrint(gpa, "{d}", .{branch_total}) catch return;
++    list.append(gpa, .{ .name = "backward branches (all analysis)", .text = t2 }) catch gpa.free(t2);
 +}
 +
 +/// Pause the compiler here: tell the client, then serve requests until it resumes.
 +fn stopHere(reason: []const u8, text: []const u8) void {
 +    stop_text = text;
 +    event("stopped", .{ .reason = reason, .threadId = 1, .allThreadsStopped = true, .text = text });
++    defer handles.clearRetainingCapacity();
 +    switch (serve(true)) {
 +        .resume_run => {},
 +        else => {
@@ -689,5 +1068,5 @@
 +    if (!dap or terminated_sent) return;
 +    terminated_sent = true;
 +    event("exited", .{ .exitCode = code });
-+    event("terminated", .{});
++    event("terminated", struct {}{});
 +}

@@ -135,6 +135,8 @@ const App = struct {
     restart_after_build: bool = false,
     dbg: *ide.debugger.Debugger = undefined,
     dbgp: *ide.DebugPanel = undefined,
+    typesp: *ide.TypesPanel = undefined,
+    types_dock_panel: *zigui.dock.Panel = undefined,
     debug_dock_panel: *zigui.dock.Panel = undefined,
     /// Start the debugger when the build that is running succeeds.
     debug_after_build: bool = false,
@@ -229,6 +231,7 @@ const App = struct {
             }
         }
         self.dbgp.refresh();
+        if (s.state == .stopped) self.typesp.refresh();
     }
 
     fn pollDebug(self: *App) void {
@@ -294,6 +297,7 @@ const App = struct {
         if (b.problem.len > 0) return self.refuseComptime(b.problem);
         const abs = self.docAbs(d.path) orelse return;
         defer self.gpa.free(abs);
+        self.typesp.clear();
         self.setStatus("debugging the comptime block at line {d}", .{b.start_line});
         self.dbg.startComptime(.{ .file = abs, .start_line = b.start_line, .end_line = b.end_line, .fn_path = b.fn_path, .zig_lib_dir = self.zig_lib_dir }) catch |err| {
             self.setStatus("could not start comptime debugging: {s}", .{@errorName(err)});
@@ -324,6 +328,14 @@ const App = struct {
             self.debugStart();
         } else if (eq(u8, name, "debug.comptime_here")) {
             self.debugComptime();
+        } else if (eq(u8, name, "debug.toggle_compile_log")) {
+            s.break_compile_log = !s.break_compile_log;
+            s.sendExceptionFilters();
+            self.setStatus("comptime debugging {s} at @compileLog", .{if (s.break_compile_log) "stops" else "does not stop"});
+        } else if (eq(u8, name, "debug.toggle_compile_error")) {
+            s.break_compile_error = !s.break_compile_error;
+            s.sendExceptionFilters();
+            self.setStatus("comptime debugging {s} at compile errors", .{if (s.break_compile_error) "stops" else "does not stop"});
         } else if (eq(u8, name, "debug.stop")) {
             self.debug_after_build = false;
             self.dbg.stop();
@@ -639,6 +651,8 @@ const App = struct {
             self.showPanel(self.search_panel);
         } else if (eq(u8, name, "view.debug")) {
             self.showPanel(self.debug_dock_panel);
+        } else if (eq(u8, name, "view.types")) {
+            self.showPanel(self.types_dock_panel);
         } else if (eq(u8, name, "view.tests")) {
             self.showPanel(self.tests_panel);
             self.testp.refresh();
@@ -1277,6 +1291,12 @@ pub fn main(init: std.process.Init) !void {
     app.dbgp = try ide.DebugPanel.create(&ui, debug_panel.content, app.dbg, .{ .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt) });
     defer app.dbgp.destroy();
     try dock.dockTab(debug_panel, output_panel);
+    const types_panel = try dock.addPanel("Types");
+    app.types_dock_panel = types_panel;
+    app.typesp = try ide.TypesPanel.create(&ui, types_panel.content, app.dbg, .{ .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt) });
+    defer app.typesp.destroy();
+    try dock.dockTab(types_panel, output_panel);
+    app.dbg.session.on_custom = ide.dap_session.CustomHook.bind(app.typesp, ide.TypesPanel.onCustom);
     dock.activatePanel(output_panel);
     app.dbg.on_change = ide.dap_session.ChangeHook.bind(&app, App.debugChanged);
     app.docs.on_gutter = .{ .ctx = &app, .call = App.gutterThunk };
@@ -1351,6 +1371,8 @@ pub fn main(init: std.process.Init) !void {
         .{ "debug.start", "Start Debugging / Continue" },
         .{ "debug.stop", "Stop Debugging" },
         .{ "debug.comptime_here", "Debug Comptime Block at Cursor" },
+        .{ "debug.toggle_compile_log", "Comptime: Stop at @compileLog (toggle)" },
+        .{ "debug.toggle_compile_error", "Comptime: Stop at Compile Errors (toggle)" },
         .{ "zig.build_zigct", "Build Comptime Debugger (zigct)" },
         .{ "debug.toggle_breakpoint", "Toggle Breakpoint" },
         .{ "debug.step_over", "Step Over" },
@@ -1358,6 +1380,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "debug.step_out", "Step Out" },
         .{ "debug.remove_breakpoints", "Remove All Breakpoints" },
         .{ "view.debug", "Debug" },
+        .{ "view.types", "Types (comptime debugging)" },
         .{ "ide.test", "Run Tests" },
         .{ "ide.build_restart", "Build and Restart the IDE" },
         .{ "ide.restart", "Restart the IDE" },
@@ -1440,6 +1463,8 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "Run Without Debugging", .command = "ide.run" },
         .{ .label = "Stop Debugging", .command = "debug.stop" },
         .{ .label = "Debug Comptime Block at Cursor", .command = "debug.comptime_here" },
+        .{ .label = "Comptime: Stop at Compile Errors (toggle)", .command = "debug.toggle_compile_error" },
+        .{ .label = "Comptime: Stop at @compileLog (toggle)", .command = "debug.toggle_compile_log" },
         .{ .separator = true },
         .{ .label = "Step Over", .command = "debug.step_over" },
         .{ .label = "Step Into", .command = "debug.step_in" },
@@ -1448,6 +1473,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "Toggle Breakpoint", .command = "debug.toggle_breakpoint" },
         .{ .label = "Remove All Breakpoints", .command = "debug.remove_breakpoints" },
         .{ .label = "Debug Panel", .command = "view.debug" },
+        .{ .label = "Types Panel", .command = "view.types" },
     }, null);
     try bar.addMenu("Zig", &.{
         .{ .label = "Switch Zig Version...", .command = "zig.switch_version" },

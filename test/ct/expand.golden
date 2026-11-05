@@ -1,0 +1,39 @@
+stopped breakpoint
+  comptime expand.zig:13
+    none = null
+    some = 7
+      payload = 7
+    u = .{ .f = 1.5 }
+      f = 1.5
+    o = .{ .name = "hi"[0..2], .inner = .{ .a = 9, .b = null }, .list = .{ .{ .a = 2, .b = 3 }, .{ .a = 4, .b = null } } }
+      name = "hi"[0..2]
+        [0] = 104
+        [1] = 105
+      inner = .{ .a = 9, .b = null }
+        a = 9
+        b = null
+      list = .{ .{ .a = 2, .b = 3 }, .{ .a = 4, .b = null } }
+        [0] = .{ .a = 2, .b = 3 }
+          a = 2
+          b = 3
+        [1] = .{ .a = 4, .b = null }
+          a = 4
+          b = null
+    p = &@as(expand.Outer, .{ .name = "hi"[0..2], .inner = .{ .a = 9, .b = null }, .list = .{ .{ ... }, .{ ... } } })
+      * = .{ .name = "hi"[0..2], .inner = .{ .a = 9, .b = null }, .list = .{ .{ .a = 2, .b = 3 }, .{ .a = 4, .b = null } } }
+        name = "hi"[0..2]
+          [0] = 104
+          [1] = 105
+        inner = .{ .a = 9, .b = null }
+          a = 9
+          b = null
+        list = .{ .{ .a = 2, .b = 3 }, .{ .a = 4, .b = null } }
+          [0] = .{ .a = 2, .b = 3 }
+          [1] = .{ .a = 4, .b = null }
+    T = expand.Outer
+      name = []const u8
+      inner = expand.Inner
+        a = u8
+        b = ?u8
+      list = [2]expand.Inner
+terminated

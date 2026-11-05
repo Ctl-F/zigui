@@ -493,6 +493,12 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   spawns zigct and starts a `Session` with raw launch arguments; the panels are shared.
   The build script and patch are embedded in the IDE (anonymous imports) and written out
   by Zig > Build Comptime Debugger. Alt+F5.
+  CT-3: the hook keeps a handle table per stop so `variables` expands struct, array, slice,
+  optional, union, pointer and `type` values lazily (readers only touch keys they have
+  checked: Value accessors assert); `@compileLog` and errors become output events and
+  optional stops; type creation/layout/defaults hooks emit `zigct/typeEvent` and answer
+  `zigct/typeInfo` (only for ids already reported); `Session.on_custom` carries them to
+  `ide/types_panel.zig`.
 - Move lines: `Editor.moveLines(delta, now)` swaps the lines of a single selection with
   its neighbour (Alt+Up/Down, also Ctrl+Alt); adding a cursor moved to
   Ctrl+Alt+Shift+Up/Down. Handles a last line without a terminator and CRLF.

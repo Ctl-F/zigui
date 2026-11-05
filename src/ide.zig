@@ -48,6 +48,8 @@ pub const dap_zigct = @import("ide/dap/zigct.zig");
 pub const comptime_scan = @import("ide/comptime_scan.zig");
 pub const debugger = @import("ide/debugger.zig");
 pub const debug_marks = @import("ide/debug_marks.zig");
+pub const types_panel = @import("ide/types_panel.zig");
+pub const TypesPanel = types_panel.TypesPanel;
 pub const debug_panel = @import("ide/debug_panel.zig");
 pub const DebugPanel = debug_panel.DebugPanel;
 pub const zvm = @import("ide/zvm.zig");
@@ -88,6 +90,7 @@ test {
     _ = debugger;
     _ = debug_marks;
     _ = debug_panel;
+    _ = types_panel;
     _ = zvm;
     _ = zig_versions;
     _ = quick_open;

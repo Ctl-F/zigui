@@ -1,0 +1,30 @@
+stopped entry
+  comptime types.zig:11
+  type declared enum types.Color
+  type declared struct types.Pair(u32,types.Color)
+stopped step
+  comptime types.zig:12
+  | P = types.Pair(u32,types.Color)
+  type layout enum types.Color (2 fields)
+  type layout struct types.Pair(u32,types.Color) (2 fields)
+stopped step
+  comptime types.zig:13
+  | P = types.Pair(u32,types.Color), p = .{ .first = 1, .second = .green }
+stopped step
+  comptime types.zig:14
+  | P = types.Pair(u32,types.Color), p = .{ .first = 1, .second = .green }
+  type declared struct types.Pair(u8,u8)
+stopped step
+  comptime types.zig:15
+  | P = types.Pair(u32,types.Color), p = .{ .first = 1, .second = .green }, Q = types.Pair(u8,u8)
+  typeinfo types.Pair(u32,types.Color): size 8, align 4
+    first: u32
+    second: types.Color
+  type layout struct types.Pair(u8,u8) (2 fields)
+stopped step
+  comptime types.zig:16
+  | P = types.Pair(u32,types.Color), p = .{ .first = 1, .second = .green }, Q = types.Pair(u8,u8), q = .{ .first = 1, .second = 2 }
+  typeinfo types.Pair(u32,types.Color): size 8, align 4
+    first: u32
+    second: types.Color
+terminated

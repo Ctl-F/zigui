@@ -1,0 +1,11 @@
+root types.zig
+entry
+types
+run
+next
+next
+next
+typeinfo types.Pair(u32,types.Color)
+next
+next
+next

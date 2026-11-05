@@ -72,6 +72,10 @@ pub const Driver = struct {
     adapter_exited: bool = false,
     exit_rounds: u32 = 0,
     stderr: std.ArrayListUnmanaged(u8) = .empty,
+    /// `output` events and type events seen since the transcript last printed them (owned lines).
+    news: std.ArrayListUnmanaged([]u8) = .empty,
+    /// Type name -> id, from the type events (for `typeinfo`).
+    type_ids: std.StringHashMapUnmanaged(i64) = .empty,
 
     pub fn start(gpa: std.mem.Allocator, io: std.Io, zigct: []const u8, cwd: []const u8) !*Driver {
         const self = try gpa.create(Driver);
@@ -91,6 +95,11 @@ pub const Driver = struct {
         if (self.answer) |a| self.gpa.free(a);
         if (self.stop_text) |t| self.gpa.free(t);
         self.stderr.deinit(self.gpa);
+        for (self.news.items) |n| self.gpa.free(n);
+        self.news.deinit(self.gpa);
+        var kit = self.type_ids.keyIterator();
+        while (kit.next()) |k| self.gpa.free(k.*);
+        self.type_ids.deinit(self.gpa);
         self.client.destroy();
         self.gpa.destroy(self);
     }
@@ -111,6 +120,34 @@ pub const Driver = struct {
             self.stop_text = self.gpa.dupe(u8, t) catch null;
         } else if (std.mem.eql(u8, name, "terminated")) {
             self.terminated = true;
+        } else if (std.mem.eql(u8, name, "output")) {
+            const t = std.mem.trimEnd(u8, client_mod.strOf(if (body == .object) body.object.get("output") else null) orelse "", "\n");
+            const line = std.fmt.allocPrint(self.gpa, "  output: {s}\n", .{t}) catch return;
+            self.news.append(self.gpa, line) catch self.gpa.free(line);
+        } else if (std.mem.eql(u8, name, "zigct/typeEvent") and body == .object) {
+            const o = body.object;
+            if (client_mod.strOf(o.get("name"))) |tn| if (!self.type_ids.contains(tn)) {
+                if (self.gpa.dupe(u8, tn)) |key| {
+                    self.type_ids.put(self.gpa, key, client_mod.intOf(o.get("id")) orelse -1) catch self.gpa.free(key);
+                } else |_| {}
+            };
+            const line = std.fmt.allocPrint(self.gpa, "  type {s} {s} {s}", .{
+                client_mod.strOf(o.get("phase")) orelse "?",
+                client_mod.strOf(o.get("kind")) orelse "?",
+                client_mod.strOf(o.get("name")) orelse "?",
+            }) catch return;
+            const with_fields = if ((client_mod.intOf(o.get("fieldCount")) orelse -1) >= 0)
+                std.fmt.allocPrint(self.gpa, "{s} ({d} fields)\n", .{ line, client_mod.intOf(o.get("fieldCount")).? }) catch {
+                    self.gpa.free(line);
+                    return;
+                }
+            else
+                std.fmt.allocPrint(self.gpa, "{s}\n", .{line}) catch {
+                    self.gpa.free(line);
+                    return;
+                };
+            self.gpa.free(line);
+            self.news.append(self.gpa, with_fields) catch self.gpa.free(with_fields);
         }
     }
 
@@ -177,6 +214,11 @@ pub const Driver = struct {
 ///     target FILE A B      only the block spanning lines A..B of FILE
 ///     break FILE LINE      a breakpoint
 ///     errors               stop when a compile error is raised
+///     logs                 stop at every @compileLog
+///     expand N             show the children of the top frame's locals, N levels deep
+///     compiler             also show the "Compiler" scope (branch counts)
+///     types                print the type events as they arrive
+///     typeinfo NAME        at a stop: ask for the fields of the type with that name
 ///     run                  start; stops are recorded
 ///     next | in | out | continue
 /// Every stop adds its frames (in scope, innermost first) and the locals of the top frame.
@@ -190,6 +232,8 @@ pub fn runScript(gpa: std.mem.Allocator, io: std.Io, zigct: []const u8, zig_lib:
     var entry = false;
     var target: ?struct { file: []const u8, a: u32, b: u32 } = null;
     var errors = false;
+    var logs = false;
+    var opts: TranscriptOptions = .{};
     var breaks: std.ArrayListUnmanaged(struct { file: []const u8, line: u32 }) = .empty;
     defer breaks.deinit(gpa);
 
@@ -206,6 +250,16 @@ pub fn runScript(gpa: std.mem.Allocator, io: std.Io, zigct: []const u8, zig_lib:
             entry = true;
         } else if (std.mem.eql(u8, verb, "errors")) {
             errors = true;
+        } else if (std.mem.eql(u8, verb, "logs")) {
+            logs = true;
+        } else if (std.mem.eql(u8, verb, "expand")) {
+            opts.expand = try std.fmt.parseInt(u32, it.next().?, 10);
+        } else if (std.mem.eql(u8, verb, "compiler")) {
+            opts.compiler = true;
+        } else if (std.mem.eql(u8, verb, "types")) {
+            opts.types = true;
+        } else if (std.mem.eql(u8, verb, "typeinfo")) {
+            opts.typeinfo = it.rest();
         } else if (std.mem.eql(u8, verb, "target")) {
             const f = it.next().?;
             target = .{ .file = f, .a = try std.fmt.parseInt(u32, it.next().?, 10), .b = try std.fmt.parseInt(u32, it.next().?, 10) };
@@ -231,24 +285,35 @@ pub fn runScript(gpa: std.mem.Allocator, io: std.Io, zigct: []const u8, zig_lib:
                 defer gpa.free(bf);
                 _ = try d.call("setBreakpoints", .{ .source = .{ .path = bf }, .breakpoints = [_]struct { line: u32 }{.{ .line = b.line }} });
             }
-            _ = try d.call("setExceptionBreakpoints", .{ .filters = if (errors) &[_][]const u8{"compile_error"} else &[_][]const u8{} });
+            _ = try d.call("setExceptionBreakpoints", .{ .filters = if (errors and logs) &[_][]const u8{ "compile_error", "compile_log" } else if (errors) &[_][]const u8{"compile_error"} else if (logs) &[_][]const u8{"compile_log"} else &[_][]const u8{} });
             d.stopped = false;
             _ = try d.call("configurationDone", .{});
             try d.waitStop();
-            try transcript(gpa, d, dir, &out);
+            try transcript(gpa, d, dir, opts, &out);
         } else if (std.mem.eql(u8, verb, "next") or std.mem.eql(u8, verb, "in") or std.mem.eql(u8, verb, "out") or std.mem.eql(u8, verb, "continue")) {
             const cmd: []const u8 = if (verb[0] == 'n') "next" else if (verb[0] == 'i') "stepIn" else if (verb[0] == 'o') "stepOut" else "continue";
             d.stopped = false;
             _ = try d.call(cmd, .{ .threadId = 1 });
             try d.waitStop();
-            try transcript(gpa, d, dir, &out);
+            try transcript(gpa, d, dir, opts, &out);
         } else return error.BadScript;
     }
     _ = d.call("disconnect", .{}) catch {};
     return out.toOwnedSlice(gpa);
 }
 
-fn transcript(gpa: std.mem.Allocator, d: *Driver, dir: []const u8, out: *std.ArrayListUnmanaged(u8)) !void {
+const TranscriptOptions = struct { expand: u32 = 0, compiler: bool = false, types: bool = false, typeinfo: []const u8 = "" };
+
+fn transcript(gpa: std.mem.Allocator, d: *Driver, dir: []const u8, opts: TranscriptOptions, out: *std.ArrayListUnmanaged(u8)) !void {
+    for (d.news.items) |n| {
+        if (std.mem.startsWith(u8, n, "  type ") and !opts.types) {
+            gpa.free(n);
+            continue;
+        }
+        try out.appendSlice(gpa, n);
+        gpa.free(n);
+    }
+    d.news.clearRetainingCapacity();
     if (d.terminated) {
         try out.appendSlice(gpa, "terminated\n");
         return;
@@ -278,16 +343,55 @@ fn transcript(gpa: std.mem.Allocator, d: *Driver, dir: []const u8, out: *std.Arr
     const sc = try d.call("scopes", .{ .frameId = top_id });
     var sp = try std.json.parseFromSlice(std.json.Value, gpa, sc, .{});
     defer sp.deinit();
-    const ref = client_mod.intOf(client_mod.arrayOf(sp.value.object.get("scopes"))[0].object.get("variablesReference")) orelse 0;
+    const scopes = client_mod.arrayOf(sp.value.object.get("scopes"));
+    for (scopes, 0..) |scope, si| {
+        if (si > 0 and !opts.compiler) break;
+        const ref = client_mod.intOf(scope.object.get("variablesReference")) orelse 0;
+        if (si > 0) try out.print(gpa, "  [{s}]\n", .{client_mod.strOf(scope.object.get("name")) orelse "?"});
+        try printVariables(gpa, d, ref, if (si == 0) opts.expand else 0, 0, out);
+    }
+    if (opts.typeinfo.len > 0) try printTypeInfo(gpa, d, opts.typeinfo, out);
+}
+
+fn printVariables(gpa: std.mem.Allocator, d: *Driver, ref: i64, depth: u32, level: u32, out: *std.ArrayListUnmanaged(u8)) !void {
     const vs = try d.call("variables", .{ .variablesReference = ref });
     var vp = try std.json.parseFromSlice(std.json.Value, gpa, vs, .{});
     defer vp.deinit();
-    var sep: []const u8 = "  | ";
-    for (client_mod.arrayOf(vp.value.object.get("variables"))) |v| {
-        try out.print(gpa, "{s}{s} = {s}", .{ sep, client_mod.strOf(v.object.get("name")) orelse "?", client_mod.strOf(v.object.get("value")) orelse "?" });
-        sep = ", ";
+    const list = client_mod.arrayOf(vp.value.object.get("variables"));
+    if (depth == 0 and level == 0) {
+        // One line: `| a = 1, b = 2`.
+        var sep: []const u8 = "  | ";
+        for (list) |v| {
+            try out.print(gpa, "{s}{s} = {s}", .{ sep, client_mod.strOf(v.object.get("name")) orelse "?", client_mod.strOf(v.object.get("value")) orelse "?" });
+            sep = ", ";
+        }
+        if (!std.mem.eql(u8, sep, "  | ")) try out.append(gpa, '\n');
+        return;
     }
-    if (!std.mem.eql(u8, sep, "  | ")) try out.append(gpa, '\n');
+    for (list) |v| {
+        try out.appendNTimes(gpa, ' ', 4 + level * 2);
+        try out.print(gpa, "{s} = {s}\n", .{ client_mod.strOf(v.object.get("name")) orelse "?", client_mod.strOf(v.object.get("value")) orelse "?" });
+        const child = client_mod.intOf(v.object.get("variablesReference")) orelse 0;
+        if (child != 0 and level + 1 < depth) try printVariables(gpa, d, child, depth, level + 1, out);
+    }
+}
+
+/// Ask `zigct/typeInfo` for the type called `name` (found from the type events seen so far).
+fn printTypeInfo(gpa: std.mem.Allocator, d: *Driver, name: []const u8, out: *std.ArrayListUnmanaged(u8)) !void {
+    const id = d.type_ids.get(name) orelse {
+        try out.print(gpa, "  typeinfo {s}: unknown type\n", .{name});
+        return;
+    };
+    const body = d.call("zigct/typeInfo", .{ .id = id }) catch |err| {
+        try out.print(gpa, "  typeinfo {s}: {s}\n", .{ name, @errorName(err) });
+        return;
+    };
+    var p = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
+    defer p.deinit();
+    try out.print(gpa, "  typeinfo {s}: size {d}, align {d}\n", .{ name, client_mod.intOf(p.value.object.get("size")) orelse -1, client_mod.intOf(p.value.object.get("alignment")) orelse -1 });
+    for (client_mod.arrayOf(p.value.object.get("fields"))) |f| {
+        try out.print(gpa, "    {s}: {s}\n", .{ client_mod.strOf(f.object.get("name")) orelse "?", client_mod.strOf(f.object.get("type")) orelse "" });
+    }
 }
 
 // ---- golden transcripts ----
@@ -353,6 +457,18 @@ test "zigct: breakpoints, stepping in/over/out and comptime var in a loop" {
 
 test "zigct: structs, arrays, slices and enums as locals" {
     try golden("values");
+}
+
+test "zigct: structured values open into fields, elements, payloads, pointees and type fields" {
+    try golden("expand");
+}
+
+test "zigct: @compileLog goes to the console and can stop; the Compiler scope shows the branch count" {
+    try golden("log");
+}
+
+test "zigct: types are reported as they are built, and the fields of a resolved type can be asked for" {
+    try golden("types");
 }
 
 test "zigct: stop at a compile error before the stack unwinds" {

@@ -1,0 +1,11 @@
+stopped entry
+  comptime log.zig:2
+  [Compiler]
+  | backward branches / quota = 0 / 1000, backward branches (all analysis) = 1
+  output: @compileLog: @as(*const [2:0]u8, "at"), @as(u32, 1)
+stopped exception: @compileLog: @as(*const [2:0]u8, "at"), @as(u32, 1)
+  comptime log.zig:4
+  | i = 1
+  [Compiler]
+  | backward branches / quota = 1 / 1000, backward branches (all analysis) = 2
+terminated

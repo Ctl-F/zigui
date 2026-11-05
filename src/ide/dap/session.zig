@@ -97,6 +97,24 @@ pub const ChangeHook = struct {
     }
 };
 
+/// Events and requests that are not standard DAP (zigct's `zigct/typeEvent`, ...).
+pub const CustomHook = struct {
+    ctx: ?*anyopaque = null,
+    call: *const fn (ctx: ?*anyopaque, name: []const u8, body: std.json.Value) void,
+
+    pub fn bind(ctx: anytype, comptime f: anytype) CustomHook {
+        const Ptr = @TypeOf(ctx);
+        return .{
+            .ctx = @ptrCast(ctx),
+            .call = &struct {
+                fn thunk(c: ?*anyopaque, name: []const u8, body: std.json.Value) void {
+                    f(@as(Ptr, @ptrCast(@alignCast(c.?))), name, body);
+                }
+            }.thunk,
+        };
+    }
+};
+
 const max_console_lines = 2000;
 const max_frames = 60;
 
@@ -107,6 +125,12 @@ pub const Session = struct {
     client: *Client,
     state: State = .idle,
     on_change: ?ChangeHook = null,
+    /// A comptime session stops where a compile error is raised (before the stack unwinds), and
+    /// optionally at every `@compileLog`.
+    break_compile_error: bool = true,
+    break_compile_log: bool = false,
+    /// Gets the adapter's non-standard events (names with a `/`).
+    on_custom: ?CustomHook = null,
     /// Breakpoints, in the order they were added.
     breakpoints: std.ArrayListUnmanaged(Breakpoint) = .empty,
     /// Adapter output and our own notes, one line each (capped).
@@ -321,6 +345,7 @@ pub const Session = struct {
             done.append(self.gpa, b.file) catch {};
             self.sendFile(b.file);
         }
+        self.sendExceptionFilters();
         _ = self.client.request("configurationDone", struct {}{}, client_mod.ResponseHook.bind(self, onConfigured)) catch {};
     }
 
@@ -417,7 +442,30 @@ pub const Session = struct {
             self.changed();
         } else if (std.mem.eql(u8, name, "breakpoint")) {
             self.onBreakpointEvent(body);
+        } else if (std.mem.indexOfScalar(u8, name, '/') != null) {
+            if (self.on_custom) |h| h.call(h.ctx, name, body);
         }
+    }
+
+    /// Tell a comptime adapter which exceptions stop it (also callable while the session runs).
+    pub fn sendExceptionFilters(self: *Session) void {
+        if (!self.isComptime() or !self.adapter_ready) return;
+        var filters: [2][]const u8 = undefined;
+        var n: usize = 0;
+        if (self.break_compile_error) {
+            filters[n] = "compile_error";
+            n += 1;
+        }
+        if (self.break_compile_log) {
+            filters[n] = "compile_log";
+            n += 1;
+        }
+        _ = self.client.request("setExceptionBreakpoints", .{ .filters = filters[0..n] }, null) catch {};
+    }
+
+    /// A non-standard request (`zigct/typeInfo`); the answer goes to `hook`.
+    pub fn customRequest(self: *Session, command: []const u8, args: anytype, hook: ?client_mod.ResponseHook) !u32 {
+        return self.client.request(command, args, hook);
     }
 
     fn onStopped(self: *Session, body: std.json.Value) void {
