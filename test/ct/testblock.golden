@@ -1,0 +1,13 @@
+stopped entry
+  test.doubles at comptime testblock.zig:9
+stopped step
+  test.doubles at comptime testblock.zig:10
+  | k = 3
+stopped step
+  twice testblock.zig:4
+  test.doubles at comptime testblock.zig:10
+  | x = 3
+stopped step
+  test.doubles at comptime testblock.zig:11
+  | k = 6
+terminated

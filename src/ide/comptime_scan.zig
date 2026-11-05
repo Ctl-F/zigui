@@ -6,6 +6,7 @@
 //!     b.start_line; b.end_line;     // 1-based, the whole `comptime { ... }` (or expression)
 //!     b.fn_path;                    // "run" or "Counter.step": what must be referenced; "" at container level
 //!     b.problem;                    // why it cannot be run from another file ("" when it can)
+//!     b.in_test;                    // inside a `test` declaration (run in test mode)
 //!     const root = try rootSource(gpa, "src/lib.zig", b.fn_path);   // text of the synthetic root
 //!
 //! **What the compiler needs.** A container-level `comptime {}` runs when its file is analyzed,
@@ -25,6 +26,8 @@ pub const Block = struct {
     /// The path to the enclosing function from the file's root ("" for a container-level block).
     fn_path: []const u8,
     problem: []const u8,
+    /// The block is inside a `test` declaration: the compiler must analyze like `zig test`.
+    in_test: bool = false,
 
     pub fn deinit(self: *Block) void {
         self.arena.deinit();
@@ -68,6 +71,15 @@ pub fn findBlock(gpa: std.mem.Allocator, source: [:0]const u8, offset: usize) !?
     var out: Block = .{ .arena = .init(gpa), .start_line = lineOf(source, bs[0]), .end_line = lineOf(source, bs[1] -| 1), .fn_path = "", .problem = "" };
     errdefer out.arena.deinit();
     const a = out.arena.allocator();
+
+    // Inside a `test`? (Its body is analyzed when the compiler runs in test mode.)
+    i = 0;
+    while (i < ast.nodes.len) : (i += 1) {
+        const n: Ast.Node.Index = @enumFromInt(i);
+        if (ast.nodeTag(n) != .test_decl) continue;
+        const s = span(&ast, n);
+        if (s[0] <= bs[0] and s[1] >= bs[1]) out.in_test = true;
+    }
 
     // Enclosing containers and the function, outermost first.
     const Item = struct { start: usize, len: usize, name: []const u8, is_fn: bool, ok: bool, why: []const u8 };
@@ -193,6 +205,27 @@ test "the innermost comptime block is found, with the function it needs" {
     defer testing.allocator.free(root);
     try testing.expect(std.mem.indexOf(u8, root, "@import(\"src/lib.zig\")") != null);
     try testing.expect(std.mem.indexOf(u8, root, "_ = &m.run;") != null);
+}
+
+test "a block inside a test declaration is recognised" {
+    const src =
+        \\test "x" {
+        \\    comptime {
+        \\        _ = 1;
+        \\    }
+        \\}
+        \\comptime {
+        \\    _ = 2;
+        \\}
+        \\
+    ;
+    var t = (try findBlock(testing.allocator, src, std.mem.indexOf(u8, src, "_ = 1").?)).?;
+    defer t.deinit();
+    try testing.expect(t.in_test);
+    try testing.expectEqualStrings("", t.fn_path);
+    var c = (try findBlock(testing.allocator, src, std.mem.indexOf(u8, src, "_ = 2").?)).?;
+    defer c.deinit();
+    try testing.expect(!c.in_test);
 }
 
 test "methods of types are reached by their path; private and generic functions are explained" {

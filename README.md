@@ -497,6 +497,8 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   so every artifact prints its command) is parsed by `comptime_graph.zig`; the artifact's root
   module gets a wrapper root and a new `zct_target` module copies the settings/imports of the
   module holding the block (wrappers are written in module folders and removed afterwards).
+  Blocks inside `test` declarations: launch `testMode` makes zigct run `zig test --test-no-exec`
+  (the root wrapper imports the file so its tests are analyzed; only for the artifact's own module).
   CT-3: the hook keeps a handle table per stop so `variables` expands struct, array, slice,
   optional, union, pointer and `type` values lazily (readers only touch keys they have
   checked: Value accessors assert); `@compileLog` and errors become output events and

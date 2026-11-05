@@ -49,6 +49,8 @@ pub const ComptimeOptions = struct {
     file: []const u8,
     start_line: u32,
     end_line: u32,
+    /// The block is inside a `test` declaration: analyze like `zig test`.
+    test_mode: bool = false,
     /// What the block needs referenced (`comptime_scan.Block.fn_path`).
     fn_path: []const u8 = "",
     /// The Zig installation's `lib` directory (the compiler reads `std` from there).
@@ -257,6 +259,7 @@ pub const Debugger = struct {
                 .fn_path = try self.gpa.dupe(u8, opts.fn_path),
                 .zig_lib_dir = try self.gpa.dupe(u8, opts.zig_lib_dir),
                 .stop_on_entry = opts.stop_on_entry,
+                .test_mode = opts.test_mode,
             },
         };
         self.prep = p;
@@ -322,7 +325,10 @@ pub const Debugger = struct {
             self.session.say(text_tail);
             return self.refuse("the build did not report any compile step: see the messages above");
         }
-        const plan = comptime_graph.plan(a, compiles, self.project.root, file, fn_path) catch null;
+        const plan = comptime_graph.plan(a, compiles, self.project.root, file, fn_path, o2.test_mode) catch |err| {
+            if (err == error.TestNotInRootModule) return self.refuse("a block in a test can only be debugged when its file belongs to the artifact's own module (not to a dependency)");
+            return self.refuse("could not plan the module graph");
+        };
         if (plan == null) self.session.say("[this file is not in a module of the build: it is evaluated as a standalone file in the project folder]");
         const ct = zigct.find(self.gpa, self.io, self.environ) orelse return self.refuse("zigct is not built");
         defer self.gpa.free(ct);
@@ -364,6 +370,7 @@ pub const Debugger = struct {
             .sourceRoot = self.project.root,
             .cacheDir = cache,
             .stopOnEntry = opts.stop_on_entry,
+            .testMode = opts.test_mode,
             .target = .{ .file = opts.file, .startLine = opts.start_line, .endLine = opts.end_line },
         }, .{});
         defer gpa.free(launch);
@@ -923,4 +930,51 @@ test "comptime session in a project with a dependency: the build's module graph 
     d.poll(0);
     try testing.expect(!p.exists("src/.zigct-root.zig"));
     try testing.expect(!p.exists("src/.zigct-target.zig"));
+}
+
+test "comptime session for a block inside a test declaration runs in test mode" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var p = try project_mod.testProject(&tmp);
+    defer p.close();
+    try p.writeFile("src/t.zig",
+        \\const std = @import("std");
+        \\
+        \\test "doubles" {
+        \\    comptime {
+        \\        var k: u32 = 3;
+        \\        k *= 2;
+        \\        _ = &k;
+        \\    }
+        \\    try std.testing.expect(true);
+        \\}
+        \\
+    );
+    var env = try testing.environ.createMap(testing.allocator);
+    defer env.deinit();
+    const d = try Debugger.create(testing.allocator, testing.io, &p, &env, .{});
+    defer d.destroy();
+    const ct = zigct.find(testing.allocator, testing.io, &env) orelse {
+        std.debug.print("zigct is not built: skipping (tools/zigct/build.sh)\n", .{});
+        return error.SkipZigTest;
+    };
+    testing.allocator.free(ct);
+    const lib = zigLibDir(testing.allocator, testing.io) orelse return error.SkipZigTest;
+    defer testing.allocator.free(lib);
+    const abs = try p.absPath(testing.allocator, "src/t.zig");
+    defer testing.allocator.free(abs);
+    try d.startComptime(.{ .file = abs, .start_line = 4, .end_line = 8, .test_mode = true, .zig_lib_dir = lib, .read_build = false });
+    try pumpUntil(d, 30000, isStopped);
+    const s = d.session;
+    if (s.state != .stopped) {
+        for (s.console.items) |l| std.debug.print("console: {s}\n", .{l});
+        return error.TestUnexpectedResult;
+    }
+    try testing.expectEqual(@as(u32, 5), s.frames[0].line);
+    try testing.expect(std.mem.indexOf(u8, s.frames[0].name, "doubles") != null);
+    s.continueRun();
+    try pumpUntil(d, 30000, isTerminated);
+    d.poll(0);
+    try testing.expect(!p.exists(comptime_root));
 }

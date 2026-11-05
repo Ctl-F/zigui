@@ -299,7 +299,7 @@ const App = struct {
         defer self.gpa.free(abs);
         self.typesp.clear();
         self.setStatus("debugging the comptime block at line {d}", .{b.start_line});
-        self.dbg.startComptime(.{ .file = abs, .start_line = b.start_line, .end_line = b.end_line, .fn_path = b.fn_path, .zig_lib_dir = self.zig_lib_dir }) catch |err| {
+        self.dbg.startComptime(.{ .file = abs, .start_line = b.start_line, .end_line = b.end_line, .fn_path = b.fn_path, .test_mode = b.in_test, .zig_lib_dir = self.zig_lib_dir }) catch |err| {
             self.setStatus("could not start comptime debugging: {s}", .{@errorName(err)});
         };
     }

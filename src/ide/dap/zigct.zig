@@ -215,6 +215,7 @@ pub const Driver = struct {
 ///     break FILE LINE      a breakpoint
 ///     errors               stop when a compile error is raised
 ///     logs                 stop at every @compileLog
+///     test                 analyze like `zig test` (for blocks inside `test` declarations)
 ///     expand N             show the children of the top frame's locals, N levels deep
 ///     compiler             also show the "Compiler" scope (branch counts)
 ///     types                print the type events as they arrive
@@ -233,6 +234,7 @@ pub fn runScript(gpa: std.mem.Allocator, io: std.Io, zigct: []const u8, zig_lib:
     var target: ?struct { file: []const u8, a: u32, b: u32 } = null;
     var errors = false;
     var logs = false;
+    var test_mode = false;
     var opts: TranscriptOptions = .{};
     var breaks: std.ArrayListUnmanaged(struct { file: []const u8, line: u32 }) = .empty;
     defer breaks.deinit(gpa);
@@ -252,6 +254,8 @@ pub fn runScript(gpa: std.mem.Allocator, io: std.Io, zigct: []const u8, zig_lib:
             errors = true;
         } else if (std.mem.eql(u8, verb, "logs")) {
             logs = true;
+        } else if (std.mem.eql(u8, verb, "test")) {
+            test_mode = true;
         } else if (std.mem.eql(u8, verb, "expand")) {
             opts.expand = try std.fmt.parseInt(u32, it.next().?, 10);
         } else if (std.mem.eql(u8, verb, "compiler")) {
@@ -278,6 +282,7 @@ pub fn runScript(gpa: std.mem.Allocator, io: std.Io, zigct: []const u8, zig_lib:
                 .sourceRoot = dir,
                 .cacheDir = cache,
                 .stopOnEntry = entry,
+                .testMode = test_mode,
                 .target = if (target) |t| .{ .file = tfile.?, .startLine = t.a, .endLine = t.b } else null,
             });
             for (breaks.items) |b| {
@@ -469,6 +474,10 @@ test "zigct: @compileLog goes to the console and can stop; the Compiler scope sh
 
 test "zigct: types are reported as they are built, and the fields of a resolved type can be asked for" {
     try golden("types");
+}
+
+test "zigct: a comptime block inside a test declaration, evaluated like zig test" {
+    try golden("testblock");
 }
 
 test "zigct: stop at a compile error before the stack unwinds" {

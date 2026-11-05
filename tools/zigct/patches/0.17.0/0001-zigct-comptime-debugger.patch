@@ -190,7 +190,7 @@
      switch (stringToEnum(Cmd, cmd) orelse {
          std.log.info("{s}", .{usage});
          fatal("unknown command: {s}", .{args[1]});
-@@ -329,6 +359,23 @@
+@@ -329,6 +359,24 @@
              dev.check(.build_lib_command);
              return buildOutputType(gpa, arena, io, args, .{ .build = .Lib }, environ_map);
          },
@@ -201,20 +201,21 @@
 +            if (!zct_hook.handshake()) return;
 +            var list: std.ArrayList([]const u8) = .empty;
 +            try list.append(arena, args[0]);
-+            try list.append(arena, "build-obj");
++            try list.append(arena, if (zct_hook.launch.test_mode) "test" else "build-obj");
++            if (zct_hook.launch.test_mode) try list.append(arena, "--test-no-exec");
 +            try list.appendSlice(arena, zct_hook.launch.zig_args);
 +            try list.appendSlice(arena, &.{ "-fno-emit-bin", "-j1" });
 +            if (zct_hook.launch.cache_dir.len > 0) {
 +                try list.appendSlice(arena, &.{ "--cache-dir", zct_hook.launch.cache_dir, "--global-cache-dir", try std.fmt.allocPrint(arena, "{s}/global", .{zct_hook.launch.cache_dir}) });
 +            }
-+            const result = buildOutputType(gpa, arena, io, list.items, .{ .build = .Obj }, environ_map);
++            const result = buildOutputType(gpa, arena, io, list.items, if (zct_hook.launch.test_mode) .zig_test else .{ .build = .Obj }, environ_map);
 +            zct_hook.finish(if (result) |_| 0 else |_| 1);
 +            return result;
 +        },
          .@"build-obj" => {
              dev.check(.build_obj_command);
              return buildOutputType(gpa, arena, io, args, .{ .build = .Obj }, environ_map);
-@@ -3866,6 +3913,7 @@
+@@ -3866,6 +3914,7 @@
              error.CompileErrorsReported => {
                  assert(listen == .none);
                  saveState(comp, incremental);
@@ -222,7 +223,7 @@
                  process.exit(1);
              },
              else => |e| return e,
-@@ -3980,6 +4028,7 @@
+@@ -3980,6 +4029,7 @@
      }
  
      // Skip resource deallocation in release builds; let the OS do it.
@@ -294,7 +295,7 @@
          const last = gz.instructions.items[gz.instructions.items.len - 1];
 --- /dev/null
 +++ b/src/zct_hook.zig
-@@ -0,0 +1,845 @@
+@@ -0,0 +1,848 @@
 +//! zigct: a comptime debugger inside the compiler. Sema calls the entry points below while it
 +//! evaluates comptime code (see the patch in tools/zigct/patches). Everything is a no-op unless
 +//! `enabled`. Two modes:
@@ -869,6 +870,8 @@
 +    /// Arguments for `zig build-obj` (root file, modules, flags).
 +    zig_args: []const []const u8 = &.{},
 +    cache_dir: []const u8 = "",
++    /// Analyze like `zig test` (the file's `test` declarations are analyzed): for blocks inside tests.
++    test_mode: bool = false,
 +};
 +pub var launch: Launch = .{};
 +
@@ -1048,6 +1051,7 @@
 +fn applyLaunch(args: std.json.Value) void {
 +    if (str(args, "sourceRoot")) |s| source_root = gpa.dupe(u8, s) catch "";
 +    stop_on_entry = boolean(args, "stopOnEntry") orelse false;
++    launch.test_mode = boolean(args, "testMode") orelse false;
 +    if (str(args, "cacheDir")) |s| launch.cache_dir = gpa.dupe(u8, s) catch "";
 +    if (field(args, "target")) |t| {
 +        if (str(t, "file")) |f| target_file = gpa.dupe(u8, f) catch "";

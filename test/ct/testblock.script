@@ -1,0 +1,9 @@
+root testblock.zig
+test
+target testblock.zig 8 13
+entry
+run
+next
+in
+out
+continue

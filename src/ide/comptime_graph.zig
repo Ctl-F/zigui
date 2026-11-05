@@ -104,24 +104,64 @@ fn dropped(tok: []const u8) enum { no, one, two } {
     return .no;
 }
 
+/// A block inside a `test` is evaluated by analyzing like `zig test`, which only takes the tests of
+/// the artifact's own (root) module: the file must belong to it.
+pub const TestError = error{TestNotInRootModule};
+
 /// Arguments that evaluate the block of `target_abs` (in the module whose folder holds it), or null
 /// when no module of any artifact holds the file. `fn_path` is `comptime_scan.Block.fn_path`.
-pub fn plan(a: std.mem.Allocator, compiles: []const Compile, project_root: []const u8, target_abs: []const u8, fn_path: []const u8) !?Plan {
+/// With `test_mode` the file must be in the root module of an artifact (`error.TestNotInRootModule`
+/// otherwise) and no extra module is made: the wrapper root imports the file.
+pub fn plan(a: std.mem.Allocator, compiles: []const Compile, project_root: []const u8, target_abs: []const u8, fn_path: []const u8, test_mode: bool) !?Plan {
     var best: ?struct { c: Compile, m: Module, dir: []const u8, rank: usize } = null;
+    var held_elsewhere = false;
     for (compiles) |c| {
         for (c.modules, 0..) |m, idx| {
             const root_abs = try absOf(a, project_root, m.root);
             const dir = std.fs.path.dirname(root_abs) orelse continue;
             if (!inside(dir, target_abs)) continue;
+            if (test_mode and idx != 0) {
+                held_elsewhere = true;
+                continue;
+            }
             // The longest folder wins; among equals the artifact's root module, then the first seen.
             const rank = dir.len * 4 + (if (idx == 0) @as(usize, 1) else 0);
             if (best == null or rank > best.?.rank) best = .{ .c = c, .m = m, .dir = dir, .rank = rank };
         }
     }
-    const found = best orelse return null;
+    const found = best orelse return if (test_mode and held_elsewhere) error.TestNotInRootModule else null;
     const c = found.c;
     const root_mod = c.modules[0];
     const root_dir = std.fs.path.dirname(try absOf(a, project_root, root_mod.root)).?;
+
+    if (test_mode) {
+        // One file: the root imports the block's file (same module, so its tests are analyzed).
+        const rel_t = target_abs[found.dir.len + 1 ..];
+        const src = try comptime_scan.rootSource(a, rel_t, fn_path);
+        const files1 = try a.alloc(File, 1);
+        files1[0] = .{ .path = try std.fs.path.join(a, &.{ root_dir, root_wrapper }), .content = src };
+        var out1: std.ArrayListUnmanaged([]const u8) = .empty;
+        var first = true;
+        var k: usize = 0;
+        while (k < c.args.len) : (k += 1) {
+            const t = c.args[k];
+            switch (dropped(t)) {
+                .two => {
+                    k += 1;
+                    continue;
+                },
+                .one => continue,
+                .no => {},
+            }
+            if (std.mem.startsWith(u8, t, "-M") and first) {
+                first = false;
+                try out1.append(a, try std.fmt.allocPrint(a, "-M{s}={s}", .{ root_mod.name, files1[0].path }));
+                continue;
+            }
+            try out1.append(a, t);
+        }
+        return .{ .args = try out1.toOwnedSlice(a), .files = files1, .module = root_mod.name };
+    }
 
     // The two files.
     const rel = target_abs[found.dir.len + 1 ..];
@@ -192,7 +232,7 @@ test "a block in the root module: the root is replaced by a wrapper and zct_targ
     defer arena.deinit();
     const a = arena.allocator();
     const cs = try parse(a, sample);
-    const p = (try plan(a, cs, "/proj", "/proj/src/main.zig", "")).?;
+    const p = (try plan(a, cs, "/proj", "/proj/src/main.zig", "", false)).?;
     try testing.expectEqualStrings("root", p.module);
     try testing.expectEqualStrings("/proj/src/.zigct-target.zig", p.files[0].path);
     try testing.expectEqualStrings("/proj/src/.zigct-root.zig", p.files[1].path);
@@ -217,10 +257,23 @@ test "a block in a dependency's folder is reached through that module" {
     defer arena.deinit();
     const a = arena.allocator();
     const cs = try parse(a, sample);
-    const p = (try plan(a, cs, "/proj", "/proj/mylib/src/helpers.zig", "tools.run")).?;
+    const p = (try plan(a, cs, "/proj", "/proj/mylib/src/helpers.zig", "tools.run", false)).?;
     try testing.expectEqualStrings("mylib", p.module);
     try testing.expectEqualStrings("/proj/mylib/src/.zigct-target.zig", p.files[0].path);
     try testing.expect(std.mem.indexOf(u8, p.files[0].content, "_ = &m.tools.run;") != null);
     try testing.expectEqualStrings("/proj/src/.zigct-root.zig", p.files[1].path);
-    try testing.expect((try plan(a, cs, "/proj", "/elsewhere/x.zig", "")) == null);
+    try testing.expect((try plan(a, cs, "/proj", "/elsewhere/x.zig", "", false)) == null);
+}
+
+test "test mode: the root wrapper imports the file directly; a file of another module is refused" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cs = try parse(a, sample);
+    const p = (try plan(a, cs, "/proj", "/proj/src/util.zig", "", true)).?;
+    try testing.expectEqual(@as(usize, 1), p.files.len);
+    try testing.expectEqualStrings("/proj/src/.zigct-root.zig", p.files[0].path);
+    try testing.expect(std.mem.indexOf(u8, p.files[0].content, "@import(\"util.zig\")") != null);
+    for (p.args) |t| try testing.expect(!std.mem.eql(u8, t, "zct_target"));
+    try testing.expectError(error.TestNotInRootModule, plan(a, cs, "/proj", "/proj/mylib/src/helpers.zig", "", true));
 }
