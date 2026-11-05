@@ -1,0 +1,10 @@
+root oneline.zig
+break oneline.zig 4
+run
+continue
+continue
+continue
+continue
+continue
+continue
+continue

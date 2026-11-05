@@ -492,7 +492,7 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   folder, so the project is one module; removed at the end); `Debugger.startComptime`
   spawns zigct and starts a `Session` with raw launch arguments; the panels are shared.
   The build script and patch are embedded in the IDE (anonymous imports) and written out
-  by Zig > Build Comptime Debugger. Alt+F5.
+  by Zig > Build Comptime Debugger. Ctrl+F7.
   Module graph: `ZCT_DRYRUN=1 zigct build --verbose` (compile steps wait for their stdin to close,
   so every artifact prints its command) is parsed by `comptime_graph.zig`; the artifact's root
   module gets a wrapper root and a new `zct_target` module copies the settings/imports of the

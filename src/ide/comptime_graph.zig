@@ -33,15 +33,34 @@ pub const Compile = struct {
     modules: []const Module,
 };
 
+/// `text` without terminal colour codes (`ESC [ ... letter`): the build colours its messages when
+/// it thinks it talks to a terminal.
+pub fn stripAnsi(a: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == 0x1b and i + 1 < text.len and text[i + 1] == '[') {
+            i += 2;
+            while (i < text.len and !std.ascii.isAlphabetic(text[i])) i += 1;
+            i += 1;
+            continue;
+        }
+        try out.append(a, text[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice(a);
+}
+
 /// The compile commands in the output of `zig build --verbose` (the build script's own runner and
 /// non-compile commands are left out).
-pub fn parse(a: std.mem.Allocator, text: []const u8) ![]Compile {
+pub fn parse(a: std.mem.Allocator, raw_text: []const u8) ![]Compile {
+    const text = try stripAnsi(a, raw_text);
     var out: std.ArrayListUnmanaged(Compile) = .empty;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
         var line = std.mem.trim(u8, raw, " \r\t");
-        const marker = "info(verbose): ";
-        if (std.mem.startsWith(u8, line, marker)) line = line[marker.len..];
+        const marker = "(verbose): ";
+        if (std.mem.indexOf(u8, line, marker)) |at| line = line[at + marker.len ..];
         var toks: std.ArrayListUnmanaged([]const u8) = .empty;
         var it = std.mem.tokenizeScalar(u8, line, ' ');
         while (it.next()) |t| try toks.append(a, t);
@@ -276,4 +295,15 @@ test "test mode: the root wrapper imports the file directly; a file of another m
     try testing.expect(std.mem.indexOf(u8, p.files[0].content, "@import(\"util.zig\")") != null);
     for (p.args) |t| try testing.expect(!std.mem.eql(u8, t, "zct_target"));
     try testing.expectError(error.TestNotInRootModule, plan(a, cs, "/proj", "/proj/mylib/src/helpers.zig", "", true));
+}
+
+test "colour codes in the build's output do not hide the compile commands" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const coloured = "\x1b[32m\x1b[1minfo\x1b[0m\x1b[2m\x1b[1m(verbose): \x1b[0m/home/u/.cache/zigct/bin/zigct build-exe -Odebug --dep Lib -Mroot=src/main.zig -MLib=src/root.zig --cache-dir c --name N --listen=-\n";
+    const cs = try parse(a, coloured);
+    try testing.expectEqual(@as(usize, 1), cs.len);
+    try testing.expectEqualStrings("Lib", cs[0].modules[1].name);
+    try testing.expectEqualStrings("src/root.zig", cs[0].modules[1].root);
 }

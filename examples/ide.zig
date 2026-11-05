@@ -32,7 +32,7 @@ const default_bindings = [_][2][]const u8{
     .{ "f10", "debug.step_over" },
     .{ "f11", "debug.step_in" },
     .{ "shift+f11", "debug.step_out" },
-    .{ "alt+f5", "debug.comptime_here" },
+    .{ "ctrl+f7", "debug.comptime_here" },
     .{ "mod+b", "ide.build" },
     .{ "ctrl+shift+f6", "ide.restart" },
     .{ "ctrl+shift+f5", "ide.build_restart" },
@@ -276,7 +276,7 @@ const App = struct {
         };
     }
 
-    /// Alt+F5: debug the `comptime` block under the cursor with zigct.
+    /// Ctrl+F7: debug the `comptime` block under the cursor with zigct.
     fn debugComptime(self: *App) void {
         const s = self.dbg.session;
         if (s.active() or self.dbg.preparing()) return self.setStatus("a debug session is already running", .{});

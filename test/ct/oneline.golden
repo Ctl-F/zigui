@@ -1,0 +1,13 @@
+stopped breakpoint
+  comptime oneline.zig:4
+  | t = 0, i = 0
+stopped breakpoint
+  comptime oneline.zig:4
+  | t = 0, i = 1
+stopped breakpoint
+  comptime oneline.zig:4
+  | t = 1, i = 2
+stopped breakpoint
+  comptime oneline.zig:4
+  | t = 3, i = 3
+terminated

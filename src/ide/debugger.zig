@@ -63,6 +63,7 @@ const Prep = struct {
     text: std.ArrayListUnmanaged(u8) = .empty,
     started_ms: u64,
     last_data_ms: u64,
+    last_notify_ms: u64 = 0,
     opts: ComptimeOptions,
 };
 
@@ -234,12 +235,17 @@ pub const Debugger = struct {
         if (!self.project.hasBuildZig() or builtin.os.tag == .windows or !opts.read_build) return self.launchComptime(ct, opts, null);
 
         const home = if (self.environ) |e| e.get("HOME") orelse "/tmp" else "/tmp";
+        // The answer only changes with the build files: ask the build once per version of them.
+        if (self.readGraphCache(home)) |text| {
+            defer self.gpa.free(text);
+            return self.proceedWithGraph(opts, text, ct);
+        }
         const cache = try std.fmt.allocPrint(self.gpa, "{s}/.cache/zigui-ide/zigct/graph-cache", .{home});
         defer self.gpa.free(cache);
         const lib_env = try std.fmt.allocPrint(self.gpa, "ZIG_LIB_DIR={s}", .{opts.zig_lib_dir});
         defer self.gpa.free(lib_env);
         const runner = process.Runner.start(self.gpa, self.io, .{
-            .argv = &.{ "env", "ZCT_DRYRUN=1", lib_env, ct, "build", "--verbose", "--cache-dir", cache },
+            .argv = &.{ "env", "ZCT_DRYRUN=1", lib_env, ct, "build", "--color", "off", "--verbose", "--cache-dir", cache },
             .cwd = self.project.root,
             .stdin = true,
             .wake = self.wake,
@@ -301,38 +307,94 @@ pub const Debugger = struct {
         }
         const quiet = now_ms -% p.last_data_ms > 1500;
         const long = now_ms -% p.started_ms > 300_000;
-        if (!exited and !long and !quiet) return;
+        if (!exited and !long and !quiet) {
+            // Show that something is happening: the panel's status counts the seconds.
+            if (now_ms -% p.last_notify_ms >= 1000) {
+                p.last_notify_ms = now_ms;
+                if (self.on_change) |h| h.call(h.ctx);
+            }
+            return;
+        }
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
         // The parsed commands point into this copy: the build run's buffer is freed below.
-        const text = a.dupe(u8, p.text.items) catch return;
-        const compiles = comptime_graph.parse(a, text) catch &.{};
-        if (compiles.len == 0 and !exited and !long) return; // the build is still configuring
-        // Take over the options, then drop the build run.
-        const opts: ComptimeOptions = p.opts;
-        const file = a.dupe(u8, opts.file) catch return;
-        const fn_path = a.dupe(u8, opts.fn_path) catch return;
-        const lib = a.dupe(u8, opts.zig_lib_dir) catch return;
-        const text_tail = text[text.len -| 1500..];
-        var o2 = opts;
-        o2.file = file;
-        o2.fn_path = fn_path;
-        o2.zig_lib_dir = lib;
-        self.cancelPrep();
+        const text = comptime_graph.stripAnsi(a, p.text.items) catch return;
+        const found = comptime_graph.parse(a, text) catch &[_]comptime_graph.Compile{};
+        const has = found.len > 0;
+        if (!has and !exited and !long) return; // the build is still configuring
+        const opts = self.takePrep(a) orelse return;
+        if (has) self.writeGraphCache(text);
+        const ct = zigct.find(self.gpa, self.io, self.environ) orelse return self.refuse("zigct is not built");
+        defer self.gpa.free(ct);
+        self.proceedWithGraph(opts, text, ct);
+    }
 
+    /// Copy the options of the running preparation into `a` and drop the build run.
+    fn takePrep(self: *Debugger, a: std.mem.Allocator) ?ComptimeOptions {
+        const p = self.prep orelse return null;
+        var o = p.opts;
+        o.file = a.dupe(u8, p.opts.file) catch return null;
+        o.fn_path = a.dupe(u8, p.opts.fn_path) catch return null;
+        o.zig_lib_dir = a.dupe(u8, p.opts.zig_lib_dir) catch return null;
+        self.cancelPrep();
+        return o;
+    }
+
+    /// With the build's output (`text`, colours stripped): plan the module graph and launch.
+    fn proceedWithGraph(self: *Debugger, opts: ComptimeOptions, text: []const u8, ct: []const u8) void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const compiles = comptime_graph.parse(a, text) catch &[_]comptime_graph.Compile{};
         if (compiles.len == 0) {
-            self.session.say(text_tail);
+            self.session.say(text[text.len -| 1500..]);
             return self.refuse("the build did not report any compile step: see the messages above");
         }
-        const plan = comptime_graph.plan(a, compiles, self.project.root, file, fn_path, o2.test_mode) catch |err| {
+        const plan = comptime_graph.plan(a, compiles, self.project.root, opts.file, opts.fn_path, opts.test_mode) catch |err| {
             if (err == error.TestNotInRootModule) return self.refuse("a block in a test can only be debugged when its file belongs to the artifact's own module (not to a dependency)");
             return self.refuse("could not plan the module graph");
         };
         if (plan == null) self.session.say("[this file is not in a module of the build: it is evaluated as a standalone file in the project folder]");
-        const ct = zigct.find(self.gpa, self.io, self.environ) orelse return self.refuse("zigct is not built");
+        self.launchComptime(ct, opts, plan) catch {};
+    }
+
+    // ---- the module graph cache ----
+
+    /// Where the graph of the current build files is kept (null when it cannot be told).
+    fn graphCachePath(self: *Debugger, home: []const u8) ?[]u8 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(self.project.root);
+        for ([_][]const u8{ "build.zig", "build.zig.zon" }) |f| {
+            const bytes = self.project.readFile(self.gpa, f, 4 * 1024 * 1024) catch continue;
+            defer self.gpa.free(bytes);
+            h.update(f);
+            h.update(bytes);
+        }
+        const ct = zigct.find(self.gpa, self.io, self.environ) orelse return null;
         defer self.gpa.free(ct);
-        self.launchComptime(ct, o2, plan) catch {};
+        h.update(ct);
+        return std.fmt.allocPrint(self.gpa, "{s}/.cache/zigui-ide/zigct/graph/{x}.txt", .{ home, h.final() }) catch null;
+    }
+
+    fn readGraphCache(self: *Debugger, home: []const u8) ?[]u8 {
+        const path = self.graphCachePath(home) orelse return null;
+        defer self.gpa.free(path);
+        return std.Io.Dir.cwd().readFileAlloc(self.io, path, self.gpa, .limited(1 << 20)) catch null;
+    }
+
+    fn writeGraphCache(self: *Debugger, text: []const u8) void {
+        const home = if (self.environ) |e| e.get("HOME") orelse return else return;
+        const path = self.graphCachePath(home) orelse return;
+        defer self.gpa.free(path);
+        if (std.fs.path.dirname(path)) |d| std.Io.Dir.cwd().createDirPath(self.io, d) catch return;
+        std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = text }) catch {};
+    }
+
+    /// Milliseconds the build has been read for (0 when it is not).
+    pub fn prepElapsedMs(self: *const Debugger) u64 {
+        const p = self.prep orelse return 0;
+        return self.now_ms -% p.started_ms;
     }
 
     fn launchComptime(self: *Debugger, ct: []const u8, opts: ComptimeOptions, plan: ?comptime_graph.Plan) !void {

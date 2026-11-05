@@ -17,7 +17,23 @@
  
      // We use a while (true) loop here to avoid a redundant way of breaking out of
      // the loop. The only way to break out of the loop is with a `noreturn`
-@@ -2702,6 +2705,7 @@
+@@ -1681,6 +1684,7 @@
+                 if (block.isComptime()) {
+                     // Send comptime control flow back to the beginning of this block.
+                     const src = block.nodeOffset(datas[@backingInt(inst)].node);
++                    if (zct.enabled) zct.onLoop(sema);
+                     try sema.emitBackwardBranch(block, src);
+                     i = 0;
+                     continue;
+@@ -1696,6 +1700,7 @@
+             .repeat_inline => {
+                 // Send comptime control flow back to the beginning of this block.
+                 const src = block.nodeOffset(datas[@backingInt(inst)].node);
++                if (zct.enabled) zct.onLoop(sema);
+                 try sema.emitBackwardBranch(block, src);
+                 i = 0;
+                 continue;
+@@ -2702,6 +2707,7 @@
      const io = comp.io;
  
      assert(sema.err == null);
@@ -25,7 +41,7 @@
  
      if (build_options.enable_debug_extensions and comp.debug_compile_errors) {
          var wip_errors = std.zig.ErrorBundle.Wip.init(gpa) catch @panic("out of memory");
-@@ -5066,6 +5070,7 @@
+@@ -5066,6 +5072,7 @@
          }
      }
  
@@ -33,7 +49,7 @@
      const line_data = try zcu.intern_pool.getOrPutString(gpa, io, pt.tid, aw.written(), .no_embedded_nulls);
  
      const line_idx: Zcu.CompileLogLine.Index = if (zcu.free_compile_log_lines.pop()) |idx| idx: {
-@@ -5839,9 +5844,9 @@
+@@ -5839,9 +5846,9 @@
  }
  
  fn zirDbgStmt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!void {
@@ -45,7 +61,7 @@
  
      if (block.instructions.items.len != 0) {
          const idx = block.instructions.items[block.instructions.items.len - 1];
-@@ -5864,6 +5869,11 @@
+@@ -5864,6 +5871,11 @@
      });
  }
  
@@ -57,7 +73,7 @@
  fn zirDbgEmptyStmt(_: *Sema, block: *Block, _: Zir.Inst.Index) CompileError!void {
      if (block.isComptime() or block.ownerModule().strip) return;
      _ = try block.addNoOp(.dbg_empty_stmt);
-@@ -5878,6 +5888,9 @@
+@@ -5878,6 +5890,9 @@
      const str_op = sema.code.instructions.items(.data)[@backingInt(inst)].str_op;
      const operand = sema.resolveInst(str_op.operand);
      const name = str_op.getStr(sema.code);
@@ -67,7 +83,7 @@
      try sema.addDbgVar(block, operand, air_tag, name);
  }
  
-@@ -7334,6 +7347,22 @@
+@@ -7334,6 +7349,22 @@
          }
      }
  
@@ -90,7 +106,7 @@
      if (!block.isComptime() and !block.is_typeof) {
          const zir_tags = sema.code.instructions.items(.tag);
          const zir_datas = sema.code.instructions.items(.data);
-@@ -26165,6 +26194,7 @@
+@@ -26165,6 +26196,7 @@
  
  fn emitBackwardBranch(sema: *Sema, block: *Block, src: LazySrcLoc) !void {
      sema.branch_count += 1;
@@ -98,7 +114,7 @@
      if (sema.branch_count > sema.branch_quota) {
          const msg = msg: {
              const msg = try sema.errMsg(
-@@ -35395,6 +35425,7 @@
+@@ -35395,6 +35427,7 @@
          else => |e| return e,
      };
  
@@ -106,7 +122,7 @@
      return .fromType(ty);
  }
  fn zirUnionDecl(
-@@ -35471,6 +35502,7 @@
+@@ -35471,6 +35504,7 @@
          else => |e| return e,
      };
  
@@ -114,7 +130,7 @@
      return .fromType(ty);
  }
  fn zirEnumDecl(
-@@ -35526,6 +35558,7 @@
+@@ -35526,6 +35560,7 @@
          else => |e| return e,
      };
  
@@ -122,7 +138,7 @@
      return .fromType(ty);
  }
  fn zirOpaqueDecl(
-@@ -35578,6 +35611,7 @@
+@@ -35578,6 +35613,7 @@
          else => |e| return e,
      };
  
@@ -295,7 +311,7 @@
          const last = gz.instructions.items[gz.instructions.items.len - 1];
 --- /dev/null
 +++ b/src/zct_hook.zig
-@@ -0,0 +1,848 @@
+@@ -0,0 +1,861 @@
 +//! zigct: a comptime debugger inside the compiler. Sema calls the entry points below while it
 +//! evaluates comptime code (see the patch in tools/zigct/patches). Everything is a no-op unless
 +//! `enabled`. Two modes:
@@ -340,6 +356,9 @@
 +    resolved: bool = false,
 +    line: u32 = 0,
 +    col: u32 = 0,
++    /// Loop iterations of this frame's analysis, and their count at its last statement marker.
++    loops: u32 = 0,
++    last_loops: u32 = 0,
 +};
 +
 +const BodyMark = struct { locals: usize, pushed_frame: bool };
@@ -498,7 +517,10 @@
 +    const line = f.base_line + rel_line + 1;
 +    const col = column + 1;
 +    // One source line often has several statement markers (a call has two): stop once per line.
-+    const dup = f.line == line;
++    // The same source line twice in a row is one statement (a call has two markers), unless a
++    // loop went round in between (a backward branch): then it is the next iteration.
++    const dup = f.line == line and f.loops == f.last_loops;
++    f.last_loops = f.loops;
 +    f.line = line;
 +    f.col = col;
 +    if (!dap) return traceStmt(f, line, col);
@@ -532,6 +554,13 @@
 +        };
 +    }
 +    if (reason) |r| stopHere(r, "");
++}
++
++/// A comptime loop is going round again (`repeat`): the statements after this are a new iteration.
++pub fn onLoop(sema: *Sema) void {
++    for (frames.items) |*f| {
++        if (f.sema == sema) f.loops += 1;
++    }
 +}
 +
 +pub fn onBranch(sema: *Sema) void {

@@ -480,6 +480,10 @@ test "zigct: a comptime block inside a test declaration, evaluated like zig test
     try golden("testblock");
 }
 
+test "zigct: a loop whose body is on one line stops once per statement and iteration, not once in all" {
+    try golden("oneline");
+}
+
 test "zigct: stop at a compile error before the stack unwinds" {
     try golden("error");
 }

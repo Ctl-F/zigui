@@ -85,7 +85,7 @@ pub const DebugPanel = struct {
         const into_btn = try ui.add(Button, bar, .{ .text = "Step In", .variant = .flat, .style = .{ .padding = pad }, .on_click = .bind(self, onInto) });
         const out_btn = try ui.add(Button, bar, .{ .text = "Step Out", .variant = .flat, .style = .{ .padding = pad }, .on_click = .bind(self, onOut) });
         const stop_btn = try ui.add(Button, bar, .{ .text = "Stop", .variant = .flat, .style = .{ .padding = pad }, .on_click = .bind(self, onStop) });
-        const status = try ui.add(Label, bar, .{ .text = "Not debugging. F5 builds and starts the program; F9 sets a breakpoint; Alt+F5 debugs a comptime block.", .style = .{ .grow = 1, .padding = Edges.xy(8, 0) } });
+        const status = try ui.add(Label, bar, .{ .text = "Not debugging. F5 builds and starts the program; F9 sets a breakpoint; Ctrl+F7 debugs a comptime block.", .style = .{ .grow = 1, .padding = Edges.xy(8, 0) } });
 
         const split = try ui.tree.create(.{ .style = .{ .direction = .row, .gap = Length.px(6), .grow = 1 } });
         try ui.tree.appendChild(node, split);
@@ -170,7 +170,11 @@ pub const DebugPanel = struct {
 
     fn updateStatus(self: *DebugPanel) void {
         const s = self.session();
-        if (self.debugger.preparing()) return self.status.setText("Compile-time debug (zigct): reading the build for the module graph...") catch {};
+        if (self.debugger.preparing()) {
+            var pb: [200]u8 = undefined;
+            const secs = self.debugger.prepElapsedMs() / 1000;
+            return self.status.setText(std.fmt.bufPrint(&pb, "Compile-time debug (zigct): reading the build for the module graph... {d}s (once per version of build.zig; the first time compiles the build script)", .{secs}) catch "Compile-time debug (zigct): reading the build...") catch {};
+        }
         var buf: [300]u8 = undefined;
         var buf2: [340]u8 = undefined;
         const text0: []const u8 = switch (s.state) {
