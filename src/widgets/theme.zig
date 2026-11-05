@@ -81,6 +81,12 @@ pub const EditorColors = struct {
     line_warning: Color = Color.rgba(0xe6, 0xbe, 0x3c, 0x24),
     line_note: Color = Color.rgba(0x5a, 0xa0, 0xf0, 0x1e),
     line_added: Color = Color.rgba(0x50, 0xc8, 0x6e, 0x26),
+    /// The line a debugger is stopped on.
+    line_exec: Color = Color.rgba(0xf0, 0xd0, 0x40, 0x3a),
+    /// Gutter marks (breakpoints, the current-line arrow).
+    mark_breakpoint: Color = Color.rgb(0xe0, 0x4a, 0x4a),
+    mark_dim: Color = Color.rgb(0x8a, 0x8d, 0x94),
+    mark_arrow: Color = Color.rgb(0xf0, 0xd0, 0x40),
 
     pub fn tokenColor(self: *const EditorColors, kind: syntax.TokenKind) Color {
         return self.syntax[@intFromEnum(kind)];

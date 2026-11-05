@@ -84,6 +84,8 @@ pub const DecorationKind = enum {
     note_line,
     /// Whole-line green tint (added lines of a diff).
     added_line,
+    /// Whole-line tint of the line a debugger is stopped on.
+    exec_line,
 };
 
 /// A byte range of the text with a look. Ranges follow edits: text before
@@ -103,6 +105,14 @@ pub const Fold = struct {
 
 /// Width of the fold-arrow column in the gutter.
 const fold_w: f32 = 14;
+/// Width of the marks column (breakpoints, current-line arrow) at the gutter's left edge.
+const mark_w: f32 = 16;
+
+/// What a gutter mark looks like. The host decides what it means.
+pub const MarkKind = enum { breakpoint, breakpoint_disabled, breakpoint_conditional, breakpoint_unverified, arrow };
+
+/// A mark in the gutter's marks column (`CodeEditor.setGutterMarks`).
+pub const Mark = struct { line: usize, kind: MarkKind };
 
 pub const CodeEditor = struct {
     props: Props = .{},
@@ -147,6 +157,10 @@ pub const CodeEditor = struct {
     highlighter: ?Highlighter = null,
     /// Decorations by owner (see `setDecorations`).
     decos: [deco_owners]std.ArrayListUnmanaged(Decoration) = @splat(.empty),
+    /// Gutter marks by owner (see `setGutterMarks`).
+    marks: [deco_owners]std.ArrayListUnmanaged(Mark) = @splat(.empty),
+    /// The line (0-based) of the latest click in the marks column, for `on_gutter`.
+    gutter_click_line: usize = 0,
     deco_max_len: [deco_owners]usize = @splat(0),
     /// Folded regions, sorted by `start`, never overlapping.
     folds: std.ArrayListUnmanaged(Fold) = .empty,
@@ -161,6 +175,7 @@ pub const CodeEditor = struct {
         if (self.highlighter) |*h| h.deinit();
         self.spans.deinit(self.ui.gpa);
         for (&self.decos) |*d| d.deinit(self.ui.gpa);
+        for (&self.marks) |*m| m.deinit(self.ui.gpa);
         self.folds.deinit(self.ui.gpa);
         self.editor.deinit();
         self.releaseFile(true);
@@ -287,8 +302,11 @@ pub const CodeEditor = struct {
         line_numbers: bool = true,
         auto_indent: bool = true,
         folding: bool = false,
+        /// A marks column at the left of the gutter (see `setGutterMarks`; clicks call `on_gutter`).
+        gutter_marks: bool = false,
         on_change: ?event.Callback = null,
         on_find: ?event.Callback = null,
+        on_gutter: ?event.Callback = null,
         on_key: ?event.Callback = null,
         on_edit: ?event.Callback = null,
         colors: ?EditorColors = null,
@@ -362,6 +380,8 @@ pub const CodeEditor = struct {
             .enabled = o.enabled,
             .read_only = o.read_only,
             .line_numbers = o.line_numbers,
+            .gutter_marks = o.gutter_marks,
+            .on_gutter = o.on_gutter,
             .auto_indent = o.auto_indent,
             .on_change = o.on_change,
             .on_find = o.on_find,
@@ -461,6 +481,7 @@ pub const CodeEditor = struct {
         const node = self.ui.tree.get(self.node).?;
         const pad = layout_mod.resolveEdges(node.style.padding, null);
         var gutter: f32 = 0;
+        if (self.props.gutter_marks) gutter += mark_w;
         if (self.props.folding) gutter += fold_w;
         if (self.props.line_numbers) {
             var digits: usize = 3;
@@ -1011,6 +1032,81 @@ pub const CodeEditor = struct {
         self.repaint = true;
     }
 
+    /// Replace owner `owner`'s gutter marks (needs `gutter_marks`). Lines are 0-based.
+    pub fn setGutterMarks(self: *CodeEditor, owner: u8, items: []const Mark) !void {
+        std.debug.assert(owner < deco_owners);
+        const list = &self.marks[owner];
+        list.clearRetainingCapacity();
+        try list.appendSlice(self.ui.gpa, items);
+        self.repaint = true;
+    }
+
+    pub fn clearGutterMarks(self: *CodeEditor, owner: u8) void {
+        std.debug.assert(owner < deco_owners);
+        if (self.marks[owner].items.len == 0) return;
+        self.marks[owner].clearRetainingCapacity();
+        self.repaint = true;
+    }
+
+    /// The line of a point in the marks column (relative to the node's top-left), if it is in it.
+    fn markColumnLine(self: *CodeEditor, local_x: f32, local_y: f32) ?usize {
+        if (!self.props.gutter_marks) return null;
+        const m = self.metrics() orelse return null;
+        const geo = self.geometry(m);
+        if (local_x < geo.pad.l or local_x >= geo.pad.l + mark_w) return null;
+        const rel_y = local_y - geo.pad.t + self.scroll_y;
+        if (rel_y < 0) return null;
+        const line = self.lineAtRow(@intFromFloat(rel_y / m.line_h));
+        return if (line < self.editor.doc.lineCount()) line else null;
+    }
+
+    /// The center of display row `row`'s mark cell, relative to the node's top-left (for hosts that script or test clicks on it).
+    pub fn markCellAt(self: *CodeEditor, row: usize) ?struct { x: f32, y: f32 } {
+        const m = self.metrics() orelse return null;
+        const geo = self.geometry(m);
+        if (!self.props.gutter_marks) return null;
+        return .{ .x = geo.pad.l + mark_w / 2, .y = geo.pad.t + (@as(f32, @floatFromInt(row)) + 0.5) * m.line_h - self.scroll_y };
+    }
+
+    fn drawMarks(self: *CodeEditor, list: *DrawList, m: Metrics, gutter: Rect, row_y: f32, line: usize) draw_list.Error!void {
+        var best: ?MarkKind = null;
+        for (self.marks) |ml| {
+            for (ml.items) |mk| {
+                if (mk.line != line) continue;
+                // An arrow shows over a breakpoint on the same line.
+                if (best == null or mk.kind == .arrow) best = mk.kind;
+            }
+        }
+        const kind = best orelse return;
+        const colors = self.palette();
+        const cx = gutter.x + mark_w / 2;
+        const cy = row_y + m.line_h / 2;
+        const r: f32 = @min(m.line_h * 0.32, 5);
+        switch (kind) {
+            .breakpoint => try list.fillRoundedRect(.{ .x = cx - r, .y = cy - r, .w = r * 2, .h = r * 2 }, .{ r, r, r, r }, Paint.solid(colors.mark_breakpoint)),
+            .breakpoint_disabled => {
+                try list.fillRoundedRect(.{ .x = cx - r, .y = cy - r, .w = r * 2, .h = r * 2 }, .{ r, r, r, r }, Paint.solid(colors.mark_dim));
+                try list.fillRoundedRect(.{ .x = cx - r + 1.5, .y = cy - r + 1.5, .w = r * 2 - 3, .h = r * 2 - 3 }, .{ r, r, r, r }, Paint.solid(colors.gutter_background));
+            },
+            .breakpoint_unverified => {
+                try list.fillRoundedRect(.{ .x = cx - r, .y = cy - r, .w = r * 2, .h = r * 2 }, .{ r, r, r, r }, Paint.solid(colors.mark_breakpoint));
+                try list.fillRoundedRect(.{ .x = cx - r + 1.5, .y = cy - r + 1.5, .w = r * 2 - 3, .h = r * 2 - 3 }, .{ r, r, r, r }, Paint.solid(colors.gutter_background));
+            },
+            .breakpoint_conditional => {
+                // A diamond: four short lines make a filled-looking marker.
+                const paint = Paint.solid(colors.mark_breakpoint);
+                try list.fillRoundedRect(.{ .x = cx - r, .y = cy - r, .w = r * 2, .h = r * 2 }, .{ 2, 2, 2, 2 }, paint);
+                try list.fillRect(.{ .x = cx - 1, .y = cy - 1, .w = 2, .h = 2 }, Paint.solid(colors.gutter_background));
+            },
+            .arrow => {
+                const paint = Paint.solid(colors.mark_arrow);
+                try list.line(.{ .x = cx - 5, .y = cy }, .{ .x = cx + 4, .y = cy }, 2, paint);
+                try list.line(.{ .x = cx + 4, .y = cy }, .{ .x = cx, .y = cy - 4 }, 2, paint);
+                try list.line(.{ .x = cx + 4, .y = cy }, .{ .x = cx, .y = cy + 4 }, 2, paint);
+            },
+        }
+    }
+
     pub fn clearDecorations(self: *CodeEditor, owner: u8) void {
         std.debug.assert(owner < deco_owners);
         if (self.decos[owner].items.len == 0) return;
@@ -1113,7 +1209,7 @@ pub const CodeEditor = struct {
                 const d = ds.items[i];
                 if (d.end < ls or d.end == d.start) continue;
                 const is_bg = switch (d.kind) {
-                    .highlight, .current, .error_line, .warning_line, .note_line, .added_line => true,
+                    .highlight, .current, .error_line, .warning_line, .note_line, .added_line, .exec_line => true,
                     else => false,
                 };
                 if (is_bg != backgrounds) continue;
@@ -1125,8 +1221,9 @@ pub const CodeEditor = struct {
                 switch (d.kind) {
                     .highlight => try list.fillRect(.{ .x = x0, .y = row_y, .w = x1 - x0, .h = m.line_h }, Paint.solid(colors.find_match)),
                     .current => try list.fillRect(.{ .x = x0, .y = row_y, .w = x1 - x0, .h = m.line_h }, Paint.solid(colors.find_current)),
-                    .error_line, .warning_line, .note_line, .added_line => {
+                    .error_line, .warning_line, .note_line, .added_line, .exec_line => {
                         const tint = switch (d.kind) {
+                            .exec_line => colors.line_exec,
                             .error_line => colors.line_error,
                             .warning_line => colors.line_warning,
                             .added_line => colors.line_added,
@@ -1265,7 +1362,7 @@ pub const CodeEditor = struct {
             }
         }
 
-        if ((self.props.line_numbers or self.props.folding) and geo.gutter_w > 0) {
+        if ((self.props.line_numbers or self.props.folding or self.props.gutter_marks) and geo.gutter_w > 0) {
             const gutter: Rect = .{ .x = abs.x + geo.pad.l, .y = abs.y + geo.pad.t, .w = geo.gutter_w, .h = geo.view_h };
             try list.pushClip(gutter);
             defer _ = list.popClip() catch {};
@@ -1275,6 +1372,7 @@ pub const CodeEditor = struct {
                 const line = self.lineAtRow(row);
                 if (line > last_line) break;
                 const row_y = gutter.y + @as(f32, @floatFromInt(row)) * m.line_h - self.scroll_y;
+                if (self.props.gutter_marks) try self.drawMarks(list, m, gutter, row_y, line);
                 if (self.props.folding) try self.drawFoldArrow(list, m, gutter, row_y, line);
                 if (!self.props.line_numbers) continue;
                 const s = std.fmt.bufPrint(&self.number_buf, "{d}", .{line + 1}) catch continue;
@@ -1398,6 +1496,12 @@ pub const CodeEditor = struct {
                             return;
                         }
                     }
+                }
+                if (self.markColumnLine(ev.local_x, ev.local_y)) |ml| {
+                    self.gutter_click_line = ml;
+                    if (self.props.on_gutter) |cb| cb.invoke(ev);
+                    ev.markHandled();
+                    return;
                 }
                 if (self.props.folding) {
                     if (self.foldColumnLine(ev.local_x, ev.local_y)) |fl| {
@@ -1693,6 +1797,10 @@ pub const CodeEditor = struct {
         read_only: bool = false,
         line_numbers: bool = true,
         auto_indent: bool = true,
+        /// A marks column at the left of the gutter (see `setGutterMarks`).
+        gutter_marks: bool = false,
+        /// A click in the marks column (the 0-based line is `CodeEditor.gutter_click_line`).
+        on_gutter: ?event.Callback = null,
         /// Fold arrows in the gutter and fold commands (regions come from indentation).
         folding: bool = false,
         /// Called after each user edit (typing, deleting, paste, undo/redo).
@@ -1713,6 +1821,7 @@ pub const CodeEditor = struct {
             .enabled = shadow.Category.paint,
             .read_only = shadow.Category.paint,
             .line_numbers = shadow.Category.paint,
+            .gutter_marks = shadow.Category.paint,
         };
     };
 
@@ -1755,6 +1864,41 @@ fn longEditor(r: *Rig) !*CodeEditor {
     r.ui.setFocus(ed.node);
     try r.frame();
     return ed;
+}
+
+const GutterHolder = struct {
+    ed: *CodeEditor,
+    line: ?usize = null,
+    fn on(self: *GutterHolder, _: *event.Event) void {
+        self.line = self.ed.gutter_click_line;
+    }
+};
+
+test "gutter marks draw per owner, a click in the marks column reports its line, and the arrow wins over a breakpoint" {
+    const r = try Rig.init();
+    defer r.deinit();
+    var holder: GutterHolder = .{ .ed = undefined };
+    const ed = try r.ui.add(CodeEditor, r.ui.tree.root, .{ .style = .{ .grow = 1 }, .label = "t", .gutter_marks = true, .on_gutter = .bind(&holder, GutterHolder.on) });
+    holder.ed = ed;
+    try ed.loadText(try r.ui.gpa.dupe(u8, "a\nb\nc\nd\n"), true);
+    try r.frame();
+    try ed.setGutterMarks(1, &.{ .{ .line = 1, .kind = .breakpoint }, .{ .line = 2, .kind = .breakpoint_unverified } });
+    try ed.setGutterMarks(2, &.{.{ .line = 1, .kind = .arrow }});
+    try r.frame();
+    try std.testing.expectEqual(@as(usize, 2), ed.marks[1].items.len);
+    // The marks column widens the gutter and takes the click (the caret does not move).
+    const cell = ed.markCellAt(2).?;
+    const abs = r.ui.tree.absoluteRect(ed.node).?;
+    r.ui.pointerMove(abs.x + cell.x, abs.y + cell.y);
+    r.ui.pointerButtonEx(abs.x + cell.x, abs.y + cell.y, 1, true, 1);
+    r.ui.pointerButtonEx(abs.x + cell.x, abs.y + cell.y, 1, false, 1);
+    try std.testing.expectEqual(@as(?usize, 2), holder.line);
+    try std.testing.expectEqual(@as(usize, 0), ed.core().doc.lineOfOffset(ed.core().primaryHead()));
+    ed.clearGutterMarks(1);
+    try std.testing.expectEqual(@as(usize, 0), ed.marks[1].items.len);
+    // exec_line is a whole-line decoration like the build output tints.
+    try ed.setDecorations(3, &.{.{ .start = 2, .end = 3, .kind = .exec_line }});
+    try r.frame();
 }
 
 test "wheel scrolling away from the caret sticks, even while an IME reports empty compositions" {
