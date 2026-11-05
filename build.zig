@@ -30,6 +30,10 @@ fn makeLibs(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
     };
     const core = if (exported) b.addModule("zigui", core_opts) else b.createModule(core_opts);
     core.addOptions("build_options", options);
+    // The comptime debugger's build script and patch ship inside the IDE (`dap/zigct.zig`
+    // writes them out when the user asks for zigct), so a project needs no copy of this repo.
+    core.addAnonymousImport("zigct_build_sh", .{ .root_source_file = b.path("tools/zigct/build.sh") });
+    core.addAnonymousImport("zigct_patch_0001", .{ .root_source_file = b.path("tools/zigct/patches/0.17.0/0001-zigct-comptime-debugger.patch") });
 
     // SDL3 platform shim. Kept out of the core module so core and its tests
     // never need SDL. Requires the SDL3 development files on the system.

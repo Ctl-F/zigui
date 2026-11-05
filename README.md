@@ -487,6 +487,12 @@ examples/              demo.zig (IDE-style demo), dedit.zig (minimal editor)
   boundaries, local declarations, body entry/exit (frames) and errors; AstGen is
   patched to emit `dbg_stmt`/`dbg_var` in comptime scopes, so zigct always uses its
   own cache. Golden transcripts in `test/ct/` (skipped when zigct is not built).
+  IDE side (CT-2): `comptime_scan.zig` finds the `comptime` block under the caret with
+  `std.zig.Ast` and writes a two-line synthetic root (`.zigct-root.zig` in the project
+  folder, so the project is one module; removed at the end); `Debugger.startComptime`
+  spawns zigct and starts a `Session` with raw launch arguments; the panels are shared.
+  The build script and patch are embedded in the IDE (anonymous imports) and written out
+  by Zig > Build Comptime Debugger. Alt+F5.
 - Move lines: `Editor.moveLines(delta, now)` swaps the lines of a single selection with
   its neighbour (Alt+Up/Down, also Ctrl+Alt); adding a cursor moved to
   Ctrl+Alt+Shift+Up/Down. Handles a last line without a terminator and CRLF.

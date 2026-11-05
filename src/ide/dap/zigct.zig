@@ -33,6 +33,27 @@ pub fn find(gpa: std.mem.Allocator, io: std.Io, environ: ?*const std.process.Env
     return path;
 }
 
+const build_sh = @embedFile("zigct_build_sh");
+const patch_0001 = @embedFile("zigct_patch_0001");
+
+/// Write the build script and its patch under `~/.cache/zigui-ide/zigct/tool/` and return the
+/// script's path (run it with `sh`): zigct is built from the official source on request.
+pub fn installTool(gpa: std.mem.Allocator, io: std.Io, environ: ?*const std.process.Environ.Map) ![]u8 {
+    const home = (environ orelse return error.NoHome).get("HOME") orelse return error.NoHome;
+    const dir = try std.fmt.allocPrint(gpa, "{s}/.cache/zigui-ide/zigct/tool", .{home});
+    defer gpa.free(dir);
+    const patches = try std.fmt.allocPrint(gpa, "{s}/patches/{s}", .{ dir, version });
+    defer gpa.free(patches);
+    try std.Io.Dir.cwd().createDirPath(io, patches);
+    const script = try std.fmt.allocPrint(gpa, "{s}/build.sh", .{dir});
+    errdefer gpa.free(script);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = script, .data = build_sh });
+    const patch_path = try std.fmt.allocPrint(gpa, "{s}/0001-zigct-comptime-debugger.patch", .{patches});
+    defer gpa.free(patch_path);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = patch_path, .data = patch_0001 });
+    return script;
+}
+
 // ---- the scripted driver ----
 
 pub const Driver = struct {
@@ -340,4 +361,35 @@ test "zigct: stop at a compile error before the stack unwinds" {
 
 test "zigct: a target block in another file, entry stop, the session ends with the block" {
     try golden("target");
+}
+
+test "the build script and the patch are embedded" {
+    try testing.expect(std.mem.startsWith(u8, build_sh, "#!/bin/sh"));
+    try testing.expect(std.mem.indexOf(u8, patch_0001, "zct_hook.zig") != null);
+}
+
+test "installTool writes the build script and the patch where the script expects them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try std.process.currentPathAlloc(io, gpa);
+    defer gpa.free(cwd);
+    const home = try std.fmt.allocPrint(gpa, "{s}/.zig-cache/tmp/{s}", .{ cwd, tmp.sub_path });
+    defer gpa.free(home);
+    var env = std.process.Environ.Map.init(gpa);
+    defer env.deinit();
+    try env.put("HOME", home);
+    const script = try installTool(gpa, io, &env);
+    defer gpa.free(script);
+    try testing.expect(std.mem.endsWith(u8, script, "/zigct/tool/build.sh"));
+    const sh = try std.Io.Dir.cwd().readFileAlloc(io, script, gpa, .limited(1 << 20));
+    defer gpa.free(sh);
+    try testing.expectEqualStrings(build_sh, sh);
+    const dir = std.fs.path.dirname(script).?;
+    const pp = try std.fmt.allocPrint(gpa, "{s}/patches/0.17.0/0001-zigct-comptime-debugger.patch", .{dir});
+    defer gpa.free(pp);
+    const patch = try std.Io.Dir.cwd().readFileAlloc(io, pp, gpa, .limited(1 << 22));
+    defer gpa.free(patch);
+    try testing.expectEqualStrings(patch_0001, patch);
 }

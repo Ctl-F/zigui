@@ -75,6 +75,9 @@ pub const Launch = struct {
     stop_on_entry: bool = false,
     /// Which adapter: they spell a few launch arguments differently.
     gdb: bool = false,
+    /// A comptime session (`zigct`): the JSON object sent as `launch` arguments, as is (see
+    /// `zigct.zig`); `program` and the fields above are not used.
+    raw_launch: []const u8 = "",
 };
 
 pub const ChangeHook = struct {
@@ -139,6 +142,7 @@ pub const Session = struct {
         env: [][]u8,
         stop_on_entry: bool,
         gdb: bool,
+        raw: []u8,
     };
 
     pub fn create(gpa: std.mem.Allocator, send: client_mod.Send) !*Session {
@@ -177,6 +181,7 @@ pub const Session = struct {
         for (l.args) |a| self.gpa.free(a);
         self.gpa.free(l.args);
         self.gpa.free(l.cwd);
+        self.gpa.free(l.raw);
         for (l.env) |a| self.gpa.free(a);
         self.gpa.free(l.env);
         self.launch = null;
@@ -184,6 +189,12 @@ pub const Session = struct {
 
     fn changed(self: *Session) void {
         if (self.on_change) |h| h.call(h.ctx);
+    }
+
+    /// A comptime session (zigct) rather than a runtime one.
+    pub fn isComptime(self: *const Session) bool {
+        const l = self.launch orelse return false;
+        return l.raw.len > 0;
     }
 
     pub fn active(self: *const Session) bool {
@@ -241,6 +252,7 @@ pub const Session = struct {
             .env = env,
             .stop_on_entry = l.stop_on_entry,
             .gdb = l.gdb,
+            .raw = try self.gpa.dupe(u8, l.raw_launch),
         };
         self.client.reset();
         for (self.bp_requests.items) |r| self.gpa.free(r.file);
@@ -276,6 +288,12 @@ pub const Session = struct {
         const l = self.launch orelse return;
         const cwd: ?[]const u8 = if (l.cwd.len > 0) l.cwd else null;
         const hook = client_mod.ResponseHook.bind(self, onLaunch);
+        if (l.raw.len > 0) {
+            var parsed = std.json.parseFromSlice(std.json.Value, self.gpa, l.raw, .{}) catch return self.fail("the comptime launch arguments are not valid JSON");
+            defer parsed.deinit();
+            _ = self.client.request("launch", parsed.value, hook) catch self.fail("could not send launch");
+            return;
+        }
         const sent = if (l.gdb)
             // GDB's DAP: no `env` array, and the entry stop is spelled differently.
             self.client.request("launch", .{ .program = l.program, .args = l.args, .cwd = cwd, .stopAtBeginningOfMainSubprogram = l.stop_on_entry }, hook)
@@ -393,7 +411,9 @@ pub const Session = struct {
             self.state = .terminated;
             self.dropSnapshot();
             var buf: [96]u8 = undefined;
-            if (self.exit_code) |c| self.say(std.fmt.bufPrint(&buf, "[the program exited with code {d}]", .{c}) catch "[the program ended]") else self.say("[the program ended]");
+            if (self.isComptime()) {
+                self.say(if ((self.exit_code orelse 0) == 0) "[the comptime run finished]" else "[the compilation failed: the compiler's messages are above]");
+            } else if (self.exit_code) |c| self.say(std.fmt.bufPrint(&buf, "[the program exited with code {d}]", .{c}) catch "[the program ended]") else self.say("[the program ended]");
             self.changed();
         } else if (std.mem.eql(u8, name, "breakpoint")) {
             self.onBreakpointEvent(body);

@@ -32,6 +32,7 @@ const default_bindings = [_][2][]const u8{
     .{ "f10", "debug.step_over" },
     .{ "f11", "debug.step_in" },
     .{ "shift+f11", "debug.step_out" },
+    .{ "alt+f5", "debug.comptime_here" },
     .{ "mod+b", "ide.build" },
     .{ "ctrl+shift+f6", "ide.restart" },
     .{ "ctrl+shift+f5", "ide.build_restart" },
@@ -139,6 +140,9 @@ const App = struct {
     debug_after_build: bool = false,
     debug_stop_seen: u32 = 0,
     debug_ready: bool = false,
+    /// The Zig in use ("0.17.0") and its `lib` directory: the comptime debugger needs both.
+    zig_version: []const u8 = "",
+    zig_lib_dir: []const u8 = "",
     terminal_panel: *zigui.dock.Panel = undefined,
     files_panel: *zigui.dock.Panel = undefined,
     search_panel: *zigui.dock.Panel = undefined,
@@ -269,11 +273,57 @@ const App = struct {
         };
     }
 
+    /// Alt+F5: debug the `comptime` block under the cursor with zigct.
+    fn debugComptime(self: *App) void {
+        const s = self.dbg.session;
+        if (s.active()) return self.setStatus("a debug session is already running", .{});
+        self.showPanel(self.debug_dock_panel);
+        self.dbgp.clearConsole();
+        const d = self.docs.active() orelse return self.refuseComptime("open a .zig file and put the cursor in a comptime block");
+        if (!std.mem.endsWith(u8, d.path, ".zig")) return self.refuseComptime("the cursor is not in a .zig file");
+        if (!std.mem.eql(u8, self.zig_version, "0.17.0")) return self.refuseComptime("comptime debugging needs Zig 0.17.0 (see Zig > Switch Zig Version)");
+        _ = self.docs.saveAll(); // the compiler reads the files from disk
+        const ed = d.editor.core();
+        const text = ed.doc.textAlloc(self.gpa, 0, ed.doc.len()) catch return;
+        defer self.gpa.free(text);
+        const src = self.gpa.dupeSentinel(u8, text, 0) catch return;
+        defer self.gpa.free(src);
+        var b = (ide.comptime_scan.findBlock(self.gpa, src, ed.primaryHead()) catch null) orelse
+            return self.refuseComptime("the cursor is not inside a comptime block (or the file has syntax errors)");
+        defer b.deinit();
+        if (b.problem.len > 0) return self.refuseComptime(b.problem);
+        const abs = self.docAbs(d.path) orelse return;
+        defer self.gpa.free(abs);
+        self.setStatus("debugging the comptime block at line {d}", .{b.start_line});
+        self.dbg.startComptime(.{ .file = abs, .start_line = b.start_line, .end_line = b.end_line, .fn_path = b.fn_path, .zig_lib_dir = self.zig_lib_dir }) catch |err| {
+            self.setStatus("could not start comptime debugging: {s}", .{@errorName(err)});
+        };
+    }
+
+    fn refuseComptime(self: *App, why: []const u8) void {
+        self.dbg.session.say(why);
+        self.setStatus("{s}", .{why});
+        self.dbgp.refresh();
+    }
+
+    /// Zig > Build Comptime Debugger: write zigct's build script out and run it in the Output panel.
+    fn buildZigct(self: *App) void {
+        if (self.output.running) return self.setStatus("another command is running in the Output panel", .{});
+        const script = ide.dap_zigct.installTool(self.gpa, self.io, self.environ) catch |err| return self.setStatus("could not write the zigct build script: {s}", .{@errorName(err)});
+        defer self.gpa.free(script);
+        self.showPanel(self.output_panel);
+        self.output.run(self.io, &.{ "sh", script }, self.project.root, sdl.wake) catch |err| {
+            self.setStatus("could not run the zigct build: {s}", .{@errorName(err)});
+        };
+    }
+
     fn debugCommand(self: *App, name: []const u8) void {
         const eq = std.mem.eql;
         const s = self.dbg.session;
         if (eq(u8, name, "debug.start")) {
             self.debugStart();
+        } else if (eq(u8, name, "debug.comptime_here")) {
+            self.debugComptime();
         } else if (eq(u8, name, "debug.stop")) {
             self.debug_after_build = false;
             self.dbg.stop();
@@ -619,6 +669,8 @@ const App = struct {
             self.zv.showSwitcher();
         } else if (eq(u8, name, "zig.install_version")) {
             self.zv.showInstaller();
+        } else if (eq(u8, name, "zig.build_zigct")) {
+            self.buildZigct();
         } else if (eq(u8, name, "zig.install_zls")) {
             self.zv.installZls();
         } else if (eq(u8, name, "zig.install_zvm")) {
@@ -1209,6 +1261,8 @@ pub fn main(init: std.process.Init) !void {
     try dock.dockTab(problems_panel, output_panel);
     const tests_panel = try dock.addPanel("Tests");
     app.tests_panel = tests_panel;
+    app.zig_version = zig_version;
+    app.zig_lib_dir = if (std_dir) |sd| (std.fs.path.dirname(sd) orelse "") else "";
     app.testp = try ide.TestPanel.create(&ui, tests_panel.content, io, &project, .{
         .on_open = ide.output_panel.OpenHook.bind(&app, App.openAt),
         .wake = sdl.wake,
@@ -1296,6 +1350,8 @@ pub fn main(init: std.process.Init) !void {
         .{ "ide.run", "Run Without Debugging" },
         .{ "debug.start", "Start Debugging / Continue" },
         .{ "debug.stop", "Stop Debugging" },
+        .{ "debug.comptime_here", "Debug Comptime Block at Cursor" },
+        .{ "zig.build_zigct", "Build Comptime Debugger (zigct)" },
         .{ "debug.toggle_breakpoint", "Toggle Breakpoint" },
         .{ "debug.step_over", "Step Over" },
         .{ "debug.step_in", "Step Into" },
@@ -1383,6 +1439,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "Start Debugging / Continue", .command = "debug.start" },
         .{ .label = "Run Without Debugging", .command = "ide.run" },
         .{ .label = "Stop Debugging", .command = "debug.stop" },
+        .{ .label = "Debug Comptime Block at Cursor", .command = "debug.comptime_here" },
         .{ .separator = true },
         .{ .label = "Step Over", .command = "debug.step_over" },
         .{ .label = "Step Into", .command = "debug.step_in" },
@@ -1396,6 +1453,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "Switch Zig Version...", .command = "zig.switch_version" },
         .{ .label = "Install Zig Version...", .command = "zig.install_version" },
         .{ .label = "Install ZLS for This Zig Version", .command = "zig.install_zls" },
+        .{ .label = "Build Comptime Debugger (zigct)", .command = "zig.build_zigct" },
         .{ .separator = true },
         .{ .label = "Install ZVM...", .command = "zig.install_zvm" },
     }, null);

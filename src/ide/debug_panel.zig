@@ -85,7 +85,7 @@ pub const DebugPanel = struct {
         const into_btn = try ui.add(Button, bar, .{ .text = "Step In", .variant = .flat, .style = .{ .padding = pad }, .on_click = .bind(self, onInto) });
         const out_btn = try ui.add(Button, bar, .{ .text = "Step Out", .variant = .flat, .style = .{ .padding = pad }, .on_click = .bind(self, onOut) });
         const stop_btn = try ui.add(Button, bar, .{ .text = "Stop", .variant = .flat, .style = .{ .padding = pad }, .on_click = .bind(self, onStop) });
-        const status = try ui.add(Label, bar, .{ .text = "Not debugging. F5 builds and starts the program; F9 sets a breakpoint.", .style = .{ .grow = 1, .padding = Edges.xy(8, 0) } });
+        const status = try ui.add(Label, bar, .{ .text = "Not debugging. F5 builds and starts the program; F9 sets a breakpoint; Alt+F5 debugs a comptime block.", .style = .{ .grow = 1, .padding = Edges.xy(8, 0) } });
 
         const split = try ui.tree.create(.{ .style = .{ .direction = .row, .gap = Length.px(6), .grow = 1 } });
         try ui.tree.appendChild(node, split);
@@ -171,18 +171,23 @@ pub const DebugPanel = struct {
     fn updateStatus(self: *DebugPanel) void {
         const s = self.session();
         var buf: [300]u8 = undefined;
-        const text: []const u8 = switch (s.state) {
+        var buf2: [340]u8 = undefined;
+        const text0: []const u8 = switch (s.state) {
             .idle => "Not debugging. F5 builds and starts the program; F9 sets a breakpoint.",
             .starting => "Starting the debugger...",
             .running => "Running...",
             .stopped => std.fmt.bufPrint(&buf, "Stopped ({s}{s}{s})", .{ s.stop_reason, if (s.stop_text.len > 0) ": " else "", s.stop_text }) catch "Stopped",
             .terminated => if (s.failure.len > 0)
                 std.fmt.bufPrint(&buf, "Ended: {s}", .{s.failure}) catch "Ended"
+            else if (s.isComptime())
+                (if ((s.exit_code orelse 0) == 0) "The comptime run finished" else "The compilation failed")
             else if (s.exit_code) |c|
                 std.fmt.bufPrint(&buf, "The program exited with code {d}", .{c}) catch "The program exited"
             else
                 "The debug session ended",
         };
+        // A compile-time session is never to be taken for a runtime one.
+        const text = if (s.isComptime() and s.state != .idle) (std.fmt.bufPrint(&buf2, "Compile-time debug (zigct): {s}", .{text0}) catch text0) else text0;
         self.status.setText(text) catch {};
     }
 
@@ -316,7 +321,7 @@ pub const DebugPanel = struct {
             // A frame with nothing to show (or no debug information for its locals).
             if (self.vars.childCount(tree_view.no_item) > 0) {
                 const first = self.vars.childAt(tree_view.no_item, 0);
-                const note = self.vars.addItem(first, "(no variables reported: the debug info may not describe locals, see the debugging docs)") catch return;
+                const note = self.vars.addItem(first, if (s.isComptime()) "(no locals declared yet in this frame)" else "(no variables reported: the debug info may not describe locals, see the debugging docs)") catch return;
                 self.vars.setUserData(note, no_code);
             }
         }

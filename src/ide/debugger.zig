@@ -28,10 +28,28 @@ const process = @import("../platform/process.zig");
 const zon = @import("../uidoc/zon.zig");
 const project_mod = @import("project.zig");
 const adapters = @import("dap/adapters.zig");
+const zigct = @import("dap/zigct.zig");
+const comptime_scan = @import("comptime_scan.zig");
 const session_mod = @import("dap/session.zig");
 const Session = session_mod.Session;
 
 pub const config_path = ".zigide/debug.zon";
+
+/// The small file that makes the compiler evaluate a comptime block (in the project root, so the
+/// whole project is one module; deleted when the session ends).
+pub const comptime_root = ".zigct-root.zig";
+
+pub const ComptimeOptions = struct {
+    /// The file with the block (absolute) and the block's 1-based lines.
+    file: []const u8,
+    start_line: u32,
+    end_line: u32,
+    /// What the block needs referenced (`comptime_scan.Block.fn_path`).
+    fn_path: []const u8 = "",
+    /// The Zig installation's `lib` directory (the compiler reads `std` from there).
+    zig_lib_dir: []const u8,
+    stop_on_entry: bool = true,
+};
 
 pub const Options = struct {
     wake: ?*const fn () void = null,
@@ -76,6 +94,8 @@ pub const Debugger = struct {
     now_ms: u64 = 0,
     batch: std.ArrayListUnmanaged(process.Event) = .empty,
     on_change: ?session_mod.ChangeHook = null,
+    /// The synthetic root of a comptime session, removed when it ends.
+    ct_root_written: bool = false,
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, project: *const project_mod.Project, environ: ?*const std.process.Environ.Map, opts: Options) !*Debugger {
         const self = try gpa.create(Debugger);
@@ -101,6 +121,7 @@ pub const Debugger = struct {
 
     pub fn destroy(self: *Debugger) void {
         self.save();
+        self.removeComptimeRoot();
         if (self.runner) |r| r.destroy();
         for (self.batch.items) |*e| e.deinit(self.gpa);
         self.batch.deinit(self.gpa);
@@ -176,6 +197,65 @@ pub const Debugger = struct {
         try self.session.start(.{ .program = program, .args = opts.args, .cwd = cwd, .env = opts.env, .stop_on_entry = opts.stop_on_entry, .gdb = a.kind == .gdb });
     }
 
+    /// Debug one `comptime` block with zigct (see `dap/zigct.zig`). Problems are put in the console
+    /// and `failure`, and returned.
+    pub fn startComptime(self: *Debugger, opts: ComptimeOptions) !void {
+        if (self.session.active()) return;
+        const ct = zigct.find(self.gpa, self.io, self.environ) orelse {
+            self.refuse("the comptime debugger (zigct) is not built: use Zig > Build Comptime Debugger, or run tools/zigct/build.sh");
+            return error.NoZigct;
+        };
+        defer self.gpa.free(ct);
+        const rel = self.project.relPath(opts.file) orelse {
+            self.refuse("the block is outside the project");
+            return error.OutsideProject;
+        };
+        const root_src = try comptime_scan.rootSource(self.gpa, rel, opts.fn_path);
+        defer self.gpa.free(root_src);
+        try self.project.writeFile(comptime_root, root_src);
+        self.ct_root_written = true;
+        const root_abs = try self.project.absPath(self.gpa, comptime_root);
+        defer self.gpa.free(root_abs);
+        const home = if (self.environ) |e| e.get("HOME") orelse "/tmp" else "/tmp";
+        const cache = try std.fmt.allocPrint(self.gpa, "{s}/.cache/zigui-ide/zigct/cache", .{home});
+        defer self.gpa.free(cache);
+
+        const launch = try std.json.Stringify.valueAlloc(self.gpa, .{
+            .zigArgs = [_][]const u8{ root_abs, "--zig-lib-dir", opts.zig_lib_dir },
+            .sourceRoot = self.project.root,
+            .cacheDir = cache,
+            .stopOnEntry = opts.stop_on_entry,
+            .target = .{ .file = opts.file, .startLine = opts.start_line, .endLine = opts.end_line },
+        }, .{});
+        defer self.gpa.free(launch);
+
+        if (self.runner) |r| {
+            r.destroy();
+            self.runner = null;
+        }
+        self.runner = process.Runner.start(self.gpa, self.io, .{ .argv = &.{ ct, "dap-comptime" }, .cwd = self.project.root, .stdin = true, .wake = self.wake }) catch |err| {
+            self.removeComptimeRoot();
+            self.refuse("could not start zigct");
+            return err;
+        };
+        try self.session.start(.{ .program = "", .raw_launch = launch });
+    }
+
+    fn refuse(self: *Debugger, note: []const u8) void {
+        self.session.say(note);
+        self.session.failure = self.gpa.dupe(u8, note) catch &.{};
+        self.session.state = .terminated;
+        if (self.on_change) |h| h.call(h.ctx);
+    }
+
+    fn removeComptimeRoot(self: *Debugger) void {
+        if (!self.ct_root_written) return;
+        self.ct_root_written = false;
+        const abs = self.project.absPath(self.gpa, comptime_root) catch return;
+        defer self.gpa.free(abs);
+        std.Io.Dir.cwd().deleteFile(self.io, abs) catch {};
+    }
+
     /// Start with the run configuration from `debug.zon` (null `program` if there is none).
     pub fn startConfigured(self: *Debugger) !void {
         if (self.config.program.len == 0) return error.NoProgram;
@@ -219,6 +299,7 @@ pub const Debugger = struct {
                 self.runner = null;
             }
         }
+        if (self.ct_root_written and !self.session.active() and self.session.state != .starting) self.removeComptimeRoot();
         if (self.dirty and now_ms -% self.dirty_since_ms > 800) self.save();
     }
 
@@ -483,4 +564,87 @@ test "end to end against a real adapter: break in a Zig program, read the stack 
     }
     try testing.expect(saw_output);
     try testing.expectEqual(@as(?i64, 0), s.exit_code);
+}
+
+fn zigLibDir(gpa: std.mem.Allocator, io: std.Io) ?[]u8 {
+    const r = std.process.run(gpa, io, .{ .argv = &.{ "zig", "env" } }) catch return null;
+    defer gpa.free(r.stdout);
+    defer gpa.free(r.stderr);
+    const key = ".lib_dir = \"";
+    const i = std.mem.indexOf(u8, r.stdout, key) orelse return null;
+    const rest = r.stdout[i + key.len ..];
+    const j = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
+    return gpa.dupe(u8, rest[0..j]) catch null;
+}
+
+test "comptime session end to end: a block in a function of an imported file, breakpoint, step, locals, the synthetic root is removed" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var p = try project_mod.testProject(&tmp);
+    defer p.close();
+    try p.writeFile("src/util.zig",
+        \\pub fn two() u32 {
+        \\    return 2;
+        \\}
+        \\
+    );
+    try p.writeFile("src/lib.zig",
+        \\const util = @import("util.zig");
+        \\
+        \\pub fn run(n: u32) u32 {
+        \\    comptime {
+        \\        var k: u32 = 5;
+        \\        k += util.two();
+        \\        _ = &k;
+        \\    }
+        \\    return n;
+        \\}
+        \\
+    );
+    var env = try testing.environ.createMap(testing.allocator);
+    defer env.deinit();
+    const d = try Debugger.create(testing.allocator, testing.io, &p, &env, .{});
+    defer d.destroy();
+    const ct = zigct.find(testing.allocator, testing.io, &env) orelse {
+        std.debug.print("zigct is not built: skipping (tools/zigct/build.sh)\n", .{});
+        return error.SkipZigTest;
+    };
+    testing.allocator.free(ct);
+    const lib = zigLibDir(testing.allocator, testing.io) orelse return error.SkipZigTest;
+    defer testing.allocator.free(lib);
+
+    const abs = try p.absPath(testing.allocator, "src/lib.zig");
+    defer testing.allocator.free(abs);
+    try d.session.setBreakpoint(abs, 6, true, "");
+    try d.startComptime(.{ .file = abs, .start_line = 4, .end_line = 8, .fn_path = "run", .zig_lib_dir = lib });
+    try testing.expect(d.session.isComptime());
+    try pumpUntil(d, 30000, isStopped);
+    const s = d.session;
+    if (s.state != .stopped) {
+        for (s.console.items) |l| std.debug.print("console: {s}\n", .{l});
+        return error.TestUnexpectedResult;
+    }
+    // Stopped at the entry of the block (line 5), then the breakpoint on line 6.
+    try testing.expectEqualStrings("entry", s.stop_reason);
+    try testing.expectEqual(@as(u32, 5), s.frames[0].line);
+    try testing.expectEqualStrings("run", s.frames[0].name);
+    s.continueRun();
+    try pumpUntil(d, 30000, isStoppedAgain);
+    try testing.expectEqualStrings("breakpoint", s.stop_reason);
+    try testing.expectEqual(@as(u32, 6), s.frames[0].line);
+    const locals = s.variables(s.scopes[0].reference).?;
+    try testing.expectEqualStrings("k", locals[0].name);
+    try testing.expectEqualStrings("5", locals[0].value);
+    // The synthetic root exists while the session runs, and is gone when it ends.
+    try testing.expect(p.exists(comptime_root));
+    s.continueRun();
+    try pumpUntil(d, 30000, isTerminated);
+    try testing.expectEqual(session_mod.State.terminated, s.state);
+    d.poll(0);
+    try testing.expect(!p.exists(comptime_root));
+}
+
+fn isStoppedAgain(d: *Debugger) bool {
+    return d.session.state == .stopped and d.session.stop_count >= 2 and isStopped(d);
 }
